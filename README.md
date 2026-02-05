@@ -22,6 +22,9 @@ concurrency:
   group: ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   test:
     uses: abofs/stonyx-workflows/.github/workflows/ci.yml@main
@@ -76,6 +79,11 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
+
 jobs:
   publish:
     uses: abofs/stonyx-workflows/.github/workflows/npm-publish.yml@main
@@ -83,10 +91,6 @@ jobs:
       version-type: ${{ github.event.inputs.version-type }}
       custom-version: ${{ github.event.inputs.custom-version }}
     secrets: inherit
-    permissions:
-      contents: write
-      id-token: write
-      pull-requests: write
 ```
 
 **Inputs:**
