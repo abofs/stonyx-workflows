@@ -2,6 +2,15 @@ name: Reusable NPM Publish
 
 on:
   workflow_call:
+    secrets:
+      NPM_TOKEN:
+        required: false  # Using OIDC trusted publishing
+
+# Permissions required by this workflow
+permissions:
+  contents: write       # For git push and creating releases
+  id-token: write       # For npm OIDC trusted publishing
+  pull-requests: write  # For PR comments
     inputs:
       version-type:
         description: 'Version type for manual dispatch (patch/minor/major)'
