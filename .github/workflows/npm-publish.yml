@@ -178,7 +178,7 @@ jobs:
           tag_name: v${{ steps.package-version.outputs.version }}
           release_name: v${{ steps.package-version.outputs.version }}
           draft: false
-          prerelease: true
+          prerelease: false
 
       - name: Commit version bump and create tag (stable)
         if: github.event_name == 'workflow_dispatch' && !contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')
