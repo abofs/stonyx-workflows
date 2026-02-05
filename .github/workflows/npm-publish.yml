@@ -84,7 +84,7 @@ jobs:
         if: steps.version-type.outputs.type == 'alpha'
         run: |
           PKG_NAME=$(node -p "require('./package.json').name")
-          node -e "
+          NEXT_VERSION=$(node -e "
             const { execSync } = require('child_process');
             const pkg = '$PKG_NAME';
             let latestStable, allVersions;
@@ -95,6 +95,8 @@ jobs:
               latestStable = require('./package.json').version;
               allVersions = [];
             }
+            // Ensure allVersions is an array (npm returns string if only one version)
+            if (!Array.isArray(allVersions)) allVersions = [allVersions];
             const [maj, min, pat] = latestStable.split('.').map(Number);
             const nextPatch = maj + '.' + min + '.' + (pat + 1);
             const prefix = nextPatch + '-alpha.';
@@ -103,17 +105,17 @@ jobs:
               .map(v => parseInt(v.slice(prefix.length), 10))
               .filter(n => !isNaN(n));
             const next = existing.length ? Math.max(...existing) + 1 : 0;
-            const version = nextPatch + '-alpha.' + next;
-            require('fs').writeFileSync(process.env.GITHUB_OUTPUT, 'version=' + version + '\n', { flag: 'a' });
-          "
-          pnpm version ${{ steps.alpha-version.outputs.version }} --no-git-tag-version
+            console.log(nextPatch + '-alpha.' + next);
+          ")
+          echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          pnpm version $NEXT_VERSION --no-git-tag-version
 
       - name: Calculate next beta version
         id: beta-version
         if: steps.version-type.outputs.type == 'beta'
         run: |
           PKG_NAME=$(node -p "require('./package.json').name")
-          node -e "
+          NEXT_VERSION=$(node -e "
             const { execSync } = require('child_process');
             const pkg = '$PKG_NAME';
             let latestStable, allVersions;
@@ -124,6 +126,8 @@ jobs:
               latestStable = require('./package.json').version;
               allVersions = [];
             }
+            // Ensure allVersions is an array (npm returns string if only one version)
+            if (!Array.isArray(allVersions)) allVersions = [allVersions];
             const [maj, min, pat] = latestStable.split('.').map(Number);
             const nextPatch = maj + '.' + min + '.' + (pat + 1);
             const prefix = nextPatch + '-beta.';
@@ -132,10 +136,10 @@ jobs:
               .map(v => parseInt(v.slice(prefix.length), 10))
               .filter(n => !isNaN(n));
             const next = existing.length ? Math.max(...existing) + 1 : 0;
-            const version = nextPatch + '-beta.' + next;
-            require('fs').writeFileSync(process.env.GITHUB_OUTPUT, 'version=' + version + '\n', { flag: 'a' });
-          "
-          pnpm version ${{ steps.beta-version.outputs.version }} --no-git-tag-version
+            console.log(nextPatch + '-beta.' + next);
+          ")
+          echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          pnpm version $NEXT_VERSION --no-git-tag-version
 
       - name: Bump version (patch/minor/major)
         if: steps.version-type.outputs.type == 'patch' || steps.version-type.outputs.type == 'minor' || steps.version-type.outputs.type == 'major'
