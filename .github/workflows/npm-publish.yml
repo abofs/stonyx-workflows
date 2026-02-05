@@ -2,15 +2,6 @@ name: Reusable NPM Publish
 
 on:
   workflow_call:
-    secrets:
-      NPM_TOKEN:
-        required: false  # Using OIDC trusted publishing
-
-# Permissions required by this workflow
-permissions:
-  contents: write       # For git push and creating releases
-  id-token: write       # For npm OIDC trusted publishing
-  pull-requests: write  # For PR comments
     inputs:
       version-type:
         description: 'Version type for manual dispatch (patch/minor/major)'
@@ -28,22 +19,24 @@ permissions:
         description: 'pnpm version'
         type: string
         default: '9'
+    secrets:
+      NPM_TOKEN:
+        required: false
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-      id-token: write
-      pull-requests: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
-          # For PR events, check out the PR branch
           ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
 
       - name: Setup pnpm
@@ -69,7 +62,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # Determine version type based on trigger
       - name: Determine version bump type
         id: version-type
         run: |
@@ -83,7 +75,6 @@ jobs:
             echo "type=${{ inputs.version-type }}" >> $GITHUB_OUTPUT
           fi
 
-      # Version bumping
       - name: Bump version (custom)
         if: steps.version-type.outputs.type == 'custom'
         run: pnpm version ${{ inputs.custom-version }} --no-git-tag-version
@@ -154,7 +145,6 @@ jobs:
         id: package-version
         run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
 
-      # Publishing
       - name: Publish to NPM (alpha)
         if: contains(steps.package-version.outputs.version, 'alpha')
         run: pnpm publish --tag alpha --access public --no-git-checks
@@ -167,7 +157,6 @@ jobs:
         if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
         run: pnpm publish --access public
 
-      # Commit beta version bump back to main (no tag — beta is not a stable release)
       - name: Commit version bump (beta)
         if: github.event_name == 'push'
         run: |
@@ -175,7 +164,6 @@ jobs:
           git commit -m "chore: release v${{ steps.package-version.outputs.version }}"
           git push origin main
 
-      # Commit, tag, and push for stable releases (manual dispatch only)
       - name: Commit version bump and create tag (stable)
         if: github.event_name == 'workflow_dispatch' && !contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')
         run: |
@@ -195,7 +183,6 @@ jobs:
           draft: false
           prerelease: false
 
-      # Add PR comment with alpha version info
       - name: Comment on PR with alpha version
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v6

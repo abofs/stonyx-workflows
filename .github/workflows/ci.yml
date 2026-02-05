@@ -2,10 +2,6 @@ name: Reusable CI
 
 on:
   workflow_call:
-
-# Minimal permissions - only read access needed for CI
-permissions:
-  contents: read
     inputs:
       node-version:
         description: 'Node.js version'
@@ -15,6 +11,9 @@ permissions:
         description: 'pnpm version'
         type: string
         default: '9'
+
+permissions:
+  contents: read
 
 jobs:
   test:
