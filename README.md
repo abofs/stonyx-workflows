@@ -48,8 +48,8 @@ jobs:
 Reusable workflow for publishing npm packages with alpha/beta/stable release stages.
 
 **Features:**
-- **Alpha** (PR): Dynamic version calculation from npm, no commit to PR branch
-- **Beta** (merge to main): Dynamic version calculation, commits to main
+- **Alpha** (PR): Dynamic version calculation from npm, no commit to PR branch, no tag/release
+- **Beta** (merge to main): Dynamic version calculation, commits to main, creates tag + GitHub prerelease
 - **Stable** (manual dispatch): Patch/minor/major bump, creates tag + GitHub release
 
 **Usage:**
