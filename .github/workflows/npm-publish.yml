@@ -161,12 +161,24 @@ jobs:
         if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
         run: pnpm publish --access public
 
-      - name: Commit version bump (beta)
+      - name: Commit version bump and create tag (beta)
         if: github.event_name == 'push'
         run: |
           git add package.json
           git commit -m "chore: release v${{ steps.package-version.outputs.version }}"
-          git push origin main
+          git tag v${{ steps.package-version.outputs.version }}
+          git push origin main --tags
+
+      - name: Create GitHub Release (beta)
+        if: github.event_name == 'push'
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.package-version.outputs.version }}
+          release_name: v${{ steps.package-version.outputs.version }}
+          draft: false
+          prerelease: true
 
       - name: Commit version bump and create tag (stable)
         if: github.event_name == 'workflow_dispatch' && !contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')
@@ -176,7 +188,7 @@ jobs:
           git tag v${{ steps.package-version.outputs.version }}
           git push origin main --tags
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release (stable)
         if: github.event_name == 'workflow_dispatch' && !contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')
         uses: actions/create-release@v1
         env:
