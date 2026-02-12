@@ -1,0 +1,65 @@
+name: Reusable Cascade Dispatch
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: 'Name of the package that was just published'
+        type: string
+        required: true
+      published-version:
+        description: 'Version that was just published'
+        type: string
+        required: true
+    secrets:
+      CASCADE_PAT:
+        required: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout stonyx-workflows (for dependency map)
+        uses: actions/checkout@v4
+        with:
+          repository: abofs/stonyx-workflows
+          ref: main
+          token: ${{ secrets.CASCADE_PAT }}
+
+      - name: Dispatch to downstream dependents
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CASCADE_PAT }}
+          script: |
+            const fs = require('fs');
+            const depMap = JSON.parse(fs.readFileSync('dependency-map.json', 'utf8'));
+            const packageName = '${{ inputs.package-name }}';
+            const publishedVersion = '${{ inputs.published-version }}';
+
+            const entry = depMap[packageName];
+            if (!entry || !entry.dependents || entry.dependents.length === 0) {
+              console.log(`No downstream dependents for ${packageName}`);
+              return;
+            }
+
+            // Deduplicate by repo (a repo may appear multiple times if it depends on the package in both sections)
+            const uniqueRepos = [...new Set(entry.dependents.map(d => d.repo))];
+
+            console.log(`Dispatching cascade-publish to ${uniqueRepos.length} repo(s) for ${packageName}@${publishedVersion}`);
+
+            for (const repo of uniqueRepos) {
+              const [owner, repoName] = repo.split('/');
+              console.log(`  -> ${repo}`);
+              await github.rest.repos.createDispatchEvent({
+                owner,
+                repo: repoName,
+                event_type: 'cascade-publish',
+                client_payload: {
+                  source_package: packageName,
+                  source_version: publishedVersion
+                }
+              });
+            }
+
+            console.log('Cascade dispatch complete.');

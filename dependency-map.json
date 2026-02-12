@@ -1,0 +1,38 @@
+{
+  "@stonyx/utils": {
+    "dependents": [
+      { "repo": "abofs/stonyx", "dep_name": "@stonyx/utils", "section": "devDependencies" },
+      { "repo": "abofs/stonyx-events", "dep_name": "@stonyx/utils", "section": "devDependencies" },
+      { "repo": "abofs/stonyx-cron", "dep_name": "@stonyx/utils", "section": "devDependencies" },
+      { "repo": "abofs/stonyx-rest-server", "dep_name": "@stonyx/utils", "section": "devDependencies" },
+      { "repo": "abofs/stonyx-oauth", "dep_name": "@stonyx/utils", "section": "devDependencies" },
+      { "repo": "abofs/stonyx-orm", "dep_name": "@stonyx/utils", "section": "devDependencies" }
+    ]
+  },
+  "stonyx": {
+    "dependents": [
+      { "repo": "abofs/stonyx-cron", "dep_name": "stonyx", "section": "dependencies" },
+      { "repo": "abofs/stonyx-rest-server", "dep_name": "stonyx", "section": "dependencies" },
+      { "repo": "abofs/stonyx-oauth", "dep_name": "stonyx", "section": "dependencies" },
+      { "repo": "abofs/stonyx-orm", "dep_name": "stonyx", "section": "dependencies" }
+    ]
+  },
+  "@stonyx/events": {
+    "dependents": [
+      { "repo": "abofs/stonyx-orm", "dep_name": "@stonyx/events", "section": "dependencies" }
+    ]
+  },
+  "@stonyx/cron": {
+    "dependents": [
+      { "repo": "abofs/stonyx-orm", "dep_name": "@stonyx/cron", "section": "dependencies" }
+    ]
+  },
+  "@stonyx/rest-server": {
+    "dependents": [
+      { "repo": "abofs/stonyx-oauth", "dep_name": "@stonyx/rest-server", "section": "devDependencies" },
+      { "repo": "abofs/stonyx-orm", "dep_name": "@stonyx/rest-server", "section": "devDependencies" }
+    ]
+  },
+  "@stonyx/oauth": { "dependents": [] },
+  "@stonyx/orm": { "dependents": [] }
+}
