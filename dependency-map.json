@@ -1,4 +1,9 @@
 {
+  "node-chronicle": {
+    "dependents": [
+      { "repo": "abofs/stonyx", "dep_name": "node-chronicle", "section": "dependencies" }
+    ]
+  },
   "@stonyx/utils": {
     "dependents": [
       { "repo": "abofs/stonyx", "dep_name": "@stonyx/utils", "section": "devDependencies" },
