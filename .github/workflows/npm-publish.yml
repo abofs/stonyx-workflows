@@ -160,6 +160,8 @@ jobs:
             echo "type=beta" >> $GITHUB_OUTPUT
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "type=alpha" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "type=stable" >> $GITHUB_OUTPUT
           elif [ "${{ github.event_name }}" = "push" ]; then
             echo "type=beta" >> $GITHUB_OUTPUT
           elif [ "${{ inputs.custom-version }}" != "" ]; then
@@ -234,6 +236,10 @@ jobs:
           echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
           pnpm version $NEXT_VERSION --no-git-tag-version
 
+      - name: Bump version (stable)
+        if: steps.version-type.outputs.type == 'stable'
+        run: pnpm version patch --no-git-tag-version
+
       - name: Bump version (patch/minor/major)
         if: steps.version-type.outputs.type == 'patch' || steps.version-type.outputs.type == 'minor' || steps.version-type.outputs.type == 'major'
         run: pnpm version ${{ steps.version-type.outputs.type }} --no-git-tag-version
@@ -257,11 +263,12 @@ jobs:
       - name: Commit version bump and create tag (beta)
         if: contains(steps.package-version.outputs.version, 'beta')
         run: |
+          BRANCH="${{ github.ref_name }}"
           git add package.json pnpm-lock.yaml
           git commit -m "chore: release v${{ steps.package-version.outputs.version }} [skip ci]"
           git tag v${{ steps.package-version.outputs.version }}
-          git pull --rebase origin main
-          git push origin main --tags
+          git pull --rebase origin "$BRANCH"
+          git push origin "$BRANCH" --tags
 
       - name: Create GitHub Release (beta)
         if: contains(steps.package-version.outputs.version, 'beta')
