@@ -1,4 +1,9 @@
 {
+  "@stonyx/logs": {
+    "dependents": [
+      { "repo": "abofs/stonyx", "dep_name": "@stonyx/logs", "section": "dependencies" }
+    ]
+  },
   "@stonyx/utils": {
     "dependents": [
       { "repo": "abofs/stonyx", "dep_name": "@stonyx/utils", "section": "devDependencies" },
