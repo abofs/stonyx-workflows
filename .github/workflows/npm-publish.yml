@@ -258,7 +258,7 @@ jobs:
 
       - name: Publish to NPM (stable)
         if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
-        run: pnpm publish --access public
+        run: pnpm publish --access public --no-git-checks
 
       - name: Commit version bump and create tag (beta)
         if: contains(steps.package-version.outputs.version, 'beta')
