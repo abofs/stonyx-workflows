@@ -267,7 +267,7 @@ jobs:
           git add package.json pnpm-lock.yaml
           git commit -m "chore: release v${{ steps.package-version.outputs.version }} [skip ci]"
           git tag v${{ steps.package-version.outputs.version }}
-          git pull --rebase origin "$BRANCH"
+          git pull --rebase --autostash origin "$BRANCH"
           git push origin "$BRANCH" --tags
 
       - name: Create GitHub Release (beta)
@@ -285,7 +285,7 @@ jobs:
           git add package.json pnpm-lock.yaml
           git commit -m "chore: release v${{ steps.package-version.outputs.version }} [skip ci]"
           git tag v${{ steps.package-version.outputs.version }}
-          git pull --rebase origin main
+          git pull --rebase --autostash origin main
           git push origin main --tags
 
       - name: Create GitHub Release (stable)
