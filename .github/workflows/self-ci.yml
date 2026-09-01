@@ -1,0 +1,49 @@
+name: Self CI
+
+# Unlike the four reusable workflows in this repo, this one is NOT
+# `workflow_call:`. It exists so that changes to stonyx-workflows are gated by
+# a check run in stonyx-workflows itself, rather than only by merging to main
+# and letting a real consumer publish a real version to the public registry.
+# See abofs/stonyx-workflows#22.
+#
+# `push` is scoped to `main` on purpose. Unscoped, a same-repo branch push with
+# an open PR fires both triggers and produces two identical `test` check runs.
+# Scoping it gives exactly one run per event -- a PR is covered by
+# `pull_request`, a merge to `main` by `push` -- while keeping both triggers
+# live. It also matches the trigger shape this repo's README teaches consumers.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: self-ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '9'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.13.0'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        run: pnpm test

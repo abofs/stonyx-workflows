@@ -55,6 +55,14 @@ Reusable workflow for publishing npm packages with alpha/beta/stable release sta
 - **Stable** (manual dispatch): Patch/minor/major bump, creates tag + GitHub release
 - **Cascade mode**: When triggered via `cascade-source`, updates all `@stonyx/*` dependencies to latest from npm before publishing
 
+**Note for consumers:** on the alpha and beta paths this workflow checks
+`abofs/stonyx-workflows` out into `.stonyx-workflows/` in your workspace to
+reach `scripts/derive-version.mjs`, and removes it again before publishing. The
+checkout is pinned to the same commit your `uses:` line resolved to, so the ref
+you pin governs the derivation logic as well as the workflow. No change to your
+`publish.yml` is required. See
+[`docs/release.md` § Workflow consumption](docs/release.md#workflow-consumption).
+
 **Inputs:**
 
 | Input | Description | Default |
@@ -108,6 +116,92 @@ Reusable workflow that dispatches `repository_dispatch` events to downstream dep
 | `CASCADE_PAT` | Yes | PAT with `repo` scope for cross-repo `repository_dispatch` API calls |
 
 ---
+
+### `self-ci.yml`
+
+Not a reusable workflow. Runs this repo's own test suite on every pull request
+and on every merge to `main`, so changes to the workflows here are gated by a
+check run in this repo rather than only by a downstream consumer publishing a
+real version.
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+```
+
+`push` is scoped to `main` -- the same shape this README teaches consumers
+above. Left unscoped it would fire alongside `pull_request` on every branch
+push, producing two identical check runs for one event.
+
+Runs `pnpm install --frozen-lockfile` then `pnpm test` on Node `24.13.0`.
+
+---
+
+## Development
+
+This repo has an executable surface: a private root `package.json`, a test
+suite, and one extracted script. There are no dependencies -- tests use
+`node:test` and `node:assert` only.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm test
+```
+
+### `scripts/derive-version.mjs`
+
+Exports `deriveVersion({ channel, latestStable, allVersions })`, the prerelease
+version arithmetic used by the `Calculate next alpha version` and `Calculate
+next beta version` steps in `npm-publish.yml`. Registry I/O stays in the
+workflow and is passed in as arguments, so the function is pure and testable
+offline.
+
+`npm-publish.yml` runs inside the *consumer's* checkout, so it checks this repo
+out at `.stonyx-workflows` to reach the script -- a variation on the pattern
+`cascade.yml` uses to read `dependency-map.json` -- and removes that directory
+again before the publish steps. That cleanup is defence-in-depth rather than
+the only barrier: `npm pack` does pack a dot-prefixed directory at the package
+root, but all nine current consumers declare a `files` allowlist that excludes
+it, so none of them would have packed it. The step is what keeps that true for
+a consumer that later drops the allowlist.
+
+That checkout is pinned to `${{ job.workflow_sha }}`: **the script is always
+resolved from the same commit as the workflow that imports it.** A consumer
+calling `npm-publish.yml@main` gets `main`'s script; one pinned to a tag or a
+SHA gets that commit's script. Without the pin the workflow ref and the script
+ref resolve independently, so a merge to this repo landing mid-job would run one
+commit's workflow against another commit's derivation logic, against an
+irreversible publish. `job.workflow_sha` is populated for any job defined in a
+reusable workflow; the preceding `Resolve stonyx-workflows ref` step fails the
+job if it is ever empty rather than letting `actions/checkout` fall back to the
+default branch.
+
+### Tests
+
+| File | Covers |
+|------|--------|
+| `test/derive-version-test.js` | Characterization of `deriveVersion` against a committed, read-only capture of the `@stonyx/oauth` registry state (`test/fixtures/oauth-registry-state.json`) |
+| `test/workflows-test.js` | That `npm-publish.yml` calls the script and retains no inline version arithmetic, and that `self-ci.yml` retains both a push and a pull_request trigger |
+| `test/publish-glue-test.js` | Executes each derivation step's real `run:` body offline against a stubbed `npm`, and pins the checkout step's `ref:` and `if:` |
+| `test/lift-equivalence-test.js` | Differential proof that `deriveVersion` matches the `main@692d122` heredocs it was lifted from, across 864 input pairs |
+| `test/helpers/workflow-yaml.js` | Minimal reader for the two workflow YAML shapes the tests assert on |
+
+Test files are named `*-test.js`, matching the convention every `@stonyx/*`
+sibling repo uses. `pnpm test` runs `scripts/run-tests.mjs` rather than
+`node --test <glob>` directly, because `node --test` **exits 0 and reports
+`tests 0` when its glob matches nothing** -- a rename or a pattern edit would
+otherwise leave `Self CI` green while running no tests. The runner resolves the
+glob, fails loudly if it matches fewer than two files, and passes that same
+resolved list to `node --test`, so the list that is checked is the list that is
+run.
+
+`test/derive-version-test.js` pins **today's** derivation output, defects
+included. Changing it is how [#23](https://github.com/abofs/stonyx-workflows/issues/23)
+and [#24](https://github.com/abofs/stonyx-workflows/issues/24) become visible
+as diffs; do not "improve" the derivation without updating those assertions
+deliberately.
 
 ## Dependency Map
 

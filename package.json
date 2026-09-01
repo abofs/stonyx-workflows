@@ -1,0 +1,14 @@
+{
+  "name": "@stonyx/workflows",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared GitHub Actions workflows for Stonyx framework packages",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=24.13.0"
+  },
+  "scripts": {
+    "test": "node scripts/run-tests.mjs"
+  }
+}

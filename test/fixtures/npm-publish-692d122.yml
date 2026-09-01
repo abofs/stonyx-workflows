@@ -174,26 +174,6 @@ jobs:
         if: steps.version-type.outputs.type == 'custom'
         run: pnpm version ${{ inputs.custom-version }} --no-git-tag-version
 
-      - name: Resolve stonyx-workflows ref
-        id: workflows-ref
-        if: steps.version-type.outputs.type == 'alpha' || steps.version-type.outputs.type == 'beta'
-        env:
-          WORKFLOW_SHA: ${{ job.workflow_sha }}
-        run: |
-          if [ -z "$WORKFLOW_SHA" ]; then
-            echo "::error::job.workflow_sha is empty. Refusing to fall back to a moving ref for the version derivation script."
-            exit 1
-          fi
-          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout stonyx-workflows (for version derivation script)
-        if: steps.version-type.outputs.type == 'alpha' || steps.version-type.outputs.type == 'beta'
-        uses: actions/checkout@v4
-        with:
-          repository: abofs/stonyx-workflows
-          ref: ${{ steps.workflows-ref.outputs.sha }}
-          path: .stonyx-workflows
-
       - name: Calculate next alpha version
         id: alpha-version
         if: steps.version-type.outputs.type == 'alpha'
@@ -210,9 +190,17 @@ jobs:
               latestStable = require('./package.json').version;
               allVersions = [];
             }
-            import('./.stonyx-workflows/scripts/derive-version.mjs').then(({ deriveVersion }) => {
-              console.log(deriveVersion({ channel: 'alpha', latestStable, allVersions }));
-            });
+            // Ensure allVersions is an array (npm returns string if only one version)
+            if (!Array.isArray(allVersions)) allVersions = [allVersions];
+            const [maj, min, pat] = latestStable.split('.').map(Number);
+            const nextPatch = maj + '.' + min + '.' + (pat + 1);
+            const prefix = nextPatch + '-alpha.';
+            const existing = allVersions
+              .filter(v => v.startsWith(prefix))
+              .map(v => parseInt(v.slice(prefix.length), 10))
+              .filter(n => !isNaN(n));
+            const next = existing.length ? Math.max(...existing) + 1 : 0;
+            console.log(nextPatch + '-alpha.' + next);
           ")
           echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
           pnpm version $NEXT_VERSION --no-git-tag-version
@@ -233,16 +221,20 @@ jobs:
               latestStable = require('./package.json').version;
               allVersions = [];
             }
-            import('./.stonyx-workflows/scripts/derive-version.mjs').then(({ deriveVersion }) => {
-              console.log(deriveVersion({ channel: 'beta', latestStable, allVersions }));
-            });
+            // Ensure allVersions is an array (npm returns string if only one version)
+            if (!Array.isArray(allVersions)) allVersions = [allVersions];
+            const [maj, min, pat] = latestStable.split('.').map(Number);
+            const nextPatch = maj + '.' + min + '.' + (pat + 1);
+            const prefix = nextPatch + '-beta.';
+            const existing = allVersions
+              .filter(v => v.startsWith(prefix))
+              .map(v => parseInt(v.slice(prefix.length), 10))
+              .filter(n => !isNaN(n));
+            const next = existing.length ? Math.max(...existing) + 1 : 0;
+            console.log(nextPatch + '-beta.' + next);
           ")
           echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
           pnpm version $NEXT_VERSION --no-git-tag-version
-
-      - name: Remove stonyx-workflows checkout
-        if: always()
-        run: rm -rf .stonyx-workflows
 
       - name: Bump version (stable)
         if: steps.version-type.outputs.type == 'stable'

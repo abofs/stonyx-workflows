@@ -41,3 +41,14 @@ uses: abofs/stonyx-workflows/.github/workflows/<workflow>.yml@main
 ```
 
 Changes to workflows take effect immediately when merged to `main`. Coordinate breaking changes with downstream repos before merging.
+
+### The publish workflow fetches a script into your workspace
+
+`npm-publish.yml` does not carry all of its logic inline. On the **alpha and beta paths only**, it checks `abofs/stonyx-workflows` out into `.stonyx-workflows/` inside your repo's workspace, imports `scripts/derive-version.mjs` from it to compute the next prerelease version, and removes the directory again before any `pnpm publish` step runs.
+
+Two consequences worth knowing:
+
+- **The ref you pin governs the script too.** The checkout is pinned to `${{ job.workflow_sha }}` -- the exact commit your `uses:` line resolved to. Pin the workflow to `@main` and you get `main`'s derivation logic; pin it to a tag or a SHA and you get that commit's. The workflow and the script are always one artifact, never two independently-resolved ones.
+- **`.stonyx-workflows/` exists transiently in your workspace** between the version bump and the cleanup step. It is removed before publishing, so it cannot reach your tarball -- and every current `@stonyx/*` package also declares a `files` allowlist that would exclude it anyway. If you drop that allowlist, the cleanup step becomes the only thing keeping it out.
+
+This requires no change to any consumer's `publish.yml`.
