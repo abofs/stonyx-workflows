@@ -10,7 +10,7 @@
  *
  * This is a LIFT AND SHIFT. The behaviour here -- including its known defects,
  * which are tracked as abofs/stonyx-workflows#23 and #24 -- is intentionally
- * identical to what the heredocs computed. `test/derive-version.test.js` pins
+ * identical to what the heredocs computed. `test/derive-version-test.js` pins
  * that output so #23 and #24 land as visible diffs.
  *
  * Registry I/O stays in the workflow and is passed in as arguments, so this

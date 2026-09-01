@@ -151,11 +151,20 @@ the publish steps, so it cannot end up in a consumer's npm tarball.
 
 | File | Covers |
 |------|--------|
-| `test/derive-version.test.js` | Characterization of `deriveVersion` against a committed, read-only capture of the `@stonyx/oauth` registry state (`test/fixtures/oauth-registry-state.json`) |
-| `test/workflows.test.js` | That `npm-publish.yml` calls the script and retains no inline version arithmetic, and that `self-ci.yml` triggers on push and pull request |
+| `test/derive-version-test.js` | Characterization of `deriveVersion` against a committed, read-only capture of the `@stonyx/oauth` registry state (`test/fixtures/oauth-registry-state.json`) |
+| `test/workflows-test.js` | That `npm-publish.yml` calls the script and retains no inline version arithmetic, and that `self-ci.yml` triggers on push and pull request |
 | `test/helpers/workflow-yaml.js` | Minimal reader for the two workflow YAML shapes the tests assert on |
 
-`test/derive-version.test.js` pins **today's** derivation output, defects
+Test files are named `*-test.js`, matching the convention every `@stonyx/*`
+sibling repo uses. `pnpm test` runs `scripts/run-tests.mjs` rather than
+`node --test <glob>` directly, because `node --test` **exits 0 and reports
+`tests 0` when its glob matches nothing** -- a rename or a pattern edit would
+otherwise leave `Self CI` green while running no tests. The runner resolves the
+glob, fails loudly if it matches fewer than two files, and passes that same
+resolved list to `node --test`, so the list that is checked is the list that is
+run.
+
+`test/derive-version-test.js` pins **today's** derivation output, defects
 included. Changing it is how [#23](https://github.com/abofs/stonyx-workflows/issues/23)
 and [#24](https://github.com/abofs/stonyx-workflows/issues/24) become visible
 as diffs; do not "improve" the derivation without updating those assertions

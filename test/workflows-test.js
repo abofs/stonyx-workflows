@@ -8,7 +8,7 @@ import { onKeys, parseSteps, readWorkflow, stepRunBody, workflowPath } from './h
 //
 // AC2 anti-drift: the version derivation must live in scripts/derive-version.mjs
 // and npm-publish.yml must CALL it, not carry a second copy of the arithmetic.
-// Without this, derive-version.test.js would be validating a transcription that
+// Without this, derive-version-test.js would be validating a transcription that
 // silently diverges from the YAML on the next edit -- and an extracted module
 // with no caller is a dormant primitive, not a refactor.
 
