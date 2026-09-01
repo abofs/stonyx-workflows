@@ -79,8 +79,11 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
     assert.ok(checkout, 'a step should check out abofs/stonyx-workflows');
     assert.match(checkout.body, /path: \.stonyx-workflows/);
 
-    // ...and cleans it up again, so it cannot end up inside a consumer's
-    // published tarball.
+    // ...and cleans it up again. Note the scope: `npm pack` does pack a
+    // dot-prefixed directory at the package root, but all nine current
+    // consumers declare a `files` allowlist that excludes it, so this step is
+    // defence-in-depth for a consumer that later drops that allowlist -- not
+    // the only thing standing between the checkout and a published tarball.
     const cleanup = steps.find((s) => s.body.includes('rm -rf .stonyx-workflows'));
     assert.ok(cleanup, 'a step should remove the .stonyx-workflows checkout before publish');
     assert.ok(

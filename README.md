@@ -153,8 +153,11 @@ offline.
 `npm-publish.yml` runs inside the *consumer's* checkout, so it checks this repo
 out at `.stonyx-workflows` to reach the script -- a variation on the pattern
 `cascade.yml` uses to read `dependency-map.json` -- and removes that directory
-again before the publish steps, so it cannot be packed into a consumer's npm
-tarball by a package that has no `files` allowlist.
+again before the publish steps. That cleanup is defence-in-depth rather than
+the only barrier: `npm pack` does pack a dot-prefixed directory at the package
+root, but all nine current consumers declare a `files` allowlist that excludes
+it, so none of them would have packed it. The step is what keeps that true for
+a consumer that later drops the allowlist.
 
 That checkout is pinned to `${{ job.workflow_sha }}`: **the script is always
 resolved from the same commit as the workflow that imports it.** A consumer
