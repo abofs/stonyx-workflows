@@ -143,9 +143,21 @@ workflow and is passed in as arguments, so the function is pure and testable
 offline.
 
 `npm-publish.yml` runs inside the *consumer's* checkout, so it checks this repo
-out at `.stonyx-workflows` to reach the script -- the same pattern `cascade.yml`
-uses to read `dependency-map.json` -- and removes that directory again before
-the publish steps, so it cannot end up in a consumer's npm tarball.
+out at `.stonyx-workflows` to reach the script -- a variation on the pattern
+`cascade.yml` uses to read `dependency-map.json` -- and removes that directory
+again before the publish steps, so it cannot be packed into a consumer's npm
+tarball by a package that has no `files` allowlist.
+
+That checkout is pinned to `${{ job.workflow_sha }}`: **the script is always
+resolved from the same commit as the workflow that imports it.** A consumer
+calling `npm-publish.yml@main` gets `main`'s script; one pinned to a tag or a
+SHA gets that commit's script. Without the pin the workflow ref and the script
+ref resolve independently, so a merge to this repo landing mid-job would run one
+commit's workflow against another commit's derivation logic, against an
+irreversible publish. `job.workflow_sha` is populated for any job defined in a
+reusable workflow; the preceding `Resolve stonyx-workflows ref` step fails the
+job if it is ever empty rather than letting `actions/checkout` fall back to the
+default branch.
 
 ### Tests
 

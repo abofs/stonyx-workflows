@@ -174,12 +174,24 @@ jobs:
         if: steps.version-type.outputs.type == 'custom'
         run: pnpm version ${{ inputs.custom-version }} --no-git-tag-version
 
+      - name: Resolve stonyx-workflows ref
+        id: workflows-ref
+        if: steps.version-type.outputs.type == 'alpha' || steps.version-type.outputs.type == 'beta'
+        env:
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_sha is empty. Refusing to fall back to a moving ref for the version derivation script."
+            exit 1
+          fi
+          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+
       - name: Checkout stonyx-workflows (for version derivation script)
         if: steps.version-type.outputs.type == 'alpha' || steps.version-type.outputs.type == 'beta'
         uses: actions/checkout@v4
         with:
           repository: abofs/stonyx-workflows
-          ref: main
+          ref: ${{ steps.workflows-ref.outputs.sha }}
           path: .stonyx-workflows
 
       - name: Calculate next alpha version
