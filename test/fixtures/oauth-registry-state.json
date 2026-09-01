@@ -3,8 +3,17 @@
     "package": "@stonyx/oauth",
     "capturedFor": "abofs/stonyx-workflows#22 AC1",
     "capturedOn": "2026-09-01",
-    "command": "npm view @stonyx/oauth versions --json",
-    "note": "Read-only registry capture. Nothing in this repo publishes. The live registry has advanced past the state abofs/stonyx-workflows#19 broke on: at capture time it held 179 versions with dist-tags.beta = 0.1.1-beta.155. This fixture is that capture with the 28 beta releases above 0.1.1-beta.127 removed, which reproduces the state #22 documents exactly: 179 - 28 = 151 entries, highest beta 0.1.1-beta.127, highest alpha 0.1.1-alpha.21, dist-tags.latest unchanged at 0.1.0."
+    "commands": {
+      "versions": "npm view @stonyx/oauth versions --json",
+      "distTags": "npm view @stonyx/oauth dist-tags --json"
+    },
+    "reconstruction": [
+      "1. `versions` command -> a BARE ARRAY of every published version. It carries no dist-tag information at all, which is why the second command is required: regenerating from the versions command alone yields a fixture with no `distTags` key, and test/derive-version-test.js dies reading distTags.latest.",
+      "2. `distTags` command -> an object. At capture time: {latest: 0.1.0, alpha: 0.1.1-alpha.21, beta: 0.1.1-beta.155}.",
+      "3. Rewind the beta channel: drop every entry matching /^0\\.1\\.1-beta\\.(\\d+)$/ whose suffix is greater than 127. At capture time that removed 28 of 179 entries, leaving 151, in the registry's own order.",
+      "4. Keep only `latest` from step 2. `alpha` and `beta` are deliberately DROPPED rather than rewound: they describe the live registry rather than this rewound state, and deriveVersion reads neither -- it takes only latestStable and the version list."
+    ],
+    "note": "Read-only registry capture; nothing in this repo publishes. The live registry has advanced past the state abofs/stonyx-workflows#19 broke on: at capture time it held 179 versions with dist-tags.beta = 0.1.1-beta.155. This fixture is that capture rewound per `reconstruction` above, reproducing the state #22 documents exactly: 179 - 28 = 151 entries, highest beta 0.1.1-beta.127, highest alpha 0.1.1-alpha.21, dist-tags.latest unchanged at 0.1.0."
   },
   "distTags": {
     "latest": "0.1.0"
