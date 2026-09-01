@@ -165,6 +165,8 @@ default branch.
 |------|--------|
 | `test/derive-version-test.js` | Characterization of `deriveVersion` against a committed, read-only capture of the `@stonyx/oauth` registry state (`test/fixtures/oauth-registry-state.json`) |
 | `test/workflows-test.js` | That `npm-publish.yml` calls the script and retains no inline version arithmetic, and that `self-ci.yml` triggers on push and pull request |
+| `test/publish-glue-test.js` | Executes each derivation step's real `run:` body offline against a stubbed `npm`, and pins the checkout step's `ref:` and `if:` |
+| `test/lift-equivalence-test.js` | Differential proof that `deriveVersion` matches the `main@692d122` heredocs it was lifted from, across 864 input pairs |
 | `test/helpers/workflow-yaml.js` | Minimal reader for the two workflow YAML shapes the tests assert on |
 
 Test files are named `*-test.js`, matching the convention every `@stonyx/*`

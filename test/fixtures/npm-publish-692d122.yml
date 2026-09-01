@@ -1,0 +1,312 @@
+name: Reusable NPM Publish
+
+on:
+  workflow_call:
+    inputs:
+      version-type:
+        description: 'Version type for manual dispatch (patch/minor/major)'
+        type: string
+        required: false
+      custom-version:
+        description: 'Custom version (overrides version-type)'
+        type: string
+        required: false
+      cascade-source:
+        description: 'Source package that triggered cascade (non-empty enables cascade mode)'
+        type: string
+        required: false
+        default: ''
+      node-version:
+        description: 'Node.js version'
+        type: string
+        default: '24.13.0'
+      pnpm-version:
+        description: 'pnpm version'
+        type: string
+        default: '9'
+    secrets:
+      CASCADE_PAT:
+        required: false
+    outputs:
+      published-version:
+        description: 'The version that was published'
+        value: ${{ jobs.publish.outputs.published-version }}
+      package-name:
+        description: 'The name of the published package'
+        value: ${{ jobs.publish.outputs.package-name }}
+      version-channel:
+        description: 'The release channel (alpha/beta/stable)'
+        value: ${{ jobs.publish.outputs.version-channel }}
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    outputs:
+      published-version: ${{ steps.package-version.outputs.version }}
+      package-name: ${{ steps.package-name.outputs.name }}
+      version-channel: ${{ steps.version-type.outputs.type }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
+          token: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Get package name
+        id: package-name
+        run: echo "name=$(node -p "require('./package.json').name")" >> $GITHUB_OUTPUT
+
+      - name: Update all Stonyx dependencies to latest
+        if: inputs.cascade-source != ''
+        run: |
+          node -e "
+            const { execSync } = require('child_process');
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+
+            function getLatestVersion(depName) {
+              let beta = null, latest = null;
+              try {
+                beta = execSync('npm view ' + depName + ' dist-tags.beta', { encoding: 'utf8' }).trim();
+              } catch (e) {}
+              try {
+                latest = execSync('npm view ' + depName + ' dist-tags.latest', { encoding: 'utf8' }).trim();
+              } catch (e) {}
+
+              if (!beta && !latest) return null;
+              if (!beta) return { version: latest, isPrerelease: false };
+              if (!latest) return { version: beta, isPrerelease: true };
+
+              // Compare versions: pick the higher one
+              const parseSemver = (v) => {
+                const [core, pre] = v.split('-');
+                const [maj, min, pat] = core.split('.').map(Number);
+                return { maj, min, pat, pre: pre || null };
+              };
+              const b = parseSemver(beta);
+              const l = parseSemver(latest);
+
+              if (b.maj !== l.maj) return b.maj > l.maj ? { version: beta, isPrerelease: true } : { version: latest, isPrerelease: false };
+              if (b.min !== l.min) return b.min > l.min ? { version: beta, isPrerelease: true } : { version: latest, isPrerelease: false };
+              if (b.pat !== l.pat) return b.pat > l.pat ? { version: beta, isPrerelease: true } : { version: latest, isPrerelease: false };
+              // Same core version: latest (stable) wins since it's the release of the same version
+              return { version: latest, isPrerelease: false };
+            }
+
+            let changed = false;
+            for (const section of ['dependencies', 'devDependencies']) {
+              if (!pkg[section]) continue;
+              for (const [dep, currentRange] of Object.entries(pkg[section])) {
+                if (dep !== 'stonyx' && !dep.startsWith('@stonyx/')) continue;
+                const result = getLatestVersion(dep);
+                if (!result) {
+                  console.log('  [skip] ' + dep + ': not found on npm');
+                  continue;
+                }
+                const newRange = result.isPrerelease ? result.version : '^' + result.version;
+                if (currentRange !== newRange) {
+                  console.log('  [update] ' + dep + ': ' + currentRange + ' -> ' + newRange);
+                  pkg[section][dep] = newRange;
+                  changed = true;
+                } else {
+                  console.log('  [ok] ' + dep + ': ' + currentRange);
+                }
+              }
+            }
+
+            if (changed) {
+              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+              console.log('package.json updated.');
+            } else {
+              console.log('All Stonyx dependencies already up to date.');
+            }
+          "
+
+      - name: Install dependencies
+        run: pnpm install ${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine version bump type
+        id: version-type
+        run: |
+          if [ "${{ inputs.cascade-source }}" != "" ]; then
+            echo "type=beta" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "type=alpha" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "type=stable" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "type=beta" >> $GITHUB_OUTPUT
+          elif [ "${{ inputs.custom-version }}" != "" ]; then
+            echo "type=custom" >> $GITHUB_OUTPUT
+          else
+            echo "type=${{ inputs.version-type }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Bump version (custom)
+        if: steps.version-type.outputs.type == 'custom'
+        run: pnpm version ${{ inputs.custom-version }} --no-git-tag-version
+
+      - name: Calculate next alpha version
+        id: alpha-version
+        if: steps.version-type.outputs.type == 'alpha'
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          NEXT_VERSION=$(node -e "
+            const { execSync } = require('child_process');
+            const pkg = '$PKG_NAME';
+            let latestStable, allVersions;
+            try {
+              latestStable = execSync('npm view ' + pkg + ' dist-tags.latest', { encoding: 'utf8' }).trim();
+              allVersions = JSON.parse(execSync('npm view ' + pkg + ' versions --json', { encoding: 'utf8' }));
+            } catch (e) {
+              latestStable = require('./package.json').version;
+              allVersions = [];
+            }
+            // Ensure allVersions is an array (npm returns string if only one version)
+            if (!Array.isArray(allVersions)) allVersions = [allVersions];
+            const [maj, min, pat] = latestStable.split('.').map(Number);
+            const nextPatch = maj + '.' + min + '.' + (pat + 1);
+            const prefix = nextPatch + '-alpha.';
+            const existing = allVersions
+              .filter(v => v.startsWith(prefix))
+              .map(v => parseInt(v.slice(prefix.length), 10))
+              .filter(n => !isNaN(n));
+            const next = existing.length ? Math.max(...existing) + 1 : 0;
+            console.log(nextPatch + '-alpha.' + next);
+          ")
+          echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          pnpm version $NEXT_VERSION --no-git-tag-version
+
+      - name: Calculate next beta version
+        id: beta-version
+        if: steps.version-type.outputs.type == 'beta'
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          NEXT_VERSION=$(node -e "
+            const { execSync } = require('child_process');
+            const pkg = '$PKG_NAME';
+            let latestStable, allVersions;
+            try {
+              latestStable = execSync('npm view ' + pkg + ' dist-tags.latest', { encoding: 'utf8' }).trim();
+              allVersions = JSON.parse(execSync('npm view ' + pkg + ' versions --json', { encoding: 'utf8' }));
+            } catch (e) {
+              latestStable = require('./package.json').version;
+              allVersions = [];
+            }
+            // Ensure allVersions is an array (npm returns string if only one version)
+            if (!Array.isArray(allVersions)) allVersions = [allVersions];
+            const [maj, min, pat] = latestStable.split('.').map(Number);
+            const nextPatch = maj + '.' + min + '.' + (pat + 1);
+            const prefix = nextPatch + '-beta.';
+            const existing = allVersions
+              .filter(v => v.startsWith(prefix))
+              .map(v => parseInt(v.slice(prefix.length), 10))
+              .filter(n => !isNaN(n));
+            const next = existing.length ? Math.max(...existing) + 1 : 0;
+            console.log(nextPatch + '-beta.' + next);
+          ")
+          echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          pnpm version $NEXT_VERSION --no-git-tag-version
+
+      - name: Bump version (stable)
+        if: steps.version-type.outputs.type == 'stable'
+        run: pnpm version patch --no-git-tag-version
+
+      - name: Bump version (patch/minor/major)
+        if: steps.version-type.outputs.type == 'patch' || steps.version-type.outputs.type == 'minor' || steps.version-type.outputs.type == 'major'
+        run: pnpm version ${{ steps.version-type.outputs.type }} --no-git-tag-version
+
+      - name: Get package version
+        id: package-version
+        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
+      - name: Publish to NPM (alpha)
+        if: contains(steps.package-version.outputs.version, 'alpha')
+        run: pnpm publish --tag alpha --access public --no-git-checks
+
+      - name: Publish to NPM (beta)
+        if: contains(steps.package-version.outputs.version, 'beta')
+        run: pnpm publish --tag beta --access public --no-git-checks
+
+      - name: Publish to NPM (stable)
+        if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
+        run: pnpm publish --access public --no-git-checks
+
+      - name: Commit version bump and create tag (beta)
+        if: contains(steps.package-version.outputs.version, 'beta')
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          git add package.json pnpm-lock.yaml
+          git commit -m "chore: release v${{ steps.package-version.outputs.version }} [skip ci]"
+          git tag v${{ steps.package-version.outputs.version }}
+          git pull --rebase --autostash origin "$BRANCH"
+          git push origin "$BRANCH" --tags
+
+      - name: Create GitHub Release (beta)
+        if: contains(steps.package-version.outputs.version, 'beta')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.package-version.outputs.version }}
+          name: v${{ steps.package-version.outputs.version }}
+          prerelease: false
+          generate_release_notes: false
+
+      - name: Commit version bump and create tag (stable)
+        if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
+        run: |
+          git add package.json pnpm-lock.yaml
+          git commit -m "chore: release v${{ steps.package-version.outputs.version }} [skip ci]"
+          git tag v${{ steps.package-version.outputs.version }}
+          git pull --rebase --autostash origin main
+          git push origin main --tags
+
+      - name: Create GitHub Release (stable)
+        if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.package-version.outputs.version }}
+          name: v${{ steps.package-version.outputs.version }}
+          prerelease: false
+          generate_release_notes: false
+
+      - name: Comment on PR with alpha version
+        if: contains(steps.package-version.outputs.version, 'alpha')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ steps.package-version.outputs.version }}';
+            const packageName = '${{ steps.package-name.outputs.name }}';
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🚀 Alpha Version Published\n\n**Version:** \`${version}\`\n\n**Install:**\n\`\`\`bash\npnpm add ${packageName}@${version}\n# or\npnpm add ${packageName}@alpha  # latest alpha\n\`\`\`\n\nThis alpha version is now available for testing!`
+            });
