@@ -24,7 +24,7 @@
 ## Architecture Patterns
 
 - Four reusable workflows consumed via `workflow_call`: `ci.yml` (test runner), `npm-publish.yml` (versioning + publishing), `cascade.yml` (cross-repo dispatch), `security-audit.yml` (pnpm audit)
-- Plus `self-ci.yml`, which is **not** reusable: it triggers on `push` and `pull_request` so this repo's own changes are gated by a check run here (see #22)
+- Plus `self-ci.yml`, which is **not** reusable: it triggers on `push` to `main` and on `pull_request`, so this repo's own changes are gated by a check run here without running twice per event (see #22)
 - `npm-publish.yml` implements a three-channel version strategy: alpha (PR), beta (merge to main or cascade trigger), stable (manual dispatch)
 - Version calculation is dynamic: queries npm registry for existing versions and increments the prerelease counter (e.g., `0.2.3-alpha.0`, `0.2.3-alpha.1`)
 - Cascade system: `cascade.yml` reads `dependency-map.json`, deduplicates repos, and fires `repository_dispatch` events with `cascade-publish` type to downstream dependents

@@ -23,7 +23,7 @@
 
 ## Architecture Patterns
 
-- Workflow-as-library pattern: the four reusable workflows (`ci.yml`, `npm-publish.yml`, `cascade.yml`, `security-audit.yml`) use the `workflow_call` trigger so consumer repos reference them as `uses: abofs/stonyx-workflows/.github/workflows/<name>.yml@main`. `self-ci.yml` is the exception -- it triggers on `push` and `pull_request` and is not callable
+- Workflow-as-library pattern: the four reusable workflows (`ci.yml`, `npm-publish.yml`, `cascade.yml`, `security-audit.yml`) use the `workflow_call` trigger so consumer repos reference them as `uses: abofs/stonyx-workflows/.github/workflows/<name>.yml@main`. `self-ci.yml` is the exception -- it triggers on `push` to `main` and on `pull_request`, and is not callable
 - `npm-publish.yml` is the most complex workflow with conditional steps gated on version channel (alpha/beta/stable/custom) and cascade mode
 - Version resolution logic is split: `npm-publish.yml` still queries the registry via the `npm view` CLI inline, but the parse/compute half lives in `scripts/derive-version.mjs` (`deriveVersion({ channel, latestStable, allVersions })`), which is pure and unit-tested. The workflow checks this repo out at `.stonyx-workflows` to reach it, pinned to `${{ job.workflow_sha }}` so the script and the workflow always come from the same commit
 - Cascade dependency update: during cascade mode, iterates `dependencies` and `devDependencies` for `@stonyx/*` packages, compares beta vs latest dist-tags, picks the higher semver

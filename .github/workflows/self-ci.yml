@@ -5,7 +5,16 @@ name: Self CI
 # a check run in stonyx-workflows itself, rather than only by merging to main
 # and letting a real consumer publish a real version to the public registry.
 # See abofs/stonyx-workflows#22.
-on: [push, pull_request]
+#
+# `push` is scoped to `main` on purpose. Unscoped, a same-repo branch push with
+# an open PR fires both triggers and produces two identical `test` check runs.
+# Scoping it gives exactly one run per event -- a PR is covered by
+# `pull_request`, a merge to `main` by `push` -- while keeping both triggers
+# live. It also matches the trigger shape this repo's README teaches consumers.
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 concurrency:
   group: self-ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}

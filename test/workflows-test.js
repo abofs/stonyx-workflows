@@ -100,6 +100,13 @@ describe('self-ci.yml gates this repo (#22 AC3)', () => {
     assert.ok(steps.length > 0, 'self-ci.yml should declare steps');
   });
 
+  // The shape is `push` scoped to `main` plus an unscoped `pull_request`, so a
+  // PR gets exactly one run and a merge to main gets exactly one run. What this
+  // test pins is that BOTH triggers survive: self-ci.yml must never quietly
+  // become PR-only (nothing would gate a direct push to main) or push-only
+  // (nothing would gate a PR). It deliberately does not pin the `branches:`
+  // filter, so widening `push` back to every branch stays green here -- that
+  // regression costs a duplicate check run, not a coverage hole.
   test('its on: keys include both push and pull_request', () => {
     const keys = onKeys(readWorkflow('self-ci.yml'));
     assert.ok(keys.includes('push'), `on: keys ${JSON.stringify(keys)} should include push`);

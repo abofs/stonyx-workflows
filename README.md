@@ -119,13 +119,21 @@ Reusable workflow that dispatches `repository_dispatch` events to downstream dep
 
 ### `self-ci.yml`
 
-Not a reusable workflow. Runs this repo's own test suite on every push and pull
-request, so changes to the workflows here are gated by a check run in this repo
-rather than only by a downstream consumer publishing a real version.
+Not a reusable workflow. Runs this repo's own test suite on every pull request
+and on every merge to `main`, so changes to the workflows here are gated by a
+check run in this repo rather than only by a downstream consumer publishing a
+real version.
 
 ```yaml
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
 ```
+
+`push` is scoped to `main` -- the same shape this README teaches consumers
+above. Left unscoped it would fire alongside `pull_request` on every branch
+push, producing two identical check runs for one event.
 
 Runs `pnpm install --frozen-lockfile` then `pnpm test` on Node `24.13.0`.
 
@@ -175,7 +183,7 @@ default branch.
 | File | Covers |
 |------|--------|
 | `test/derive-version-test.js` | Characterization of `deriveVersion` against a committed, read-only capture of the `@stonyx/oauth` registry state (`test/fixtures/oauth-registry-state.json`) |
-| `test/workflows-test.js` | That `npm-publish.yml` calls the script and retains no inline version arithmetic, and that `self-ci.yml` triggers on push and pull request |
+| `test/workflows-test.js` | That `npm-publish.yml` calls the script and retains no inline version arithmetic, and that `self-ci.yml` retains both a push and a pull_request trigger |
 | `test/publish-glue-test.js` | Executes each derivation step's real `run:` body offline against a stubbed `npm`, and pins the checkout step's `ref:` and `if:` |
 | `test/lift-equivalence-test.js` | Differential proof that `deriveVersion` matches the `main@692d122` heredocs it was lifted from, across 864 input pairs |
 | `test/helpers/workflow-yaml.js` | Minimal reader for the two workflow YAML shapes the tests assert on |
