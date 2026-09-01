@@ -1,0 +1,22 @@
+name: Probe Reusable (temporary)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump workflow-identity context properties
+        run: |
+          echo "PROBE github.job_workflow_sha=[${{ github.job_workflow_sha }}]"
+          echo "PROBE github.workflow_sha=[${{ github.workflow_sha }}]"
+          echo "PROBE github.workflow_ref=[${{ github.workflow_ref }}]"
+          echo "PROBE job.workflow_sha=[${{ job.workflow_sha }}]"
+          echo "PROBE job.workflow_ref=[${{ job.workflow_ref }}]"
+          echo "PROBE job.workflow_repository=[${{ job.workflow_repository }}]"
+          echo "PROBE github.sha=[${{ github.sha }}]"
+          echo "PROBE github.repository=[${{ github.repository }}]"

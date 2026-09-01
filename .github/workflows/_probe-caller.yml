@@ -1,0 +1,12 @@
+name: Probe Caller (temporary)
+
+on:
+  push:
+    branches: [feat/22-executable-surface]
+
+permissions:
+  contents: read
+
+jobs:
+  call-remote:
+    uses: abofs/stonyx-workflows/.github/workflows/_probe-reusable.yml@feat/22-executable-surface
