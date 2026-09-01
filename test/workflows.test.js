@@ -2,7 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 
-import { parseSteps, readWorkflow, stepRunBody } from './helpers/workflow-yaml.js';
+import { onKeys, parseSteps, readWorkflow, stepRunBody, workflowPath } from './helpers/workflow-yaml.js';
 
 // Workflow-source assertions for abofs/stonyx-workflows#22 (story A).
 //
@@ -91,11 +91,32 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
 });
 
 describe('self-ci.yml gates this repo (#22 AC3)', () => {
-  test('TODO: self-ci.yml exists and its steps parse', { todo: true }, () => {});
+  test('self-ci.yml exists and its steps parse', () => {
+    assert.ok(existsSync(workflowPath('self-ci.yml')), '.github/workflows/self-ci.yml should exist');
+    const steps = parseSteps(readWorkflow('self-ci.yml'));
+    assert.ok(steps.length > 0, 'self-ci.yml should declare steps');
+  });
 
-  test('TODO: its on: keys include both push and pull_request', { todo: true }, () => {});
+  test('its on: keys include both push and pull_request', () => {
+    const keys = onKeys(readWorkflow('self-ci.yml'));
+    assert.ok(keys.includes('push'), `on: keys ${JSON.stringify(keys)} should include push`);
+    assert.ok(keys.includes('pull_request'), `on: keys ${JSON.stringify(keys)} should include pull_request`);
+  });
 
-  test('TODO: it installs with a frozen lockfile and runs pnpm test', { todo: true }, () => {});
+  // The point of the workflow is to run this suite. A self-CI workflow that
+  // installs and does nothing else is a green light with no bulb behind it.
+  test('it installs with a frozen lockfile and runs pnpm test', () => {
+    const body = readWorkflow('self-ci.yml');
+    assert.match(body, /pnpm install --frozen-lockfile/);
+    assert.match(body, /pnpm test/);
+  });
 
-  test('TODO: the pre-existing reusable workflows remain workflow_call-only', { todo: true }, () => {});
+  // Contrast case, and the reason AC3 exists at all: the four pre-existing
+  // reusable workflows are workflow_call-only, so a push to this repo produced
+  // zero check runs before this story.
+  test('the pre-existing reusable workflows remain workflow_call-only', () => {
+    for (const name of ['ci.yml', 'npm-publish.yml', 'cascade.yml', 'security-audit.yml']) {
+      assert.deepEqual(onKeys(readWorkflow(name)), ['workflow_call'], `${name} triggers`);
+    }
+  });
 });
