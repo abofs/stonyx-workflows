@@ -109,6 +109,58 @@ Reusable workflow that dispatches `repository_dispatch` events to downstream dep
 
 ---
 
+### `self-ci.yml`
+
+Not a reusable workflow. Runs this repo's own test suite on every push and pull
+request, so changes to the workflows here are gated by a check run in this repo
+rather than only by a downstream consumer publishing a real version.
+
+```yaml
+on: [push, pull_request]
+```
+
+Runs `pnpm install --frozen-lockfile` then `pnpm test` on Node `24.13.0`.
+
+---
+
+## Development
+
+This repo has an executable surface: a private root `package.json`, a test
+suite, and one extracted script. There are no dependencies -- tests use
+`node:test` and `node:assert` only.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm test
+```
+
+### `scripts/derive-version.mjs`
+
+Exports `deriveVersion({ channel, latestStable, allVersions })`, the prerelease
+version arithmetic used by the `Calculate next alpha version` and `Calculate
+next beta version` steps in `npm-publish.yml`. Registry I/O stays in the
+workflow and is passed in as arguments, so the function is pure and testable
+offline.
+
+`npm-publish.yml` runs inside the *consumer's* checkout, so it checks this repo
+out at `.stonyx-workflows` to reach the script -- the same pattern `cascade.yml`
+uses to read `dependency-map.json` -- and removes that directory again before
+the publish steps, so it cannot end up in a consumer's npm tarball.
+
+### Tests
+
+| File | Covers |
+|------|--------|
+| `test/derive-version.test.js` | Characterization of `deriveVersion` against a committed, read-only capture of the `@stonyx/oauth` registry state (`test/fixtures/oauth-registry-state.json`) |
+| `test/workflows.test.js` | That `npm-publish.yml` calls the script and retains no inline version arithmetic, and that `self-ci.yml` triggers on push and pull request |
+| `test/helpers/workflow-yaml.js` | Minimal reader for the two workflow YAML shapes the tests assert on |
+
+`test/derive-version.test.js` pins **today's** derivation output, defects
+included. Changing it is how [#23](https://github.com/abofs/stonyx-workflows/issues/23)
+and [#24](https://github.com/abofs/stonyx-workflows/issues/24) become visible
+as diffs; do not "improve" the derivation without updating those assertions
+deliberately.
+
 ## Dependency Map
 
 `dependency-map.json` at the repo root defines the static dependency tree between Stonyx packages. Each key is a package name, and `dependents` lists the downstream repos that should be notified when that package publishes.
