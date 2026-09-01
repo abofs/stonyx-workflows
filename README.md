@@ -55,6 +55,14 @@ Reusable workflow for publishing npm packages with alpha/beta/stable release sta
 - **Stable** (manual dispatch): Patch/minor/major bump, creates tag + GitHub release
 - **Cascade mode**: When triggered via `cascade-source`, updates all `@stonyx/*` dependencies to latest from npm before publishing
 
+**Note for consumers:** on the alpha and beta paths this workflow checks
+`abofs/stonyx-workflows` out into `.stonyx-workflows/` in your workspace to
+reach `scripts/derive-version.mjs`, and removes it again before publishing. The
+checkout is pinned to the same commit your `uses:` line resolved to, so the ref
+you pin governs the derivation logic as well as the workflow. No change to your
+`publish.yml` is required. See
+[`docs/release.md` § Workflow consumption](docs/release.md#workflow-consumption).
+
 **Inputs:**
 
 | Input | Description | Default |

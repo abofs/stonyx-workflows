@@ -16,16 +16,16 @@
 | Platform | GitHub Actions (reusable `workflow_call` workflows) |
 | Runtime | Node.js 24.x (within workflow steps) |
 | Package Manager | pnpm 9 (within workflow steps) |
-| Scripting | Inline JavaScript via `actions/github-script@v7` and `node -e` |
+| Scripting | Inline JavaScript via `actions/github-script@v7` and `node -e`; extracted ESM modules under `scripts/` |
 | Registry | npm (OIDC trusted publishing) |
 | Configuration | `dependency-map.json` (static dependency graph) |
 | Release | `softprops/action-gh-release@v2` for GitHub Releases |
 
 ## Architecture Patterns
 
-- Workflow-as-library pattern: all workflows use `workflow_call` trigger so consumer repos reference them as `uses: abofs/stonyx-workflows/.github/workflows/<name>.yml@main`
+- Workflow-as-library pattern: the four reusable workflows (`ci.yml`, `npm-publish.yml`, `cascade.yml`, `security-audit.yml`) use the `workflow_call` trigger so consumer repos reference them as `uses: abofs/stonyx-workflows/.github/workflows/<name>.yml@main`. `self-ci.yml` is the exception -- it triggers on `push` and `pull_request` and is not callable
 - `npm-publish.yml` is the most complex workflow with conditional steps gated on version channel (alpha/beta/stable/custom) and cascade mode
-- Version resolution logic: inline Node.js scripts query npm registry via `npm view` CLI, parse all existing versions, compute next prerelease number
+- Version resolution logic is split: `npm-publish.yml` still queries the registry via the `npm view` CLI inline, but the parse/compute half lives in `scripts/derive-version.mjs` (`deriveVersion({ channel, latestStable, allVersions })`), which is pure and unit-tested. The workflow checks this repo out at `.stonyx-workflows` to reach it, pinned to `${{ job.workflow_sha }}` so the script and the workflow always come from the same commit
 - Cascade dependency update: during cascade mode, iterates `dependencies` and `devDependencies` for `@stonyx/*` packages, compares beta vs latest dist-tags, picks the higher semver
 - `cascade.yml` deduplicates downstream repos from `dependency-map.json` before dispatching (a repo may appear multiple times if it depends on the package in multiple sections)
 - Permissions are scoped per workflow: `ci.yml` and `security-audit.yml` need only `contents: read`, while `npm-publish.yml` requires `contents: write`, `id-token: write`, and `pull-requests: write`
@@ -34,6 +34,7 @@
 ## Live Knowledge
 
 - Changes to these workflows affect every Stonyx package repo -- validate workflow YAML syntax and step ordering carefully before merging
+- This repo now has its own test suite (`pnpm install --frozen-lockfile && pnpm test`, zero dependencies) gated by `self-ci.yml`. It asserts step ordering, the checkout `ref:`/`if:`, and executes the derivation steps' real `run:` bodies offline
 - The version calculation scripts handle edge cases: single-version packages where npm returns a string instead of an array, and first-ever prerelease where no existing versions match the prefix
 - `cascade-source` input being non-empty is the sole signal for cascade mode; it toggles checkout token usage (`CASCADE_PAT` vs `github.token`), lockfile handling (`--no-frozen-lockfile` vs `--frozen-lockfile`), and dependency update steps
 - Beta version bump commits use `[skip ci]` in the message to prevent re-triggering the publish workflow in an infinite loop
