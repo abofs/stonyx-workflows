@@ -881,7 +881,10 @@ describe('AC6b -- the body population the DIAGNOSTICS quantify over is pinned of
     // measured in is not a control, and a benign edit that is indistinguishable
     // from a sink is the churn tripwire this round removed elsewhere (#37,
     // Phase 3 §6; Phase 4 NEW-7/N18).
-    const BENIGN = ['      - name: Benign extra', '        run: pnpm run lint'].join('\n');
+    // The step name is deliberately not "Benign extra": that is the name every
+    // review probe appends to the file on disk, and a committed case using it
+    // would red on the reviewer's own control with a duplicate-name message.
+    const BENIGN = ['      - name: Benign control probe (test-only)', '        run: pnpm run lint'].join('\n');
 
     for (const file of WORKFLOW_FILES) {
       const benign = withExtraStep(readWorkflow(file), BENIGN);
