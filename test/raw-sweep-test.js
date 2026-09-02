@@ -725,9 +725,24 @@ describe('G1 -- the guarantee fails closed (#37)', () => {
 describe('G1 -- an allowlist entry has to say something (#37)', () => {
   // The allowlist is the review artifact, so a bulk approval must not be
   // expressible. These are the entry-shape refusals, each shown firing.
-  const GOOD = EXPRESSION_ALLOWLIST['ci.yml'][0];
+  //
+  // SELECTED BY CONTENT, NOT BY POSITION. This used to be
+  // `EXPRESSION_ALLOWLIST['ci.yml'][0]`, and the assertion below names
+  // `inputs.pnpm-version` -- so a contributor who wrote their new entry at the
+  // TOP of `ci.yml`'s list, which is the natural place to put one, reds
+  // `a generic reason is refused ...` for a reason that has nothing to do with
+  // what they wrote. Measured on this tree: an ordinary correct entry inserted
+  // at index 0 was 292 pass / 1 fail, and the same entry appended was 293 / 0.
+  // A red naming the wrong thing is the class this suite exists to remove, so
+  // the fixture is pinned to the entry it means.
+  const GOOD = EXPRESSION_ALLOWLIST['ci.yml'].find((e) => e.expression === '${{ inputs.pnpm-version }}');
 
   test('the live entries are all well-formed', () => {
+    // And the fixture every refusal below spreads is a REAL live entry. If the
+    // `find` above ever misses, `{ ...GOOD }` is `{}` and every refusal fires
+    // on the missing field rather than on the one it names.
+    assert.deepEqual(entryShapeProblems('ci.yml', GOOD), [], 'the refusal fixture must be a well-formed live entry');
+
     for (const [file, entries] of Object.entries(EXPRESSION_ALLOWLIST)) {
       for (const entry of entries) assert.deepEqual(entryShapeProblems(file, entry), []);
     }
@@ -955,7 +970,29 @@ describe('G1 -- an opener that is CONSTRUCTED rather than written is reported (#
     //
     // E_a -- stepping over backslash PAIRS. A `\x` immediately after a `\\`
     // must still report, or "stop reporting `\\`" silently deletes it.
-    assert.equal(escapeProblems('x.yml', 'run: "a\\\\\\x24{{ inputs.x }}"\n').length, 1, 'E_a: after a \\\\ pair');
+    //
+    // THE BACKSLASH COUNT IS THE WHOLE CASE, and the first draft of this line
+    // got it wrong: with THREE backslashes, pair-stepping lands on the third
+    // and reports anyway, so the assertion held under the mutation it was
+    // written to kill -- measured 293 pass / 0 fail with `at + 2` applied. Only
+    // an EVEN run discriminates, because that is when the step walks past the
+    // constructing escape entirely. Both parities are pinned below so the case
+    // cannot drift back into agreeing with the mutation.
+    //
+    // Reporting these is deliberate over-reporting, not a claim that `\\x24`
+    // constructs anything: in a double-quoted scalar `\\` is an escaped
+    // backslash and the `x` is literal. Deciding that requires knowing the
+    // scalar style, which is domain 3 -- the decision this scanner refuses to
+    // make. `\\` is where the way past is an ENTRY.
+    for (const backslashes of [2, 4]) {
+      const text = `run: "a${'\\'.repeat(backslashes)}x24{{ inputs.x }}"\n`;
+      assert.equal(
+        escapeProblems('x.yml', text).length,
+        1,
+        `E_a: a \\x after ${backslashes / 2} \\\\ pair(s) must still report -- an even run is what pair-stepping skips`,
+      );
+    }
+    assert.equal(escapeProblems('x.yml', 'run: "a\\\\\\x24{{ inputs.x }}"\n').length, 1, 'E_a: and an odd run too');
 
     // E_d -- reading only lines that contain a `"`. Verified against Psych:
     // this document's `run:` resolves to `start ${{ inputs.x }} end`, and the
@@ -1265,9 +1302,18 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
 
     assert.equal(chainOf('ci.yml', 'version: ${{ inputs.pnpm-version }}'), 'jobs > test > steps > with');
     assert.equal(chainOf('cascade.yml', 'PACKAGE_NAME: ${{ inputs.package-name }}'), 'jobs > dispatch > steps > env');
+    // NOT KEYED TO #34's OWN LINE. This fact was first written against
+    // `security-audit.yml`'s `run: pnpm audit --audit-level`, which is exactly
+    // the line #34 is going to rewrite. Measured: the #34 landing state written
+    // as `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` was 292 pass /
+    // 1 fail, and the single red was THIS assertion failing `must still be in
+    // security-audit.yml` -- a churn tripwire on the one change this suite is
+    // holding a gate open for, and the third recurrence of that class was what
+    // round 5 was briefed to remove. `run: pnpm test` states the same fact and
+    // no open issue touches it.
     assert.equal(
-      chainOf('security-audit.yml', 'run: pnpm audit --audit-level'),
-      'jobs > audit > steps',
+      chainOf('ci.yml', 'run: pnpm test'),
+      'jobs > test > steps',
       'a step key sits directly under steps:, not under the step name',
     );
     assert.equal(chainOf('npm-publish.yml', 'published-version:'), 'on > workflow_call > outputs');
@@ -1279,6 +1325,31 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     assert.equal(structuralContexts('a:\n  b: 1\n')[1], 'a');
     assert.equal(structuralContexts('a: 1\n  b: 2\n')[1], 'a (scalar)', 'a key with a value cannot open a mapping');
     assert.equal(structuralContexts('run: |\n  x: 1\n')[1], 'run (scalar)', 'and a block scalar opens no mapping');
+  });
+
+  test('the line key is the source line trimmed at the ends and NOWHERE ELSE', () => {
+    // The fourth disclosed limit, and until now the only one that lived in the
+    // PR body and nowhere in the repo -- `grep -rin "double space\|collaps"
+    // test/ README.md docs/` was empty (#37, Phase 5 N-N1). Both normalisations
+    // an engineer tidying this key would reach for were measured at 293 pass /
+    // 0 fail on this tree with nothing to stop them:
+    //
+    //   * collapsing internal double spaces, so an entry written for
+    //     `a:  ${{ x }}` also exempts `a: ${{ x }}` -- a WIDENING, which is the
+    //     move rule 5 forbids by name;
+    //   * `trimStart` instead of `trim`, which keeps trailing whitespace and
+    //     narrows instead -- fail-closed, but it makes the field something
+    //     other than what the message tells a contributor to copy.
+    //
+    // The key is the line, byte for byte, minus the leading and trailing
+    // whitespace that indentation and editors add. Every other byte of it is
+    // part of the key.
+    const doubled = 'run: echo  "${{ inputs.x }}"\n';
+    assert.equal(rawExpressions(doubled)[0].line, doubled.trim(), 'internal spacing is part of the key, not noise');
+    assert.notEqual(rawExpressions(doubled)[0].line, 'run: echo "${{ inputs.x }}"');
+
+    const trailing = '  run: echo "${{ inputs.x }}"   \n';
+    assert.equal(rawExpressions(trailing)[0].line, trailing.trim(), 'and both ends are trimmed, not just the left');
   });
 
   test('calibration: the context field discriminates, and the live values are derived', () => {

@@ -342,6 +342,15 @@ export function structuralContexts(text) {
  * re-indenting a block is not a change to what the line does, but every other
  * byte of it is part of the key.
  *
+ * NO OTHER NORMALISATION, and that is a rule rather than an accident. A `line`
+ * loosened to collapse internal double spaces WIDENS the exemption -- an entry
+ * written for `a:  ${{ x }}` would then also exempt `a: ${{ x }}` -- and the
+ * repo's rule is that the way past a check is an entry, never a widened
+ * pattern. `trimStart` instead of `trim` narrows it and stops the field being
+ * what the failure message tells a contributor to copy. Both were measured at
+ * 293 pass / 0 fail before there was a case for them (#37, Phase 4 NEW-6
+ * carry-over, Phase 5 N-N1); `raw-sweep-test.js` now pins both directions.
+ *
  * `context` is the key the line sits under, from `structuralContexts`. Moving
  * a byte-identical line from `with:` to `run:` changes it, which is what stops
  * an exemption travelling with its text.
