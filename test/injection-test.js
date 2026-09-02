@@ -20,9 +20,17 @@ import { parseSteps, readWorkflow, stepEnv, stepRunBody, stepScriptBody } from '
 //
 // Six of the seven sinks are proven here BY EXECUTION: the real `run:` body is
 // extracted from the YAML, dropped into a throwaway workspace with a fake
-// `npm`/`pnpm` on PATH, and run under the same shell GitHub Actions uses
-// (`bash -eo pipefail`). A payload that executes writes into `$CANARY_DIR`;
-// the assertion is that the directory stays empty and the step fails loudly.
+// `npm`/`pnpm` on PATH, and run under `bash --noprofile --norc -eo pipefail`.
+// That is NOT the shell the runner uses. No `shell:` or `defaults:` key appears
+// anywhere in `.github/workflows/`, so every `run:` body executes under GitHub's
+// default `bash -e {0}` -- `-e`, no `pipefail`. This harness is therefore
+// strictly stricter than production, and the gap is latent rather than
+// theoretical only because no `run:` body in this repo contains a shell
+// pipeline; the day one does, a failure mid-pipe would red here and pass on the
+// runner. Adding `shell: bash` to the workflows would close it, and that is a
+// workflow change, not a test change. A payload that executes writes into
+// `$CANARY_DIR`; the assertion is that the directory stays empty and the step
+// fails loudly.
 //
 // The seventh (AC5, the two `actions/github-script` sinks) splits in two, and
 // the split is the point:
@@ -466,8 +474,15 @@ describe('AC4 -- npm naming grammar is enforced before any sink (#32)', () => {
 // `${{ }}` expression appears inside the script text at all, an `env:` mapping
 // carries the values, and the script reads them from `process.env`.
 //
-// The BEHAVIOUR half is a separate describe block below and it is executed --
-// once no expression remains, the script body is plain JavaScript.
+// The BEHAVIOUR half is executed for S5 (`cascade.yml`'s dispatch guard) in a
+// separate describe block below -- once no expression remains, the script body
+// is plain JavaScript, so the real `script:` text runs under a stubbed `github`
+// client. S3 (`Comment on PR with alpha version`) has NO executed case: it
+// carries no guard to execute, and only the structural assertions below cover
+// it. The property S3 is actually about -- that a hostile package name lands in
+// the comment `body` as inert text rather than as JS -- would pin cheaply under
+// the same `AsyncFunction` harness and is worth adding, but deliberately is not
+// added here (SME Phase 4 NEW-9).
 describe('AC5 -- S3/S5: no expression reaches either github-script body (#32)', () => {
   const SINKS = [
     { workflow: 'npm-publish.yml', step: COMMENT_STEP, vars: { PACKAGE_NAME: 'package-name', PUBLISHED_VERSION: 'package-version' } },
@@ -799,13 +814,53 @@ describe('no workflow in this repo interpolates a consumer string into program t
 // That mechanism is one apostrophe deep. Each of these programs carries prose
 // comments explaining the sink it closes, and bash gives `'` no escape inside a
 // single-quoted string: a reviewer who writes `the consumer's package.json` in
-// one of those comments closes the string early, and every line after it is
-// handed back to the shell as source. That reinstates S1a exactly, with no
-// diff to the JavaScript and nothing else in this suite going red.
+// one of those comments closes the string early and hands the region after it
+// back to the shell as source.
+//
+// What happens next was measured on the REAL extracted bodies by three
+// independent SME phases, and it is worth stating precisely, because an earlier
+// account of it was wrong in a way that would mislead the next reader into
+// concluding this whole block is theatre.
+//
+// The stated reason was wrong. It is NOT true that the six programs contain no
+// `$`: every one of them contains exactly one, the regex end-anchor `$/`, which
+// bash leaves literal. The property that actually holds is narrower -- none of
+// them contains a shell-ACTIVE `$` form (`$` followed by an identifier
+// character, `{` or `(`), a backtick, or a `${{ }}`. That is a property of
+// today's text, not of the construct.
+//
+// The outcome depends entirely on WHERE the apostrophes land, and one of the
+// positions is silent:
+//
+//   - ONE apostrophe leaves the quote count odd. Bash aborts at parse time --
+//     exit 2, `unexpected EOF while looking for matching '`, nothing executed.
+//     It fails closed, loudly. This is the only case that does.
+//   - TWO apostrophes on SEPARATE comment lines put JS in the unquoted region.
+//     Bash tries to run it: exit 126, `//: is a directory`, no canary.
+//   - TWO apostrophes on ONE prose comment line restore parity without exposing
+//     any JS. The step exits 0 -- but the `node -e` program it was supposed to
+//     run never ran, so the validator never ran either, and an EMPTY `name=` is
+//     written to `$GITHUB_OUTPUT`. Green job, wrong output, nothing in the log.
+//   - TWO apostrophes on one prose comment line WITH a `$(...)` or a backtick
+//     between them (`// the consumer'$(touch $CANARY/PWNED)'s package.json`)
+//     execute arbitrary shell, exit 0, AND still emit the correct
+//     `name=@stonyx/oauth`. Fully silent. Three phases each produced a canary
+//     from the real file this way. The substitution characters come from the
+//     INJECTED prose, which is why "the current programs contain no backtick"
+//     does not bound the exposure.
+//
+// So: "an apostrophe fails closed on the real file" is true of exactly one of
+// the four positions and false of the two that matter. The right
+// characterisation is that today's behaviour is an ACCIDENT OF THE CURRENT
+// TEXT, not a property of the construct -- and the measurements support that
+// more strongly than the argument for it originally did.
 //
 // The trap is not hypothetical. The base file carried `it's the release` in one
 // of these comments; the #32 fix rewrote it to `it is` for precisely this
 // reason, and that rewrite was the whole of the protection until this block.
+// The same file already interpolates a `${{ }}` into a `run:` body one step
+// away, so a future expansion inside one of these programs is not hypothetical
+// either.
 describe('every `node -e` program stays a single-quoted shell string (#32, S1a)', () => {
   /**
    * Every `node -e`/`node -p` program in a `run:` body, as
@@ -974,8 +1029,13 @@ describe('every `node -e` program stays a single-quoted shell string (#32, S1a)'
           program.includes("'"),
           false,
           `${file} step ${JSON.stringify(step)}: the \`node ${flag}\` program contains a single quote, which `
-          + "closes the shell string early and hands every following line back to the shell as source -- "
-          + `reinstating the #32 S1a sink. Rewrite the apostrophe away (\`it's\` -> \`it is\`). Offending line: `
+          + 'closes the shell string early and hands the region after it back to the shell as source, '
+          + 'reinstating the #32 S1a sink. Measured on these bodies: one apostrophe fails closed loudly '
+          + '(odd parity, bash exits 2 at parse time); TWO restore parity and the outcome is then silent -- '
+          + 'on one prose comment line the step exits 0 having written an EMPTY name= to $GITHUB_OUTPUT, and '
+          + 'with a $(...) or a backtick between them it exits 0 having executed arbitrary shell AND emitted '
+          + 'the correct name=. Do not conclude from the single-apostrophe case that this guard is theatre. '
+          + `Rewrite the apostrophe away (\`it's\` -> \`it is\`). Offending line: `
           + `${JSON.stringify((line ?? '').trim())}`,
         );
       }
