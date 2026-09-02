@@ -821,6 +821,14 @@ describe('every `node -e` program stays a single-quoted shell string (#32, S1a)'
    * nothing but `'` or `')`. A prose apostrophe is always on a deeper-indented
    * line, so it can never be mistaken for that terminator.
    *
+   * Both spellings of the flag's separator are matched (`node -e '` and
+   * `node --eval='`), because both are legal Node and the `=` form used to slip
+   * the opener regex entirely: it was neither swept nor thrown on, and the
+   * population pin below counted only what this regex matched, so it agreed
+   * with the omission. A guard that under-counts its own population and then
+   * reports success is the exact defect #32 is about, so the pin is now taken
+   * from the raw file text instead (see `candidateNodeEvalInvocations`).
+   *
    * Any other `node -e` shape throws rather than being skipped. A single-line
    * `node -e 'x'` is a legitimate thing to write and this helper does not
    * understand it; failing loudly means someone extends the helper, whereas
@@ -831,7 +839,7 @@ describe('every `node -e` program stays a single-quoted shell string (#32, S1a)'
     const programs = [];
 
     for (let i = 0; i < lines.length; i++) {
-      const opener = lines[i].match(/\bnode\s+(-e|-p|--eval|--print)\s+(.*)$/);
+      const opener = lines[i].match(/\bnode\s+(-e|-p|--eval|--print)[\s=]+(.*)$/);
       if (!opener) continue;
       const [, flag, rest] = opener;
 
@@ -862,6 +870,26 @@ describe('every `node -e` program stays a single-quoted shell string (#32, S1a)'
     return programs;
   }
 
+  /**
+   * Every `node` invocation in a workflow file that hands node a program on the
+   * command line, counted straight off the raw text.
+   *
+   * This is the AUTHORITATIVE population, and it deliberately shares no code
+   * with `nodeEvalPrograms`. Deriving the expected count from the extractor is
+   * what let SME Phase 1 append a seventh program as `node --eval='` -- a live
+   * apostrophe closing a live single-quoted shell string, a genuine S1a
+   * reinstatement -- and keep the suite green at 160/0: the extractor did not
+   * match it, so the count it produced was still 6 and the pin agreed.
+   *
+   * So this detector is over-broad and shape-blind on purpose. It looks only
+   * for `node` followed by an eval flag, in any separator form and anywhere in
+   * the file, and it does not care whether the program is one line or thirty,
+   * or whether the extractor can parse it. A program the extractor cannot
+   * handle still counts here, which is what makes the two numbers able to
+   * disagree.
+   */
+  const candidateNodeEvalInvocations = (text) => text.match(/\bnode\s+(?:-e|-p|--eval|--print)\b/g) ?? [];
+
   const programsIn = (file) => {
     const text = readWorkflow(file);
     const found = [];
@@ -877,17 +905,65 @@ describe('every `node -e` program stays a single-quoted shell string (#32, S1a)'
     return found;
   };
 
-  // Guards the guard. Every per-file case below passes trivially against an
-  // empty list, so the population is pinned: if `node -e` were renamed, moved
-  // behind a script, or the extractor stopped matching, this is what goes red
-  // instead of the suite quietly guarding nothing.
+  // Guards the guard. Every per-file case below is universally quantified over
+  // what the extractor matched, so all of them pass trivially against an empty
+  // list. The population therefore has to be pinned from OUTSIDE the extractor:
+  // the expected count comes from the raw file text, and the extractor is then
+  // required to have matched all of it. If `node -e` were renamed, moved behind
+  // a script, or written in a shape the extractor does not parse, this is what
+  // goes red instead of the suite quietly guarding fewer programs than exist.
   test('the sweep still finds every node -e program in the repo', () => {
     assert.deepEqual(WORKFLOW_FILES, ['cascade.yml', 'ci.yml', 'npm-publish.yml', 'security-audit.yml', 'self-ci.yml']);
 
-    const counts = Object.fromEntries(
-      WORKFLOW_FILES.map((file) => [file, programsIn(file).length]).filter(([, n]) => n > 0),
+    const nonZero = (pairs) => Object.fromEntries(pairs.filter(([, n]) => n > 0));
+
+    // Authoritative: counted off the file, not off the thing being guarded.
+    const candidates = nonZero(
+      WORKFLOW_FILES.map((file) => [file, candidateNodeEvalInvocations(readWorkflow(file)).length]),
     );
-    assert.deepEqual(counts, { 'npm-publish.yml': 6 });
+    assert.deepEqual(candidates, { 'npm-publish.yml': 6 });
+
+    // And the extractor reached every one of them. These two numbers are
+    // produced by different code on purpose; equality is the assertion.
+    const matched = nonZero(WORKFLOW_FILES.map((file) => [file, programsIn(file).length]));
+    assert.deepEqual(
+      matched,
+      candidates,
+      'the `node -e` extractor matched fewer programs than the raw workflow text contains -- some '
+      + 'program is in a shape its opener regex does not recognise, so it is silently outside the '
+      + 'apostrophe and compile guards below',
+    );
+  });
+
+  // The regression this pin exists for, kept as a case in its own right so the
+  // reason survives even if the counts change. SME Phase 1 proved the bypass by
+  // appending exactly this program to `Configure git` and running the full
+  // suite: 160 pass / 0 fail, green, with a live apostrophe closing a live
+  // single-quoted shell string. Both halves failed together -- the opener regex
+  // required whitespace after the flag so the program was never swept, and the
+  // population pin counted only matched programs so it still read 6.
+  test('a `node --eval=` program is neither skipped by the extractor nor missed by the population pin', () => {
+    const body = [
+      "node --eval='",
+      "  // the consumer's package.json is read here",
+      '  console.log(1);',
+      "'",
+    ].join('\n');
+
+    assert.equal(
+      candidateNodeEvalInvocations(body).length,
+      1,
+      'the population counter must see `node --eval=<program>`; if it cannot, the pin above cannot '
+      + 'notice the extractor dropping one',
+    );
+
+    const found = nodeEvalPrograms(body);
+    assert.equal(found.length, 1, '`node --eval=<program>` must not be silently skipped by the opener regex');
+    assert.equal(
+      found[0].program.includes("'"),
+      true,
+      'the extracted program must still carry the apostrophe, so the sweep above can red on it',
+    );
   });
 
   for (const file of WORKFLOW_FILES) {
