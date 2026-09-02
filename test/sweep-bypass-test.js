@@ -741,10 +741,17 @@ describe('AC6b -- the body population the DIAGNOSTICS quantify over is pinned of
       '          echo "cascading ${{ inputs.package-name }}"',
     ].join('\n'));
 
-    assert.equal(scalarKeyLineCount(M6b, 'run'), 2);
+    // Derived from the file, never snapshotted. `cascade.yml` carries no `run:`
+    // body today, so hard-coding `2` here reds on the first `run:` step anyone
+    // adds to it -- the churn-tripwire shape `7e41b0f` deleted for `ci.yml`,
+    // surviving twice in this file, and the reason B27's benign control was
+    // green only because it was appended to `ci.yml` (#37, Phase 3 §6, Phase 4
+    // NEW-7, Phase 1 F6).
+    const bodies = scalarKeyLineCount(cascade, 'run');
+    assert.equal(scalarKeyLineCount(M6b, 'run'), bodies + 2, 'the 6b shape adds a real run: line and a payload one');
     assertReports(
       stepPopulationProblems('cascade.yml', M6b),
-      /holds 2 `run:` key line\(s\) in its raw text but the sweep read 1 run: body\(ies\)/,
+      new RegExp(`holds ${bodies + 2} \`run:\` key line\\(s\\) in its raw text but the sweep read ${bodies + 1} `),
       'a run: key line the sweep never read is a body the executed tests are not really running',
     );
   });
@@ -837,6 +844,29 @@ describe('AC6b -- the body population the DIAGNOSTICS quantify over is pinned of
     );
 
     assert.deepEqual(NON_BODY_KEY_LINES, {}, 'nothing is declared against the workflows that ship today');
+  });
+
+  test('control: a benign added step is silent in EVERY workflow, not only in ci.yml', () => {
+    // The published control B27 was measured on `ci.yml`, where it is genuinely
+    // green. Appended to `cascade.yml` -- the file that holds `CASCADE_PAT` --
+    // the identical benign step measured 254 pass / 2 fail, on two hard-coded
+    // counts above, and a REAL constructed-opener sink in the same file
+    // produced the same 254/2. A control that only holds in the file it was
+    // measured in is not a control, and a benign edit that is indistinguishable
+    // from a sink is the churn tripwire this round removed elsewhere (#37,
+    // Phase 3 §6; Phase 4 NEW-7/N18).
+    const BENIGN = ['      - name: Benign extra', '        run: pnpm run lint'].join('\n');
+
+    for (const file of WORKFLOW_FILES) {
+      const benign = withExtraStep(readWorkflow(file), BENIGN);
+      assert.notEqual(benign, readWorkflow(file), `the benign step must actually have applied to ${file}`);
+      assert.deepEqual(sweepProblems(file, benign), [], `${file}: a step with no expression must be silent`);
+      assert.deepEqual(
+        rawSweepProblems(file, benign, EXPRESSION_ALLOWLIST),
+        [],
+        `${file}: the guarantee has nothing to say about a step that carries no expression`,
+      );
+    }
   });
 
   test('the `>` half of the block-scalar test is load-bearing, not decoration', () => {
@@ -954,7 +984,14 @@ describe('AC6b -- the body population the DIAGNOSTICS quantify over is pinned of
     const evalSink = withExtraStep(cascade, "      - run: node -e 'console.log(1)'");
     const exprSink = withExtraStep(cascade, '      - run: echo "${{ inputs.package-name }}"');
 
-    assert.equal(parseSteps(evalSink).length, 3, 'the unnamed node -e step is a step');
+    // Derived, for the same reason: a snapshot here reds on any added step in
+    // `cascade.yml`, benign or not, so a real sink and a no-op were measured
+    // producing an identical 254/2 (#37, Phase 3 §6).
+    assert.equal(
+      parseSteps(evalSink).length,
+      parseSteps(cascade).length + 1,
+      'the unnamed node -e step is a step',
+    );
     assert.match(runBodyOf(parseSteps(evalSink).at(-1)), /node -e/, 'and its body is readable');
 
     assertReports(

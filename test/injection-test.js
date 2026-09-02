@@ -19,7 +19,7 @@ import {
   stepScriptBody,
 } from './helpers/workflow-yaml.js';
 import { EXPRESSION_ALLOWLIST } from './helpers/expression-allowlist.js';
-import { rawSweepProblems, readWorkflowFile } from './helpers/raw-expression-scan.js';
+import { rawSweepProblems, readWorkflowFile, workflowFileNames } from './helpers/raw-expression-scan.js';
 import {
   ALLOWLIST,
   deadAllowlistProblems,
@@ -89,8 +89,18 @@ const WORKFLOWS = { 'npm-publish.yml': npmPublish, 'cascade.yml': cascade };
 // unable to fire, because it deep-equalled the ALREADY-FILTERED list. A
 // complete `.github/workflows/evil.yaml` carrying a `workflow_call` input into
 // a shell body measured 206 pass / 0 fail (#37, Phase 3 §4).
+//
+// It also used to call `readdirSync` here, which reproduced that same defect
+// one file over: the pin below deep-equalled a list this file had filtered
+// itself, so restoring `.filter((n) => n.endsWith('.yml'))` at this line was
+// measured at 256 pass / 0 fail -- a decorative guard, in the file the README
+// calls the guarantee's live half (#37, Phase 2 N-1). The enumeration is now
+// `workflowFileNames`, whose no-extension-filter property is proven against a
+// real temp directory in `raw-sweep-test.js` and reds when narrowed. That is
+// what makes the duplicate guarantee call at the bottom of this file DELIBERATE
+// duplicate coverage rather than an unequal pair.
 const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
-const WORKFLOW_FILES = readdirSync(WORKFLOW_DIR).sort();
+const WORKFLOW_FILES = workflowFileNames();
 
 const ALPHA_STEP = 'Calculate next alpha version';
 const BETA_STEP = 'Calculate next beta version';

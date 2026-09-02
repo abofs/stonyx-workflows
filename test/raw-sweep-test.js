@@ -220,10 +220,39 @@ describe('G1 -- the raw ${{ }} guarantee is green on the workflows that ship (#3
     });
   }
 
-  test('the allowlist accounts for all 42 occurrences and nothing else', () => {
-    // Two independent counts of the same thing. `rawExpressions` emits exactly
-    // one record per opener; `split` counts openers without looking at records.
-    // The allowlist's own `occurrences` sum is the third.
+  test('no two entries in a file pin the same (context, line, expression)', () => {
+    // THIS HAS TO COME BEFORE THE COUNTS, and the order is the whole point.
+    // `rawSweepProblems` reports NOTHING for a duplicated key: the second copy
+    // simply never matches a tally the first already satisfied. Until this
+    // assertion existed, the only thing catching a duplicate -- and so the only
+    // thing catching a SECOND, CONTRADICTORY reason for the same line, which is
+    // the bulk-approval vector the `why`-uniqueness rule exists to stop and
+    // which a one-word reword defeats -- was the hard-coded occurrence total
+    // (#37, Phase 1 F3). Deriving the counts without adding this would have
+    // opened a hole.
+    for (const [file, entries] of Object.entries(EXPRESSION_ALLOWLIST)) {
+      const keys = entries.map((e) => JSON.stringify([e.context, e.line, e.expression]));
+      assert.equal(
+        new Set(keys).size,
+        keys.length,
+        `${file} pins the same (context, line, expression) twice; the second entry can never be consulted`,
+      );
+    }
+  });
+
+  test('the allowlist accounts for every occurrence and nothing else', () => {
+    // Three counts of the same thing, DERIVED rather than snapshotted.
+    // `rawExpressions` emits exactly one record per opener; `split` counts
+    // openers without looking at records; the allowlist's own `occurrences` sum
+    // is the third, and the three must agree.
+    //
+    // The literals `42` and `36` used to be asserted here. An ordinary new
+    // expression WITH a correct entry was 255 pass / 1 fail, remediable only by
+    // bumping a number -- the one place in this design that teaches "when the
+    // guard reds, edit the literal", met by every workflow change that touches
+    // an expression (#37, Phase 2 W-1; Phase 1 F3; Phase 4). Commit `7e41b0f`
+    // exists solely to delete that shape elsewhere. The signal is the AGREEMENT
+    // of three independent counts, and nothing about it needs a magic number.
     let scanned = 0;
     let split = 0;
     for (const file of FILES) {
@@ -235,15 +264,29 @@ describe('G1 -- the raw ${{ }} guarantee is green on the workflows that ship (#3
     const entries = Object.values(EXPRESSION_ALLOWLIST).flat();
     const pinned = entries.reduce((sum, e) => sum + e.occurrences, 0);
 
-    assert.equal(scanned, 42, 'the scanner must see every opener in the five files');
-    assert.equal(split, 42, 'and an independent count of the raw bytes must agree with it');
-    assert.equal(pinned, 42, 'the allowlist must pin exactly as many occurrences as the files carry');
-    assert.equal(entries.length, 36, '42 occurrences across 36 distinct (line, expression) pairs');
+    assert.ok(scanned > 0, 'if the five files carry no openers at all, every agreement below is vacuous');
+    assert.equal(split, scanned, 'an independent count of the raw bytes must agree with the scanner');
+    assert.equal(pinned, scanned, 'the allowlist must pin exactly as many occurrences as the files carry');
+    assert.ok(
+      entries.length <= scanned,
+      'more entries than occurrences means at least one is dead, which the per-file sweeps report by name',
+    );
     assert.deepEqual(
       Object.keys(EXPRESSION_ALLOWLIST).sort(),
       FILES,
       'every file in the directory has an allowlist section, even if it is empty',
     );
+  });
+
+  test('calibration: the three counts really can disagree', () => {
+    // Deriving a number instead of snapshotting it is only worth doing if the
+    // derivation can still fail. A duplicated entry, a dropped one, and an
+    // occurrence the scanner cannot see each break a different equality.
+    const ONE = { line: 'a: ${{ x.y }}', context: 'top', expression: '${{ x.y }}', occurrences: 1, why: 'x' };
+    const sum = (entries) => entries.reduce((total, e) => total + e.occurrences, 0);
+    assert.notEqual(sum([ONE, { ...ONE, occurrences: 1 }]), rawExpressions('a: ${{ x.y }}\n').length);
+    assert.equal(sum([ONE]), rawExpressions('a: ${{ x.y }}\n').length);
+    assert.equal(rawExpressions('a ${{ x  ${{ y }} b\n').length, 'a ${{ x  ${{ y }} b\n'.split('${{').length - 1);
   });
 
   test('no two entries within a file share a reason', () => {
@@ -587,6 +630,53 @@ describe('G1 -- every bypass family from all ten PR #38 reviews reds (#37)', () 
   });
 });
 
+// The `security-audit.yml` allowlist AS IT STANDS BEFORE #34, frozen beside the
+// frozen fixture it is measured against.
+//
+// Reading the LIVE allowlist here re-coupled a frozen file to a moving list,
+// and the exact state #34 lands in -- its fix applied, both entries deleted per
+// README.md, its own replacement entry added -- measured 255 pass / 1 fail on
+// `calibration: unmutated is clean`. The cheapest exit from that red is to edit
+// or delete the case that proves the guarantee is positively re-armable, which
+// is the one case in this suite that must not be routed around (#37, Phase 2
+// HIGH-1; the same sequence measured clean at `d5bb1a6` and `37df8b8`).
+//
+// `sweep-bypass-test.js:315` already freezes `ALLOWLIST_AT_E07E185` beside this
+// fixture and README.md already documents the fixture as pinned "with a local
+// copy of its allowlist entry" -- true there, and now true here. DO NOT re-point
+// this at `EXPRESSION_ALLOWLIST`: #34 deletes the third entry, and this is the
+// text the mutations below are measured against.
+const ALLOWLIST_AT_E07E185 = {
+  'security-audit.yml': [
+    {
+      line: 'version: ${{ inputs.pnpm-version }}',
+      context: 'with',
+      expression: '${{ inputs.pnpm-version }}',
+      occurrences: 1,
+      why: 'inputs.pnpm-version reaching pnpm/action-setup\'s `version:` input in the audit job. An action '
+        + 'input, not program text, and unrelated to the open sink recorded below.',
+    },
+    {
+      line: 'node-version: ${{ inputs.node-version }}',
+      context: 'with',
+      expression: '${{ inputs.node-version }}',
+      occurrences: 1,
+      why: 'inputs.node-version reaching actions/setup-node\'s `node-version:` input in the audit job. An '
+        + 'action input, not program text, and unrelated to the open sink recorded below.',
+    },
+    {
+      line: 'run: pnpm audit --audit-level ${{ inputs.audit-level }}',
+      context: 'steps',
+      expression: '${{ inputs.audit-level }}',
+      occurrences: 1,
+      why: 'KNOWN OPEN SINK, tracked as abofs/stonyx-workflows#34: inputs.audit-level is a workflow_call '
+        + 'input interpolated straight into a shell run: body. An abridged copy of the live entry as it '
+        + 'stands before #34, so this case measures the frozen fixture against the list that fixture was '
+        + 'written against rather than against a list #34 is required to change.',
+    },
+  ],
+};
+
 describe('G1 -- the guarantee fails closed (#37)', () => {
   // Three ways to red, each measured. An unanticipated shape must not be able
   // to fall out of the population -- that is the failure mode the reader-based
@@ -638,6 +728,20 @@ describe('G1 -- the guarantee fails closed (#37)', () => {
     );
   });
 
+  test('two openers on one line emit two records, even when the first does not close', () => {
+    // The invariant the whole design rests on, stated absolutely in
+    // `rawExpressions`' docstring and measured FALSE: the scan used to advance
+    // past the closer, so the first expression's span swallowed the second
+    // opener and `a ${{ x  ${{ y }} b` emitted ONE record for TWO openers. The
+    // `scanned === split` cross-check that is supposed to corroborate the count
+    // silently disagreed with itself, and it is only ever exercised on the
+    // green side (#37, Phase 1 F4 / Phase 4 NEW-8).
+    const nested = 'a ${{ x  ${{ y }} b\n';
+    assert.equal(rawExpressions(nested).length, 2, 'exactly one record per opener, always');
+    assert.equal(rawExpressions(nested).length, nested.split('${{').length - 1, 'and the two counts agree');
+    assert.deepEqual(rawExpressions(nested).map((e) => e.expression), ['${{ x  ${{ y }}', '${{ y }}']);
+  });
+
   test('an unparseable expression reds -- there is no shape the scan skips', () => {
     const unparseable = appendStep(cascade, step(
       '      - name: Announce the cascade',
@@ -679,7 +783,6 @@ describe('G1 -- the guarantee fails closed (#37)', () => {
     // reads "$AUDIT_LEVEL". With the entry left in place the suite must red --
     // once as a dead entry, and again on the comment if the fix leaves one.
     const SINK = '        run: pnpm audit --audit-level ${{ inputs.audit-level }}';
-    const AL = { 'security-audit.yml': EXPRESSION_ALLOWLIST['security-audit.yml'] };
     const fix34 = ({ comment }) => FIXTURE.replace(SINK, step(
       '        env:',
       '          AUDIT_LEVEL: ${{ inputs.audit-level }}',
@@ -689,19 +792,19 @@ describe('G1 -- the guarantee fails closed (#37)', () => {
     ));
 
     assert.ok(FIXTURE.includes(SINK), 'the fixture must still carry the #34 sink line to mutate it');
-    assert.deepEqual(rawSweepProblems('security-audit.yml', FIXTURE, AL), [], 'calibration: unmutated is clean');
+    assert.deepEqual(rawSweepProblems('security-audit.yml', FIXTURE, ALLOWLIST_AT_E07E185), [], 'calibration: unmutated is clean');
 
     for (const comment of [true, false]) {
       const fixed = fix34({ comment });
       assert.notEqual(fixed, FIXTURE, `the #34 fix (comment=${comment}) must actually have applied`);
       assertReports(
-        rawSweepProblems('security-audit.yml', fixed, AL),
+        rawSweepProblems('security-audit.yml', fixed, ALLOWLIST_AT_E07E185),
         DEAD,
         'a fixed sink must lose its exemption; deleting the entry is what #34 owes, not an assertion about it',
       );
       // The new env: line is itself an unpinned expression, so #34 also has to
       // write the entry that approves the remediation it introduces.
-      assertReports(rawSweepProblems('security-audit.yml', fixed, AL), UNPINNED, 'the env: line needs its own entry');
+      assertReports(rawSweepProblems('security-audit.yml', fixed, ALLOWLIST_AT_E07E185), UNPINNED, 'the env: line needs its own entry');
     }
 
     // Positive re-arming: with the sink fixed and the entry deleted, putting
@@ -763,6 +866,52 @@ describe('G1 -- an allowlist entry has to say something (#37)', () => {
       entryShapeProblems('ci.yml', { ...GOOD, occurrences: 0 }),
       /positive integer occurrences:/,
       'an unpinned count tolerates a second copy of the expression on the same line for free',
+    );
+  });
+
+  test('a why: shorter than 60 characters is refused', () => {
+    // Documented as a refusal since the module was written, with no case:
+    // deleting the check left 256 pass / 0 fail (#37, Phase 4 NEW-3, N5). The
+    // body said "each refusal is a committed case"; this is the sentence
+    // becoming true rather than the claim being softened.
+    assertReports(
+      entryShapeProblems('ci.yml', { ...GOOD, why: 'inputs.pnpm-version is fine.' }),
+      /needs a why: that states what the expression is/,
+      'a reason too short to state a destination is an approval nobody made',
+    );
+    assert.ok(GOOD.why.length >= 60, 'calibration: the live entry clears the floor this case pins');
+  });
+
+  test('an entry whose expression does not begin with the opener is refused', () => {
+    // The refusal the PR body did not even list. Deleting it left 256/0 (N6).
+    // Without it an entry can pin `inputs.pnpm-version` -- a substring that is
+    // not an expression -- and never match anything, which is a dead exemption
+    // that reads like a live one.
+    assertReports(
+      entryShapeProblems('ci.yml', { ...GOOD, expression: 'inputs.pnpm-version }}' }),
+      /has no expression: beginning with the opener it exempts/,
+      'an entry that cannot describe an expression cannot be checked against one',
+    );
+  });
+
+  test('an entry with no context: is refused', () => {
+    assertReports(
+      entryShapeProblems('ci.yml', { ...GOOD, context: undefined }),
+      /has no context:/,
+      'without a context the entry approves the characters of a line rather than the position it occupies',
+    );
+  });
+
+  test('the guarantee itself runs the entry-shape refusals, not only this describe block', () => {
+    // The composition half. Deleting the line that calls `entryShapeProblems`
+    // from `rawSweepProblems` left 256 pass / 0 fail, because `the live entries
+    // are all well-formed` above calls it directly -- so the refusals were
+    // pinned and their WIRING was not (#37, Phase 4 N7).
+    const malformed = { 'ci.yml': [{ ...GOOD, why: 'too short' }] };
+    assertReports(
+      rawSweepProblems('ci.yml', ci, malformed),
+      /needs a why: that states what the expression is/,
+      'a malformed entry must red through the guarantee, not only through a test that calls the checker',
     );
   });
 });
