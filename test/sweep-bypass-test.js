@@ -846,6 +846,32 @@ describe('AC6b -- the body population the DIAGNOSTICS quantify over is pinned of
     assert.deepEqual(NON_BODY_KEY_LINES, {}, 'nothing is declared against the workflows that ship today');
   });
 
+  test('each unpinned-expression message names its OWN allowlist, so the two are not confusable', () => {
+    // The message a contributor hits used to appear VERBATIM in both
+    // `raw-expression-scan.js` and `interpolation-sweep.js`, and neither named
+    // its own file -- so someone who had already added the entry rule 1 asks
+    // for read a message telling them to do it again, and had to work out from
+    // two near-identical strings which of two allowlists was complaining
+    // (#37, Phase 5 H1; Phase 2 N-2).
+    const sink = withExtraStep(cascade, [
+      '      - name: Announce the cascade',
+      '        run: echo "cascading ${{ inputs.package-name }}"',
+    ].join('\n'));
+
+    const guarantee = rawSweepProblems('cascade.yml', sink, EXPRESSION_ALLOWLIST).join('\n');
+    const diagnostic = runSweepProblems('cascade.yml', sink).join('\n');
+
+    assert.match(guarantee, /test\/helpers\/expression-allowlist\.js/, 'the guarantee names the file it reads');
+    assert.ok(!guarantee.includes('interpolation-sweep.js'), 'and it does not point at the diagnostic allowlist');
+    assert.match(diagnostic, /test\/helpers\/interpolation-sweep\.js/, 'the diagnostic names the file it reads');
+    assert.match(
+      diagnostic,
+      /SECOND obligation/,
+      'and it says so: it names BOTH allowlists and states that this is a second entry, not a repeat of the '
+      + 'first -- which is the whole point, because a contributor who has already satisfied rule 1 arrives here',
+    );
+  });
+
   test('control: a benign added step is silent in EVERY workflow, not only in ci.yml', () => {
     // The published control B27 was measured on `ci.yml`, where it is genuinely
     // green. Appended to `cascade.yml` -- the file that holds `CASCADE_PAT` --

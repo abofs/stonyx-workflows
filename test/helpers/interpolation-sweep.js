@@ -254,14 +254,17 @@ export function runSweepProblems(file, text, allowlist = ALLOWLIST) {
       if (!entry) {
         problems.push(
           `${label(file, step)} interpolates ${expression} into shell source on the line `
-          + `${JSON.stringify(line)}. No allowlist entry pins that expression to that line.`,
+          + `${JSON.stringify(line)}. No entry in the step-scoped ALLOWLIST in `
+          + 'test/helpers/interpolation-sweep.js pins that expression to that line in that step. This is the '
+          + 'DIAGNOSTIC sweep, and it is a SECOND obligation: an expression in a run:/script: body needs an '
+          + 'entry here as well as the one in test/helpers/expression-allowlist.js that the guarantee reads.',
         );
         continue;
       }
       if (count !== entry.occurrences) {
         problems.push(
           `${label(file, step)} interpolates ${expression} ${count} time(s) on the allowlisted line; `
-          + `the allowlist exempts ${entry.occurrences}.`,
+          + `the step-scoped ALLOWLIST in test/helpers/interpolation-sweep.js exempts ${entry.occurrences}.`,
         );
       }
     }

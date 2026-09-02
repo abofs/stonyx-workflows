@@ -6,6 +6,11 @@ Shared GitHub Actions workflows for Stonyx framework packages.
 
 ## Available Workflows
 
+> **Editing a file in `.github/workflows/`?** Adding a `${{ }}` to one carries
+> three obligations, not zero, and the suite gates on all three. They are
+> stated in full under
+> [The guarantee, and everything that is not one](#the-guarantee-and-everything-that-is-not-one).
+
 ### `ci.yml`
 
 Reusable workflow for running tests on pull requests.
@@ -301,8 +306,11 @@ fails the job.
 >   `inputs.audit-level = "moderate\ntouch /tmp/canary/PWNED\n#"`: exit 0, and
 >   the canary written. So a fix that leaves the old command in a comment has
 >   not closed the sink. Reference the issue and the input **by name**.
-> - An allowlist entry pins an **exact source line**, not just a step and an
->   expression. See the escape-hatch note under [Tests](#tests).
+> - An allowlist entry pins an **exact source line and the key that line is
+>   written under**, not just a step and an expression. Moving the line into a
+>   different context kills its entry, which is the point: #34's remediation is
+>   precisely a line that moves. See
+>   [The guarantee, and everything that is not one](#the-guarantee-and-everything-that-is-not-one).
 
 ---
 
@@ -388,9 +396,9 @@ default branch.
 | `test/lift-equivalence-test.js` | Differential proof that `deriveVersion` matches the `main@692d122` heredocs it was lifted from, across 864 input pairs. Those heredocs are read from `test/fixtures/npm-publish-692d122.yml`, a frozen copy of the pre-lift workflow pinned by blob SHA -- **do not refresh it**, it is the text the equivalence is measured against |
 | `test/injection-test.js` | That no consumer-controlled string reaches program text or a shell string in `npm-publish.yml` or `cascade.yml`. Executes the real `run:` bodies against a stubbed `npm`/`pnpm`/`git` and the real `cascade.yml` `script:` body against a stubbed `github` client; pins the npm-name and semver grammars and their duplicated copies; **runs the raw `${{ }}` guarantee** over every file in `.github/workflows/`; and runs the diagnostic sweeps below over the same files, asserting each reports nothing |
 | `test/sweep-bypass-test.js` | That the **diagnostic** sweep can go red, and that the reader underneath it reports rather than guesses. Runs each mutation that used to defeat it -- a duplicated step name, a folded `run: >`, a `format('{0}', ...)` expression, an exemption outliving its sink, and the bypass-6 shapes (an unnamed step, a key nested in an earlier block scalar, a quoted key) -- against deliberately broken workflow text. Also pins the AC4 fixture to its blob SHA, calibrates the `run:`/`script:` key-line pin in both directions, and carries the `#34` re-arming case |
-| `test/raw-sweep-test.js` | That the guarantee holds and can go **red**. Re-runs every bypass family from all ten PR #38 reviews -- unnamed steps, a `run:` nested in a block scalar, a quoted `"run":`, four multi-line flow/plain scalar shapes, a single-line flow mapping under `with:`, a whole `.yaml` file, an explicit `? run` key, an escaped key, a next-line alias, a duplicate step name, `run: >`, `format('{0}', ...)`, `eval "..."`, a dead entry -- and asserts the raw scan reports each. Also asserts, against the scanner's own source, that it imports nothing but `node:` builtins and contains no regular expression at all |
-| `test/helpers/raw-expression-scan.js` | **The guarantee.** A raw byte scan for `${{` over every file in `.github/workflows/`, enumerated with no extension filter. Understands no YAML: `indexOf`, `slice`, `split`, `trim`, and not one regex. An occurrence with no allowlist entry reds, an entry matching no occurrence reds, and an opener that does not close on its own line reds |
-| `test/helpers/expression-allowlist.js` | The named exceptions the guarantee reads: 42 occurrences across 36 `(line, expression)` pairs, each pinning the exact source line, the expression, an occurrence count and a reason. An entry whose `why` is shorter than 60 characters, or which names none of its own expression's references, is refused -- a reason that could be pasted onto any entry is not a reason |
+| `test/raw-sweep-test.js` | That the guarantee holds and can go **red**. Re-runs every bypass family raised across the PR #38 reviews -- unnamed steps, a `run:` nested in a block scalar, a quoted `"run":`, four multi-line flow/plain scalar shapes, a single-line flow mapping under `with:`, a whole `.yaml` file, an explicit `? run` key, an escaped key, a next-line alias, a duplicate step name, `run: >`, `format('{0}', ...)`, `eval "..."`, a dead entry -- and asserts the raw scan reports each. Also asserts the scanner's independence four ways: a scan for regex literals themselves rather than for method names, a whitelist over every `import` token, the module's **resolved dependency graph** recorded by a loader hook in a child process while every export runs -- which is what closes a dynamic `import()` -- and an existence check on each extractor symbol before its absence, so a rename reds instead of silently satisfying the pin. Each is calibrated against the mutation that defeated its predecessor |
+| `test/helpers/raw-expression-scan.js` | **The guarantee.** A raw byte scan for `${{` over every file in `.github/workflows/`, enumerated with no extension filter. Understands no YAML: `indexOf`, `slice`, `split`, `trim`, and not one regex. An occurrence with no allowlist entry reds, an entry matching no occurrence reds, an opener that does not close on its own line reds, a malformed entry reds, and a `\x`/`\u`/`\U`/end-of-line backslash reds -- those four escapes are the complete set a YAML double-quoted scalar can use to build an opener out of bytes that do not contain one, so the scan reports them rather than guessing which scalar style a line is in. `structuralContexts` derives the key a line is written under, from indentation and the first colon, so an exemption cannot follow its line from `with:` into `run:` |
+| `test/helpers/expression-allowlist.js` | The named exceptions the guarantee reads: one entry per `(context, line, expression)` triple, each pinning the exact source line, the key that line is written under, the expression, an occurrence count and a reason. The counts are derived from the files rather than snapshotted, so an entry added with its expression does not require bumping a literal. An entry whose `why` is shorter than 60 characters, or which names none of its own expression's references, is refused -- a reason that could be pasted onto any entry is not a reason |
 | `test/helpers/interpolation-sweep.js` | The **diagnostic** `${{ }}` sweep as a pure function of `(file, text)`, plus the step-scoped `ALLOWLIST` and `NON_BODY_KEY_LINES`. Names which step and which sink an expression sits in, and pins the `run:`/`script:` body population so the executed tests cannot go vacuous. Returns problem strings rather than asserting, **which is the point**: `injection-test.js` asserts the array is empty for the real workflows and `sweep-bypass-test.js` asserts it is non-empty for broken ones. Same code, both directions |
 | `test/helpers/workflow-yaml.js` | **Diagnostics only** -- no guarantee depends on it. Minimal reader for the workflow YAML shapes the tests assert on: a step's `run:` body, `env:` mapping and `with: script:` body, a workflow's trigger keys, `${{ }}` expression extraction, and the raw-text `run:`/`script:` key-line count. Every step list item is a step, named or not; the name-taking wrappers **throw** on an ambiguous name rather than returning the first match; a list item in a shape it cannot resolve **throws, never skips**; and a step with no such key raises a typed `MissingStepKeyError` (`code === 'MISSING_STEP_KEY'`) so callers can tell "has none" from "could not read the one it has" without matching on message text |
 | `test/fixtures/security-audit-e07e185.yml` | A frozen copy of `security-audit.yml` at `e07e185`, pinned by blob SHA, with a local copy of its allowlist entry. **Do not refresh it.** #34 will delete both the live sink and the live entry; these mutations are measured against the text they were measured against, and re-pointing them at the live file is what destroys the test |
@@ -411,8 +419,11 @@ as diffs; do not "improve" the derivation without updating those assertions
 deliberately.
 
 `test/injection-test.js` is the file that fails if someone reintroduces an
-interpolation. Its rule is one sentence -- *no consumer-controlled string ever
-becomes program text or a shell-string fragment*.
+interpolation -- one of two, deliberately: `test/raw-sweep-test.js` asserts the
+same property per file, and both enumerate the directory through the same
+proven enumerator, so either alone catches a live sink. Its rule is one
+sentence -- *no consumer-controlled string ever becomes program text or a
+shell-string fragment*.
 
 #### The guarantee, and everything that is not one
 
@@ -423,12 +434,17 @@ knowing which is which is the whole subject of
 > **Every `${{ }}` occurrence in every file under `.github/workflows/` --
 > enumerated by directory listing with no extension filter, found by a raw byte
 > scan with no YAML understanding whatsoever -- must appear in an allowlist
-> keyed by (file, exact source line, expression) with a stated reason.**
+> keyed by (file, structural context, exact source line, expression) with a
+> stated reason. And no line in that directory may carry a backslash escape
+> that could construct an opener the scan cannot see.**
 
 That is `test/helpers/raw-expression-scan.js` against
 `test/helpers/expression-allowlist.js`. It reads bytes. It calls no reader, and
-it contains no regular expression at all, which is asserted against its own
-source rather than promised in a comment.
+it contains no regular expression at all -- both asserted mechanically rather
+than promised in a comment, and each assertion calibrated against the mutation
+that defeated its predecessor: the no-regex pin scans for regex literals rather
+than for method names, and the no-reader pin reads the module's resolved
+dependency graph, so a dynamic `import()` cannot route around it.
 
 The reason it is shaped that way is worth reading before changing it. The
 earlier sweep was founded on a YAML reader, and #37 found a sequence of shapes
@@ -441,9 +457,27 @@ under `with:`, a `.yaml` file extension, an explicit `? run` key, an escaped
 key, a next-line alias. Each was found *after* the previous fix shipped: every
 round of layered population pins bought another round of shapes, so the
 guarantee stopped being founded on a reader instead of being given one more
-pin. None of those shapes can hide three bytes from a byte scan, and an
-unanticipated shape now fails **closed**: the occurrence is counted, no entry
-matches, the suite reds.
+pin. None of those shapes can hide three bytes from a byte scan.
+
+Those are the **known-closed** shapes, not a proof that no shape remains. What
+the design buys is a direction: within the population it sweeps, an
+unanticipated *shape* fails **closed** -- the occurrence is counted, no entry
+matches, the suite reds -- and where bytes alone cannot settle the question the
+scan **reports** rather than skipping, which is why a `\x24`, `\u`, `\U` or
+end-of-line backslash anywhere in `.github/workflows/` is a red rather than a
+silence.
+
+"Fails closed" is a claim about shape. The exposure that remains is
+**population**: the scan enumerates `.github/workflows/` and nothing else, so a
+`${{ }}` in `.github/actions/**/action.yml` -- an ordinary GitHub Actions
+location -- would be unswept and would fail **open**. No such directory exists
+in this repo today, which makes that drift rather than a live hole, but it is
+the boundary, and it is where the next round should look first. The key is also
+an exemption for a **line**, not for a destination: swapping
+`uses: actions/checkout@v4` for a third-party action leaves
+`token: ${{ secrets.CASCADE_PAT }}` and its context byte-identical and the suite
+green, with the entry's recorded reason now false. Reviewing a `uses:` change is
+a human obligation.
 
 The sweeps in `test/helpers/interpolation-sweep.js` and the reader in
 `test/helpers/workflow-yaml.js` are **diagnostics only**. They say which step
@@ -454,16 +488,34 @@ message gets less helpful; nothing goes unswept.
 Green still means the guard is armed, not that the workflows are clean. The
 one open sink in this repo is allowlisted with its issue number, on purpose.
 
-Three rules bind anyone writing a workflow file here, and all three are about
-the **file**, not about the test:
+The rules that bind anyone writing a workflow file here are about the **file**,
+not about the test. The first three are the contract a `${{ }}` costs; the last
+two are the properties of the runner those checks are shaped around:
 
 - **Any new `${{ }}` needs an allowlist entry**, in
   `test/helpers/expression-allowlist.js`, pinning
-  `{ line, expression, occurrences, why }` -- the exact source line, trimmed.
-  The `why` has to say what the expression is and why it is safe *here*, and it
-  is held to that mechanically: an entry whose reason names none of its own
-  expression's references is refused, so "safe, reviewed" cannot be pasted
-  forty-two times. Adding the entry **is** the review.
+  `{ line, context, expression, occurrences, why }` -- the exact source line,
+  trimmed, and the key that line is written under (`with`, `env`, `run`, ...),
+  so the exemption cannot follow its line into a different sink. The `why` has
+  to say what the expression is and why it is safe *here*. Adding the entry
+  **is** the review, and the reviewer reading it is what holds it to account:
+  the mechanical checks are a floor -- a reason under 60 characters, or one
+  naming none of its own expression's references, is refused -- and a floor
+  stops bulk paste, not bad reasoning.
+- **And if the expression sits in a `run:` or `script:` body, that is a second
+  entry**, in the step-scoped `ALLOWLIST` in
+  `test/helpers/interpolation-sweep.js`, which additionally pins the step. The
+  first entry satisfies the guarantee; this one satisfies the diagnostic that
+  names the step and the sink. Both reds name their own file, so the message
+  tells you which of the two you still owe. Measured on this tree, adding a
+  `run:`-body expression to `ci.yml`: no entry anywhere 275 pass / 7 fail; with
+  the first entry and nothing else 279 / 3; with both 282 / 0.
+- **The occurrence total is derived, not pinned to a literal.** The three
+  independent counts in `test/raw-sweep-test.js` -- the scanner's records, a
+  raw `split('${{')`, and the allowlist's own `occurrences` sum -- have to
+  agree with each other, and they move with the file. Adding an expression with
+  a correct entry does not require editing a number anywhere -- which is why the
+  measurement above ends at two edits in two files rather than three in three.
 - **An expression inside a shell `#` comment is a live sink.** The runner
   substitutes `${{ }}` into the run script textually before bash parses it, and
   a `workflow_call` input can contain a newline, so a commented-out command
@@ -472,8 +524,11 @@ the **file**, not about the test:
 - **The way past a check is an entry, never a widened pattern.** Pinning an
   exemption to a step rather than to a line let it follow its expression into an
   `eval "..."` wrapper, or into a comment left behind by the very fix that
-  closed the sink. An entry whose line has moved is reported as **dead**, which
-  is how a fixed sink loses its exemption. The step-scoped `ALLOWLIST` in
+  closed the sink; pinning it to the trimmed line alone let it follow the line
+  itself out of a `with:` input and into a `run:` body, which is why the key
+  carries the context too. An entry whose line has moved, or whose line now sits
+  under a different key, is reported as **dead**, which is how a fixed sink
+  loses its exemption. The step-scoped `ALLOWLIST` in
   `test/helpers/interpolation-sweep.js` and `NON_BODY_KEY_LINES` beside it
   follow the same rule: both are re-derived from the file every run.
 
