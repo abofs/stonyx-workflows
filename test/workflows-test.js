@@ -38,7 +38,10 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
       const body = stepRunBody(npmPublish, step);
       assert.match(body, /scripts\/derive-version\.mjs/);
       assert.match(body, /deriveVersion\(/);
-      assert.match(body, new RegExp(`channel: '${channel}'`));
+      // Either quote form: #32 moved these programs inside a single-quoted
+      // `node -e '...'` so that nothing in the shell can expand into the
+      // program text, which forces double quotes on every JS string literal.
+      assert.match(body, new RegExp(`channel: ['"]${channel}['"]`));
     });
   }
 
@@ -80,7 +83,7 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
     assert.match(checkout.body, /path: \.stonyx-workflows/);
 
     // ...and cleans it up again. Note the scope: `npm pack` does pack a
-    // dot-prefixed directory at the package root, but all nine current
+    // dot-prefixed directory at the package root, but all ten current
     // consumers declare a `files` allowlist that excludes it, so this step is
     // defence-in-depth for a consumer that later drops that allowlist -- not
     // the only thing standing between the checkout and a published tarball.

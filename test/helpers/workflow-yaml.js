@@ -113,3 +113,62 @@ export function onKeys(text) {
   if (keys.length === 0) throw new Error('workflow on: block listed no triggers');
   return keys;
 }
+
+/**
+ * The `env:` mapping declared on a named step, as `{ KEY: 'raw value' }`.
+ *
+ * Raw means raw: a `${{ ... }}` expression is returned verbatim, because there
+ * is no offline engine that could resolve it. Returns `{}` when the step
+ * declares no `env:`; throws when the step does not exist, so a typo in a test
+ * cannot masquerade as "this step has no env".
+ *
+ * Comment lines inside the block are skipped. Several `env:` mappings in
+ * `npm-publish.yml` carry a comment explaining why the value is passed through
+ * the environment at all (abofs/stonyx-workflows#32); without this skip the
+ * helper threw on exactly the YAML the fix introduced, and the natural repair
+ * would have been to delete the comment documenting the sink.
+ */
+export function stepEnv(text, stepName) {
+  const step = parseSteps(text).find((s) => s.name === stepName);
+  if (!step) throw new Error(`no step named ${JSON.stringify(stepName)}`);
+
+  const lines = step.body.split('\n');
+  const envIdx = lines.findIndex((l) => /^\s*env:\s*$/.test(l));
+  if (envIdx === -1) return {};
+
+  const envIndent = indentOf(lines[envIdx]);
+  const env = {};
+  for (let i = envIdx + 1; i < lines.length; i++) {
+    if (lines[i].trim() === '') continue;
+    if (indentOf(lines[i]) <= envIndent) break;
+    if (lines[i].trim().startsWith('#')) continue;
+    const match = lines[i].match(/^\s*([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
+    if (!match) throw new Error(`unrecognised env: entry in step ${JSON.stringify(stepName)}: ${lines[i]}`);
+    env[match[1]] = match[2].trim();
+  }
+  return env;
+}
+
+/**
+ * The body of a named step's `with: script:` block (the `actions/github-script`
+ * shape), with the block scalar indentation left intact. Throws if the step is
+ * missing or carries no script.
+ */
+export function stepScriptBody(text, stepName) {
+  const step = parseSteps(text).find((s) => s.name === stepName);
+  if (!step) throw new Error(`no step named ${JSON.stringify(stepName)}`);
+
+  const lines = step.body.split('\n');
+  const scriptIdx = lines.findIndex((l) => /^\s*script:\s*\|?\s*$/.test(l));
+  if (scriptIdx === -1) throw new Error(`step ${JSON.stringify(stepName)} has no script: block`);
+
+  const scriptIndent = indentOf(lines[scriptIdx]);
+  const out = [];
+  for (let i = scriptIdx + 1; i < lines.length; i++) {
+    if (lines[i].trim() === '') { out.push(lines[i]); continue; }
+    if (indentOf(lines[i]) <= scriptIndent) break;
+    out.push(lines[i]);
+  }
+  if (out.join('').trim() === '') throw new Error(`step ${JSON.stringify(stepName)} has an empty script: block`);
+  return out.join('\n');
+}
