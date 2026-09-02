@@ -148,6 +148,19 @@ function runStep(stepName, {
     writeFileSync(npmStub, npmStubSource(npm, npmLog));
     chmodSync(npmStub, 0o755);
 
+    // `git` is stubbed for the commit/tag steps: it records its argv so a
+    // case can prove a branch name arrived as one argument rather than as
+    // shell text, and it never touches a real repository.
+    const gitLog = join(workspace, 'git-args.log');
+    writeFileSync(gitLog, '');
+    const gitStub = join(bin, 'git');
+    writeFileSync(gitStub, [
+      `#!${process.execPath}`,
+      `require('fs').appendFileSync(${JSON.stringify(gitLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');`,
+      '',
+    ].join('\n'));
+    chmodSync(gitStub, 0o755);
+
     const pnpmLog = join(workspace, 'pnpm-args.log');
     writeFileSync(pnpmLog, '');
     const pnpmStub = join(bin, 'pnpm');
@@ -181,6 +194,7 @@ function runStep(stepName, {
       outputKeys: readFileSync(githubOutput, 'utf8').split('\n').filter(Boolean),
       pnpmArgs: readFileSync(pnpmLog, 'utf8').trim(),
       npmCalls: readFileSync(npmLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)),
+      gitArgs: readFileSync(gitLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)),
       canaries: readdirSync(canaryDir),
       packageJson: JSON.parse(readFileSync(join(workspace, 'package.json'), 'utf8')),
     };
@@ -536,4 +550,100 @@ describe('AC7 -- S6: custom-version shell interpolation (#32)', () => {
       assert.equal(run.pnpmArgs, `version ${version} --no-git-tag-version`);
     });
   }
+});
+
+// Beyond the seven sinks the issue inventories.
+//
+// These were found by sweeping every `run:` body in npm-publish.yml for a
+// GitHub Actions expression rather than by working the list, and they are the
+// same shape as S6: a value the same actor controls, interpolated into shell
+// source. They are separated out here so a reviewer can weigh them
+// independently of AC1-AC7.
+describe('Beyond AC1-AC7 -- same-shape sinks found while sweeping the file (#32)', () => {
+  const TYPE_STEP = 'Determine version bump type';
+  const COMMIT_BETA_STEP = 'Commit version bump and create tag (beta)';
+
+  // The one expression left in any `run:` body. It resolves to one of two
+  // fixed literals, so no consumer string can reach the shell through it --
+  // which is exactly why it is safe to allowlist and unsafe to allowlist
+  // loosely. Anything else appearing in a run body reds this.
+  const ALLOWED = ["${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}"];
+
+  test('no run: body in npm-publish.yml interpolates anything but the fixed-literal choice', () => {
+    for (const step of parseSteps(npmPublish)) {
+      let body;
+      try {
+        body = stepRunBody(npmPublish, step.name);
+      } catch {
+        continue; // a `uses:` step -- covered by AC5 instead
+      }
+      for (const expression of body.match(/\$\{\{[^}]*\}\}/g) ?? []) {
+        assert.ok(
+          ALLOWED.includes(expression),
+          `step ${JSON.stringify(step.name)} interpolates ${expression} into shell source`,
+        );
+      }
+    }
+  });
+
+  test(`"${TYPE_STEP}" does not execute a payload in cascade-source`, () => {
+    const run = runStep(TYPE_STEP, { env: { CASCADE_SOURCE: '@stonyx/x"; touch "$CANARY_DIR/PWNED_TYPE"; :"' } });
+
+    assert.deepEqual(run.canaries, [], 'a workflow_call input must never become shell source');
+    assert.equal(run.status, 0);
+    assert.deepEqual(run.outputKeys, ['type=beta'], 'a cascade is still a beta publish');
+  });
+
+  test(`"${TYPE_STEP}" cannot be made to forge extra output keys through version-type`, () => {
+    const run = runStep(TYPE_STEP, { env: { VERSION_TYPE: 'patch\nmalicious=1' } });
+
+    assert.ok(!run.output.includes('malicious=1'), `version-type forged output keys:\n${run.output}`);
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /version-type must be one of/);
+  });
+
+  // The truth table is the thing that must not move: it decides the release
+  // channel for every publish in all eleven consumer repos.
+  for (const [label, env, expected] of [
+    ['a cascade', { CASCADE_SOURCE: '@stonyx/cron' }, 'type=beta'],
+    ['a pull request', { EVENT_NAME: 'pull_request' }, 'type=alpha'],
+    ['a push to main', { EVENT_NAME: 'push', GIT_REF: 'refs/heads/main' }, 'type=stable'],
+    ['a push to any other branch', { EVENT_NAME: 'push', GIT_REF: 'refs/heads/dev' }, 'type=beta'],
+    ['a dispatch with a custom version', { EVENT_NAME: 'workflow_dispatch', CUSTOM_VERSION: '1.2.3' }, 'type=custom'],
+    ['a dispatch with a version type', { EVENT_NAME: 'workflow_dispatch', VERSION_TYPE: 'minor' }, 'type=minor'],
+  ]) {
+    test(`"${TYPE_STEP}" still resolves ${label} to ${expected}`, () => {
+      const run = runStep(TYPE_STEP, { env });
+      assert.equal(run.status, 0, `step should exit 0; stderr was:\n${run.stderr}`);
+      assert.deepEqual(run.outputKeys, [expected]);
+    });
+  }
+
+  test(`"${COMMIT_BETA_STEP}" does not execute a payload in the branch name`, () => {
+    const run = runStep(COMMIT_BETA_STEP, {
+      env: { BRANCH: 'dev"; touch "$CANARY_DIR/PWNED_BRANCH"; :"', PUBLISHED_VERSION: '0.1.1-beta.128' },
+    });
+
+    assert.deepEqual(run.canaries, [], 'a branch name must never become shell source');
+    // git is stubbed, so the step succeeds; what is asserted is that the whole
+    // branch name arrived as ONE argument to `git push`.
+    assert.equal(run.status, 0, `stderr was:\n${run.stderr}`);
+    assert.ok(
+      run.gitArgs.some((args) => args[0] === 'push' && args[2] === 'dev"; touch "$CANARY_DIR/PWNED_BRANCH"; :"'),
+      `branch name was split or expanded: ${JSON.stringify(run.gitArgs)}`,
+    );
+  });
+
+  test(`"${COMMIT_BETA_STEP}" still tags and pushes the published version`, () => {
+    const run = runStep(COMMIT_BETA_STEP, { env: { BRANCH: 'dev', PUBLISHED_VERSION: '0.1.1-beta.128' } });
+
+    assert.equal(run.status, 0, `stderr was:\n${run.stderr}`);
+    assert.deepEqual(run.gitArgs, [
+      ['add', 'package.json', 'pnpm-lock.yaml'],
+      ['commit', '-m', 'chore: release v0.1.1-beta.128 [skip ci]'],
+      ['tag', 'v0.1.1-beta.128'],
+      ['pull', '--rebase', '--autostash', 'origin', 'dev'],
+      ['push', 'origin', 'dev', '--tags'],
+    ]);
+  });
 });

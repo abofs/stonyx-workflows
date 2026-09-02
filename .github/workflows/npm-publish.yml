@@ -196,19 +196,42 @@ jobs:
 
       - name: Determine version bump type
         id: version-type
+        env:
+          CASCADE_SOURCE: ${{ inputs.cascade-source }}
+          CUSTOM_VERSION: ${{ inputs.custom-version }}
+          VERSION_TYPE: ${{ inputs.version-type }}
+          EVENT_NAME: ${{ github.event_name }}
+          GIT_REF: ${{ github.ref }}
         run: |
-          if [ "${{ inputs.cascade-source }}" != "" ]; then
-            echo "type=beta" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "type=alpha" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "type=stable" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            echo "type=beta" >> $GITHUB_OUTPUT
-          elif [ "${{ inputs.custom-version }}" != "" ]; then
-            echo "type=custom" >> $GITHUB_OUTPUT
+          # S6's defect family, found while closing S6 and not in the issue's
+          # inventory: `cascade-source`, `custom-version` and `version-type` are
+          # consumer workflow_call inputs and were interpolated straight into
+          # this shell source. They are quoted variable expansions now, which
+          # the shell never re-parses (abofs/stonyx-workflows#32).
+          if [ -n "$CASCADE_SOURCE" ]; then
+            echo "type=beta" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "type=alpha" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "push" ] && [ "$GIT_REF" = "refs/heads/main" ]; then
+            echo "type=stable" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            echo "type=beta" >> "$GITHUB_OUTPUT"
+          elif [ -n "$CUSTOM_VERSION" ]; then
+            echo "type=custom" >> "$GITHUB_OUTPUT"
           else
-            echo "type=${{ inputs.version-type }}" >> $GITHUB_OUTPUT
+            # The only values the bump steps below can act on. Anything else
+            # used to be written through to the output, match no bump step, and
+            # publish the unbumped version; and a newline in it forged extra
+            # output keys the same way S4 did.
+            case "$VERSION_TYPE" in
+              patch|minor|major)
+                echo "type=$VERSION_TYPE" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                echo "::error::version-type must be one of patch, minor, major (got: $VERSION_TYPE)" >&2
+                exit 1
+                ;;
+            esac
           fi
 
       - name: Bump version (custom)
@@ -380,7 +403,9 @@ jobs:
 
       - name: Bump version (patch/minor/major)
         if: steps.version-type.outputs.type == 'patch' || steps.version-type.outputs.type == 'minor' || steps.version-type.outputs.type == 'major'
-        run: pnpm version ${{ steps.version-type.outputs.type }} --no-git-tag-version
+        env:
+          VERSION_TYPE: ${{ steps.version-type.outputs.type }}
+        run: pnpm version "$VERSION_TYPE" --no-git-tag-version
 
       - name: Get package version
         id: package-version
@@ -413,11 +438,16 @@ jobs:
 
       - name: Commit version bump and create tag (beta)
         if: contains(steps.package-version.outputs.version, 'beta')
+        env:
+          # A branch name may contain a double quote, so interpolating
+          # github.ref_name into this shell source was a push-access injection
+          # in every consumer repo (abofs/stonyx-workflows#32).
+          BRANCH: ${{ github.ref_name }}
+          PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}
         run: |
-          BRANCH="${{ github.ref_name }}"
           git add package.json pnpm-lock.yaml
-          git commit -m "chore: release v${{ steps.package-version.outputs.version }} [skip ci]"
-          git tag v${{ steps.package-version.outputs.version }}
+          git commit -m "chore: release v$PUBLISHED_VERSION [skip ci]"
+          git tag "v$PUBLISHED_VERSION"
           git pull --rebase --autostash origin "$BRANCH"
           git push origin "$BRANCH" --tags
 
@@ -432,10 +462,12 @@ jobs:
 
       - name: Commit version bump and create tag (stable)
         if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
+        env:
+          PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}
         run: |
           git add package.json pnpm-lock.yaml
-          git commit -m "chore: release v${{ steps.package-version.outputs.version }} [skip ci]"
-          git tag v${{ steps.package-version.outputs.version }}
+          git commit -m "chore: release v$PUBLISHED_VERSION [skip ci]"
+          git tag "v$PUBLISHED_VERSION"
           git pull --rebase --autostash origin main
           git push origin main --tags
 
