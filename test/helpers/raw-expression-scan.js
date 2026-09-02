@@ -79,15 +79,30 @@
 //    property this redesign was bought to eliminate. An unmodelled shape must
 //    red. So it reds.
 //
-// 2. It cannot see what CONSUMES an expression. The key therefore carries the
-//    structural context the line sits under -- see `structuralContexts` -- so
-//    that an entry written for a `with:` input stops matching the moment its
-//    byte-identical line is moved into a `run:` body. Measured before that key
-//    field existed: relocating `version: ${{ inputs.pnpm-version }}` out of
+// 2. It cannot see what CONSUMES an expression, and it cannot establish where
+//    a line SITS. The key therefore carries the CHAIN of enclosing keys the
+//    line is written under -- see `structuralContexts` -- so that an entry
+//    written for a `with:` input stops matching once its byte-identical line
+//    is moved into a `run:` body. Measured before that field existed:
+//    relocating `version: ${{ inputs.pnpm-version }}` out of
 //    `pnpm/action-setup`'s `with:` and into a `run:` body left the guarantee
 //    reporting nothing at 256 pass / 0 fail, with a `workflow_call` input
 //    reaching bash (#37, Phase 3 §4; Phase 1 F5 reproduced it independently
 //    with `token: ${{ secrets.CASCADE_PAT }}`).
+//
+//    THE LIMIT, STATED IN THE DIRECTION IT ACTUALLY FAILS. Round 4's version
+//    of this note said a line under a shell construct "gets a context that is
+//    not a key name; that direction is fail-closed". That was measured FALSE:
+//    it gets whatever key name the payload supplies, and a `with:` line
+//    written inside a `run:` body was 282 pass / 0 fail with the org-level
+//    `CASCADE_PAT` in a shell body (#37, Phase 1 F7, Phase 3 §4). The chain
+//    and the `(scalar)` link close every scalar style whose content must be
+//    more indented than its own key line -- which is four of the five, and
+//    both reviewers' payloads. A MULTI-LINE FLOW SCALAR is not closed: its
+//    continuation lines may sit at exactly the indentation a legitimate key
+//    would occupy, so the chain is forgeable there, and that is fail-OPEN.
+//    See `structuralContexts` for the measurement and README.md for the
+//    disclosure.
 //
 // This module is deliberately dull. `indexOf`, `slice`, `split` and `trim`. If
 // it ever needs to become clever, that is the signal that a guarantee is
@@ -141,6 +156,11 @@ const LINE_BREAK_CHARS = '\r\u0085\u2028\u2029';
 const END_OF_LINE = '(end of line)';
 const TOP_LEVEL = '(top level)';
 
+// A context is the CHAIN of enclosing keys, and `(scalar)` marks a link that
+// cannot legitimately open a mapping -- see `structuralContexts`.
+const CHAIN_SEPARATOR = ' > ';
+const SCALAR = '(scalar)';
+
 /**
  * Every file in `dir`, sorted. NO EXTENSION FILTER, on purpose.
  *
@@ -192,34 +212,107 @@ function keyOf(raw) {
 }
 
 /**
- * For every line of `text`, the key of the nearest enclosing line -- the last
- * preceding non-blank line whose content sits strictly further left.
+ * What a raw line writes after its first colon, trimmed -- or the whole line
+ * when it has no colon.
  *
- * This is the context half of the allowlist key, and it exists because the
- * trimmed line alone carries none. The same 33 characters mean "an input to
- * `pnpm/action-setup`" under `with:` and "a line of bash" under `run:`; an
- * entry keyed on the characters alone approves both, so an exemption follows
- * its line into a sink (#37, Phase 3 §4 and Phase 1 F5, both measured green at
- * 256 pass / 0 fail before this field existed).
+ * A mapping key that already carries a value cannot also carry children: a node
+ * has one value. So `with:` can open a mapping and `run: "true` cannot, and
+ * `run: |` opens a SCALAR whose content is not a mapping either. This is the
+ * one YAML fact the chain below relies on, and it is a fact about the data
+ * model rather than about syntax.
+ */
+function valueOf(raw) {
+  const body = raw.slice(contentIndent(raw));
+  const colon = body.indexOf(':');
+  return colon === -1 ? body.trim() : body.slice(colon + 1).trim();
+}
+
+/**
+ * For every line of `text`, the CHAIN of enclosing keys it is written under --
+ * `jobs > dispatch > steps > with` -- with any link that cannot legitimately
+ * open a mapping rendered as `<key> (scalar)`.
+ *
+ * WHY A CHAIN, AND WHY THE `(scalar)` LINKS.
+ *
+ * Round 3 keyed the allowlist on the NEAREST enclosing key. Round 4 measured
+ * that the payload supplies its own: a `with:` line written INSIDE a `run:`
+ * block scalar makes every line indented under it read `with`, which is
+ * exactly what an entry for an action input pins. `secrets.CASCADE_PAT`
+ * relocated out of `actions/checkout`'s `with:` and into a shell body was
+ * guarantee `[]`, 282 pass / 0 fail, on the real `cascade.yml` and on
+ * `npm-publish.yml` (#37, Phase 1 F7 / §3, Phase 3 §4, independently). The
+ * scanner derives context from the same untrusted bytes it polices.
+ *
+ * THE DOMAIN, ENUMERATED AGAINST libyaml RATHER THAN AGAINST THAT PAYLOAD. The
+ * question is "which lines can legitimately establish context", and the answer
+ * turns on one measurable property: can a scalar's CONTENT sit at an
+ * indentation less than or equal to its own key line's content indent? Every
+ * YAML scalar style and both flow collections were measured against Psych /
+ * libyaml 5.3.1:
+ *
+ *   literal block `|`   NO   -- content at or left of the key is a sibling key
+ *   folded block `>`    NO   -- same
+ *   plain multi-line    NO   -- must be more indented than the key
+ *   double-quoted       YES  -- a continuation may sit at ANY indent greater
+ *                              than the enclosing block mapping's
+ *   single-quoted       YES  -- same
+ *   flow mapping/seq    YES  -- same
+ *
+ * For the four NO rows the owning key line is unavoidably an ancestor of the
+ * payload, so a chain closes them: a payload can LENGTHEN a chain, never
+ * shorten one. That is why this is a chain and not a nearest key, and it is
+ * why the fix is not "reject `with:` inside `run:`" -- it rejects every
+ * position a scalar whose content must be deeper can reach.
+ *
+ * The `(scalar)` marking closes the same rows one step earlier and more
+ * cheaply: `run: "true` and `run: |` both already carry a value, so neither can
+ * open a mapping, so nothing nested under either can ever match an entry
+ * written for one. Both measured payloads red on this alone.
+ *
+ * WHAT IS NOT CLOSED, STATED IN THE RIGHT DIRECTION. For the three YES rows the
+ * chain is FORGEABLE, and this is fail-OPEN, not fail-closed. A multi-line
+ * double-quoted, single-quoted or flow-collection scalar may place its
+ * continuation lines at exactly the indentation a legitimate key would occupy,
+ * so a payload can reproduce a legitimate ladder link for link:
+ *
+ *     - name: Leak
+ *       run: "true
+ *       with:
+ *         token: ${{ secrets.CASCADE_PAT }}
+ *       "
+ *
+ * -- measured valid YAML, `run` resolving to the whole shell string. No
+ * function of indentation and colons can tell those lines from real keys,
+ * because at the byte level they ARE what a real key looks like. Closing it
+ * needs a parser, and the guarantee does not parse. `README.md`'s *Honest gaps*
+ * carries this, and the PR body's previous claim -- that a line under a shell
+ * construct "gets a context that is not a key name; that direction is
+ * fail-closed" -- was measured FALSE and has been corrected: it gets whatever
+ * key name the payload supplies.
  *
  * Derived from raw text -- indentation and the first colon -- never from the
- * extractor. It is not a YAML path and does not claim to be one: it is the
- * answer to "what key is this line written underneath", which is the thing
- * that changes when a line moves between sinks.
+ * extractor. It is not a YAML path and does not claim to be one.
  */
 export function structuralContexts(text) {
   const contexts = [];
   const open = [];
+  const chain = () => (open.length === 0 ? TOP_LEVEL : open.map((frame) => frame.link).join(CHAIN_SEPARATOR));
 
   for (const raw of text.split('\n')) {
     if (raw.trim() === '') {
-      contexts.push(open.length === 0 ? TOP_LEVEL : open[open.length - 1].key);
+      contexts.push(chain());
       continue;
     }
     const indent = contentIndent(raw);
     while (open.length > 0 && open[open.length - 1].indent >= indent) open.pop();
-    contexts.push(open.length === 0 ? TOP_LEVEL : open[open.length - 1].key);
-    open.push({ indent, key: keyOf(raw) });
+    contexts.push(chain());
+
+    const key = keyOf(raw);
+    // A key that already carries a value has no room for children, so it can
+    // never be a legitimate ancestor. A line with no colon at all -- `*alias`,
+    // `? run` -- opens no mapping either, and `valueOf` returns its whole body.
+    const link = valueOf(raw) === '' ? key : `${key} ${SCALAR}`.trim();
+    open.push({ indent, link });
   }
 
   return contexts;

@@ -397,7 +397,7 @@ default branch.
 | `test/injection-test.js` | That no consumer-controlled string reaches program text or a shell string in `npm-publish.yml` or `cascade.yml`. Executes the real `run:` bodies against a stubbed `npm`/`pnpm`/`git` and the real `cascade.yml` `script:` body against a stubbed `github` client; pins the npm-name and semver grammars and their duplicated copies; **runs the raw `${{ }}` guarantee** over every file in `.github/workflows/`; and runs the diagnostic sweeps below over the same files, asserting each reports nothing |
 | `test/sweep-bypass-test.js` | That the **diagnostic** sweep can go red, and that the reader underneath it reports rather than guesses. Runs each mutation that used to defeat it -- a duplicated step name, a folded `run: >`, a `format('{0}', ...)` expression, an exemption outliving its sink, and the bypass-6 shapes (an unnamed step, a key nested in an earlier block scalar, a quoted key) -- against deliberately broken workflow text. Also pins the AC4 fixture to its blob SHA, calibrates the `run:`/`script:` key-line pin in both directions, and carries the `#34` re-arming case |
 | `test/raw-sweep-test.js` | That the guarantee holds and can go **red**. Re-runs every bypass family raised across the PR #38 reviews -- unnamed steps, a `run:` nested in a block scalar, a quoted `"run":`, four multi-line flow/plain scalar shapes, a single-line flow mapping under `with:`, a whole `.yaml` file, an explicit `? run` key, an escaped key, a next-line alias, a duplicate step name, `run: >`, `format('{0}', ...)`, `eval "..."`, a dead entry -- and asserts the raw scan reports each. Also keeps **one** check on the scanner's independence -- a whitelist over every occurrence of the token `import` in its source -- calibrated against the four spellings that defeated its predecessors, and with the disclosed gap (a load site written without the token `import`) committed as its own calibration |
-| `test/helpers/raw-expression-scan.js` | **The guarantee.** A raw byte scan for `${{` over every file in `.github/workflows/`, enumerated with no extension filter. Understands no YAML: `indexOf`, `slice`, `split`, `trim`, and not one regex. An occurrence with no allowlist entry reds, an entry matching no occurrence reds, an opener that does not close on its own line reds, a malformed entry reds, and a `\x`/`\u`/`\U`/end-of-line backslash reds -- those four escapes are the complete set a YAML double-quoted scalar can use to build an opener out of bytes that do not contain one, so the scan reports them rather than guessing which scalar style a line is in. `structuralContexts` derives the key a line is written under, from indentation and the first colon, so an exemption cannot follow its line from `with:` into `run:` |
+| `test/helpers/raw-expression-scan.js` | **The guarantee.** A raw byte scan for `${{` over every file in `.github/workflows/`, enumerated with no extension filter. Understands no YAML: `indexOf`, `slice`, `split`, `trim`, and not one regex. An occurrence with no allowlist entry reds, an entry matching no occurrence reds, an opener that does not close on its own line reds, a malformed entry reds, and a `\x`/`\u`/`\U`/end-of-line backslash reds -- those four escapes are the complete set a YAML double-quoted scalar can use to build an opener out of bytes that do not contain one, so the scan reports them rather than guessing which scalar style a line is in. `structuralContexts` derives the CHAIN of keys a line is written under -- `jobs > dispatch > steps > with` -- from indentation and the first colon, marking any link that already carries a value as `(scalar)`, so an exemption cannot follow its line from `with:` into `run:` and a payload written inside a body cannot spell its own context. The one style that still forges it is disclosed below |
 | `test/helpers/expression-allowlist.js` | The named exceptions the guarantee reads: one entry per `(context, line, expression)` triple, each pinning the exact source line, the key that line is written under, the expression, an occurrence count and a reason. The counts are derived from the files rather than snapshotted, so an entry added with its expression does not require bumping a literal. An entry whose `why` is shorter than 60 characters, or which names none of its own expression's references, is refused -- a reason that could be pasted onto any entry is not a reason |
 | `test/helpers/interpolation-sweep.js` | The **diagnostic** `${{ }}` sweep as a pure function of `(file, text)`, plus the step-scoped `ALLOWLIST` and `NON_BODY_KEY_LINES`. Names which step and which sink an expression sits in, and pins the `run:`/`script:` body population so the executed tests cannot go vacuous. Returns problem strings rather than asserting, **which is the point**: `injection-test.js` asserts the array is empty for the real workflows and `sweep-bypass-test.js` asserts it is non-empty for broken ones. Same code, both directions |
 | `test/helpers/workflow-yaml.js` | **Diagnostics only** -- no guarantee depends on it. Minimal reader for the workflow YAML shapes the tests assert on: a step's `run:` body, `env:` mapping and `with: script:` body, a workflow's trigger keys, `${{ }}` expression extraction, and the raw-text `run:`/`script:` key-line count. Every step list item is a step, named or not; the name-taking wrappers **throw** on an ambiguous name rather than returning the first match; a list item in a shape it cannot resolve **throws, never skips**; and a step with no such key raises a typed `MissingStepKeyError` (`code === 'MISSING_STEP_KEY'`) so callers can tell "has none" from "could not read the one it has" without matching on message text |
@@ -483,8 +483,48 @@ the boundary, and it is where the next round should look first. The key is also
 an exemption for a **line**, not for a destination: swapping
 `uses: actions/checkout@v4` for a third-party action leaves
 `token: ${{ secrets.CASCADE_PAT }}` and its context byte-identical and the suite
-green, with the entry's recorded reason now false. Reviewing a `uses:` change is
-a human obligation.
+green, with the entry's recorded reason now false. Reviewing **whatever consumes
+the value** -- a `uses:`, or the `run:` line that reads the `env:` var the entry
+approves -- is a human obligation here. Measured, and it lands on `#34`'s own
+prescribed remediation: `AUDIT_LEVEL: ${{ inputs.audit-level }}` in a step
+`env:`, both old entries deleted, a correct new entry written, and the body
+reading `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` is **282 pass / 0
+fail**, with the entry's reason -- *"an `env:` value is data the runner sets,
+not source that bash parses"* -- now false about the file it describes. Passing
+a value through `env:` is not on its own sufficient guidance; the line that
+reads `$AUDIT_LEVEL` is part of the same review.
+
+**The structural context is forgeable by one YAML shape, and that direction is
+fail-open.** The allowlist key carries the chain of keys a line is written
+under, derived from indentation and the first colon. Which lines can
+*legitimately* establish a context turns on a single property, measured against
+Psych/libyaml 5.3.1: can a scalar's content sit at an indentation less than or
+equal to its own key line's? For a literal block `|`, a folded block `>` and a
+plain multi-line scalar the answer is **no** -- content at or left of the key is
+a sibling key or a parse error -- so the owning key is unavoidably an ancestor
+and appears in the chain as a `(scalar)` link that no entry can match. For a
+**multi-line double-quoted or single-quoted scalar, or a flow mapping or
+sequence spanning lines, the answer is yes**: a continuation may sit at exactly
+the indentation a legitimate key would occupy, so a payload can reproduce a
+legitimate ladder link for link. Measured on `ci.yml`:
+
+```yaml
+      - name: Forged context dedent
+        run: "true
+        with:
+          node-version: ${{ inputs.node-version }}
+        "
+```
+
+is valid YAML whose `run` resolves to a shell string carrying the expression,
+and the guarantee reports **nothing at all** -- not even a dead entry, because
+the pre-existing `with:` entry matches the forged line. No function of
+indentation and colons can tell those lines from real keys, because at the byte
+level they are what a real key looks like; closing it needs a parser, and the
+guarantee does not parse. `test/raw-sweep-test.js` carries this as a committed
+case that asserts the gap, so it cannot close or widen silently. The four
+shapes review measured -- an explicit `? run` key, a multi-line double-quoted
+`run:`, an ordinary `run: |`, and a `script:` body -- all red on the guarantee.
 
 The sweeps in `test/helpers/interpolation-sweep.js` and the reader in
 `test/helpers/workflow-yaml.js` are **diagnostics only**. They say which step
@@ -502,8 +542,15 @@ two are the properties of the runner those checks are shaped around:
 - **Any new `${{ }}` needs an allowlist entry**, in
   `test/helpers/expression-allowlist.js`, pinning
   `{ line, context, expression, occurrences, why }` -- the exact source line,
-  trimmed, and the key that line is written under (`with`, `env`, `run`, ...),
-  so the exemption cannot follow its line into a different sink. The `why` has
+  **trimmed but otherwise byte-for-byte**, and the **chain** of keys that line
+  is written under, innermost last, so the exemption cannot follow its line into
+  a different sink. A context is a path, not a single key: `jobs > dispatch >
+  steps > with`, `on > workflow_call > outputs > package-name`, or just
+  `concurrency` for a top-level key. It is never `run` -- a one-line `run:`
+  body's own line sits under `steps`, and a line *inside* a body gets a
+  `(scalar)` link that no entry can match. **Copy all five fields out of the
+  failure message**, which prints the context, the trimmed line, the expression
+  and the line numbers verbatim. The `why` has
   to say what the expression is and why it is safe *here*. Adding the entry
   **is** the review, and the reviewer reading it is what holds it to account:
   the mechanical checks are a floor -- a reason under 60 characters, or one
