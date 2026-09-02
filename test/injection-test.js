@@ -5,6 +5,7 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirS
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Script } from 'node:vm';
 
 import { parseSteps, readWorkflow, stepEnv, stepRunBody, stepScriptBody } from './helpers/workflow-yaml.js';
 
@@ -49,6 +50,13 @@ const cascade = readWorkflow('cascade.yml');
 const registry = JSON.parse(readFileSync(new URL('./fixtures/oauth-registry-state.json', import.meta.url), 'utf8'));
 
 const WORKFLOWS = { 'npm-publish.yml': npmPublish, 'cascade.yml': cascade };
+
+// Every workflow file in the repo, for the two repo-wide sweeps below. Read
+// from disk rather than listed, so a file added later inherits both sweeps
+// without anyone remembering to opt it in; each sweep pins the resulting list
+// so a failed read cannot make it iterate nothing.
+const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
+const WORKFLOW_FILES = readdirSync(WORKFLOW_DIR).filter((name) => name.endsWith('.yml')).sort();
 
 const ALPHA_STEP = 'Calculate next alpha version';
 const BETA_STEP = 'Calculate next beta version';
@@ -685,8 +693,7 @@ describe('AC5 -- S5: cascade.yml refuses hostile input before it dispatches (#32
 // repo's workflows, not about one file of them, and a file added later must
 // inherit it without anyone remembering to opt in.
 describe('no workflow in this repo interpolates a consumer string into program text (#32)', () => {
-  const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
-  const FILES = readdirSync(WORKFLOW_DIR).filter((name) => name.endsWith('.yml')).sort();
+  const FILES = WORKFLOW_FILES;
 
   // Named exceptions only, and each one is pinned to a step and to an exact
   // occurrence count -- otherwise "this expression is tolerated in this file"
@@ -782,6 +789,136 @@ describe('no workflow in this repo interpolates a consumer string into program t
       }
     }
   });
+});
+
+// The fix for S1a works by one mechanism and one only: every `node -e` program
+// is a SINGLE-QUOTED shell string, so nothing -- not `${{ }}`, not `$VAR`, not
+// `$(...)` -- can expand into the program text, and a consumer-controlled
+// package name can only arrive through `process.env`.
+//
+// That mechanism is one apostrophe deep. Each of these programs carries prose
+// comments explaining the sink it closes, and bash gives `'` no escape inside a
+// single-quoted string: a reviewer who writes `the consumer's package.json` in
+// one of those comments closes the string early, and every line after it is
+// handed back to the shell as source. That reinstates S1a exactly, with no
+// diff to the JavaScript and nothing else in this suite going red.
+//
+// The trap is not hypothetical. The base file carried `it's the release` in one
+// of these comments; the #32 fix rewrote it to `it is` for precisely this
+// reason, and that rewrite was the whole of the protection until this block.
+describe('every `node -e` program stays a single-quoted shell string (#32, S1a)', () => {
+  /**
+   * Every `node -e`/`node -p` program in a `run:` body, as
+   * `{ flag, opener, program }`.
+   *
+   * The program's extent comes from the block-scalar INDENTATION, never from
+   * scanning forward for the closing quote. Scanning for the quote is what
+   * would make this guard circular: a stray apostrophe simply becomes the
+   * closing quote the scan finds, and the body it hands back is then free of
+   * apostrophes by construction -- the check would pass on exactly the input it
+   * exists to reject. The opener line ends in `node -e '`; the program runs to
+   * the first later line that is at the opener's own indentation and holds
+   * nothing but `'` or `')`. A prose apostrophe is always on a deeper-indented
+   * line, so it can never be mistaken for that terminator.
+   *
+   * Any other `node -e` shape throws rather than being skipped. A single-line
+   * `node -e 'x'` is a legitimate thing to write and this helper does not
+   * understand it; failing loudly means someone extends the helper, whereas
+   * returning nothing would silently drop that program out of the guard.
+   */
+  function nodeEvalPrograms(body) {
+    const lines = body.split('\n');
+    const programs = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const opener = lines[i].match(/\bnode\s+(-e|-p|--eval|--print)\s+(.*)$/);
+      if (!opener) continue;
+      const [, flag, rest] = opener;
+
+      if (rest.trim() !== "'") {
+        throw new Error(
+          `unrecognised \`node ${flag}\` form -- this guard only understands a program opened by a bare `
+          + `single quote at end of line, so extend it rather than deleting this case: ${lines[i].trim()}`,
+        );
+      }
+
+      const indent = lines[i].match(/^(\s*)/)[1].length;
+      let end = -1;
+      for (let j = i + 1; j < lines.length; j++) {
+        const close = lines[j].match(/^(\s*)'\)?\s*$/);
+        if (close && close[1].length === indent) { end = j; break; }
+      }
+      if (end === -1) {
+        throw new Error(
+          `\`node ${flag}\` program opened at ${JSON.stringify(lines[i].trim())} is never closed by a `
+          + "line holding only ' or ') at the opener's indentation",
+        );
+      }
+
+      programs.push({ flag, opener: lines[i].trim(), program: lines.slice(i + 1, end).join('\n') });
+      i = end;
+    }
+
+    return programs;
+  }
+
+  const programsIn = (file) => {
+    const text = readWorkflow(file);
+    const found = [];
+    for (const step of parseSteps(text)) {
+      let body;
+      try {
+        body = stepRunBody(text, step.name);
+      } catch {
+        continue; // a `uses:` step carries no shell source
+      }
+      for (const program of nodeEvalPrograms(body)) found.push({ step: step.name, ...program });
+    }
+    return found;
+  };
+
+  // Guards the guard. Every per-file case below passes trivially against an
+  // empty list, so the population is pinned: if `node -e` were renamed, moved
+  // behind a script, or the extractor stopped matching, this is what goes red
+  // instead of the suite quietly guarding nothing.
+  test('the sweep still finds every node -e program in the repo', () => {
+    assert.deepEqual(WORKFLOW_FILES, ['cascade.yml', 'ci.yml', 'npm-publish.yml', 'security-audit.yml', 'self-ci.yml']);
+
+    const counts = Object.fromEntries(
+      WORKFLOW_FILES.map((file) => [file, programsIn(file).length]).filter(([, n]) => n > 0),
+    );
+    assert.deepEqual(counts, { 'npm-publish.yml': 6 });
+  });
+
+  for (const file of WORKFLOW_FILES) {
+    test(`no node -e program in ${file} contains a single quote`, () => {
+      for (const { step, flag, program } of programsIn(file)) {
+        const line = program.split('\n').find((l) => l.includes("'"));
+        assert.equal(
+          program.includes("'"),
+          false,
+          `${file} step ${JSON.stringify(step)}: the \`node ${flag}\` program contains a single quote, which `
+          + "closes the shell string early and hands every following line back to the shell as source -- "
+          + `reinstating the #32 S1a sink. Rewrite the apostrophe away (\`it's\` -> \`it is\`). Offending line: `
+          + `${JSON.stringify((line ?? '').trim())}`,
+        );
+      }
+    });
+
+    // The apostrophe check above proves the extracted region is quote-free; it
+    // cannot on its own prove the region is the WHOLE program rather than a
+    // fragment ending in a comment. Compiling it does. `new Script` parses
+    // without running, so this reads the workflow's JavaScript without
+    // executing a line of it.
+    test(`every node -e program in ${file} compiles as a complete JavaScript program`, () => {
+      for (const { step, flag, program } of programsIn(file)) {
+        assert.doesNotThrow(
+          () => new Script(program),
+          `${file} step ${JSON.stringify(step)}: the \`node ${flag}\` program is not syntactically complete`,
+        );
+      }
+    });
+  }
 });
 
 // The grammar is a security contract for ten repos and it is stated eight
