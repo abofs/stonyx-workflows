@@ -144,6 +144,35 @@ describe('G1 -- the raw ${{ }} guarantee is green on the workflows that ship (#3
     }
   });
 
+  test('the file the enumerator names is the file the reader reads', () => {
+    // `readWorkflowFile` used to resolve `new URL(name, dir)`, and a file URL
+    // PERCENT-DECODES: the entry `%63i.yml` -- a valid filename GitHub Actions
+    // will execute -- read back `ci.yml`'s bytes, so the new file's content was
+    // never scanned and `ci.yml`'s was scanned twice under two names. The two
+    // halves of the guarantee disagreed about what a file is (#37, Phase 3 §5b).
+    // It reds today only through the five-name pin above, which is expected to
+    // be edited whenever a workflow is legitimately added.
+    const dir = mkdtempSync(join(tmpdir(), 'raw-sweep-name-'));
+    try {
+      writeFileSync(join(dir, 'ci.yml'), 'name: Reusable CI\n');
+      writeFileSync(join(dir, '%63i.yml'), 'run: echo "${{ inputs.package-name }}"\n');
+      const dirUrl = pathToFileURL(`${dir}/`);
+      assert.deepEqual(workflowFileNames(dirUrl), ['%63i.yml', 'ci.yml'], 'both names are enumerated');
+      assert.equal(
+        readWorkflowFile('%63i.yml', dirUrl),
+        'run: echo "${{ inputs.package-name }}"\n',
+        'the percent sign is part of the NAME, not an escape -- reading it must not resolve to ci.yml',
+      );
+      assertReports(
+        rawSweepProblems('%63i.yml', readWorkflowFile('%63i.yml', dirUrl), EXPRESSION_ALLOWLIST),
+        UNPINNED,
+        'and its own content is swept, rather than another file being swept twice',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   for (const file of FILES) {
     test(`every ${'${{ }}'} occurrence in ${file} is pinned to its source line with a reason`, () => {
       assert.deepEqual(sweep(file, readWorkflowFile(file)), []);
@@ -222,7 +251,7 @@ describe('G1 -- the raw ${{ }} guarantee is green on the workflows that ship (#3
   test('no two entries within a file share a reason', () => {
     // Bulk approval is the failure mode an allowlist has. `entryShapeProblems`
     // already refuses a `why` that names none of its own expression's
-    // references; this refuses forty-two copies of one sentence.
+    // references; this refuses one sentence pasted onto every entry.
     for (const [file, entries] of Object.entries(EXPRESSION_ALLOWLIST)) {
       const reasons = entries.map((e) => e.why);
       assert.equal(new Set(reasons).size, reasons.length, `${file} has two allowlist entries with the same why:`);
@@ -724,7 +753,7 @@ describe('G1 -- an allowlist entry has to say something (#37)', () => {
     assertReports(
       entryShapeProblems('ci.yml', { ...GOOD, why: 'Safe. Not a shell sink. Reviewed and approved on the PR.' }),
       /names none of the expression's own references/,
-      'a reason that could be pasted onto any of the 42 entries is not a reason',
+      'a reason that could be pasted onto any entry in the allowlist is not a reason',
     );
     assert.deepEqual(referencesIn(GOOD.expression), ['inputs.pnpm-version']);
   });

@@ -1,10 +1,10 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 
 import { EXPRESSION_ALLOWLIST } from './helpers/expression-allowlist.js';
-import { rawSweepProblems } from './helpers/raw-expression-scan.js';
+import { rawSweepProblems, workflowFileNames } from './helpers/raw-expression-scan.js';
 import {
   ALLOWLIST,
   NON_BODY_KEY_LINES,
@@ -45,12 +45,22 @@ const cascade = readWorkflow('cascade.yml');
 const securityAudit = readWorkflow('security-audit.yml');
 const npmPublish = readWorkflow('npm-publish.yml');
 
-const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
-// No extension filter: GitHub Actions reads `.yaml` too, and filtering here is
+// NO EXTENSION FILTER. GitHub Actions reads `.yaml` too, and filtering here is
 // what made the pin that guards this population unable to fire (#37, Phase 3
 // §4). The list is asserted below, so a non-workflow file in this directory
 // reds and gets a decision rather than a silent exemption.
-const WORKFLOW_FILES = readdirSync(WORKFLOW_DIR).sort();
+//
+// This used to call `readdirSync` here, which reproduced the SAME defect one
+// file over: the `deepEqual` at the bottom compared against a list this file
+// had filtered itself, so restoring `.filter((n) => n.endsWith('.yml'))` was
+// 282 pass / 0 fail -- a pin that could not fire, in the round whose G8
+// publishes having removed exactly this shape from `injection-test.js`. It
+// matters more here than it did there because the benign control below calls
+// `rawSweepProblems` over this list, so a filter would silently narrow a
+// GUARANTEE case and not only a diagnostic one (#37, Phase 4 NEW-7). The
+// enumeration is now `workflowFileNames`, whose no-extension-filter property
+// is proven against a real temp directory in `raw-sweep-test.js`.
+const WORKFLOW_FILES = workflowFileNames();
 
 /**
  * Append a step to a workflow's `steps:` list.

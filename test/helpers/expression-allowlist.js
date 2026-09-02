@@ -2,7 +2,12 @@
 // `raw-expression-scan.js`. Data only -- no logic lives here.
 //
 // Every `${{ }}` occurrence in every file under `.github/workflows/` needs an
-// entry, and there are 42 occurrences across 36 (line, expression) pairs today.
+// entry, keyed on the four-part `(file, context, line, expression)` -- there is
+// deliberately no count written down here. The totals were snapshotted in this
+// comment and asserted as the literals `42` and `36`; both are now DERIVED and
+// cross-checked three ways in `test/raw-sweep-test.js`, because a number
+// pinned in a test is a thing a contributor learns to bump when the guard reds
+// (#37, Phase 2 W-1, Phase 5 N-N2).
 // That is not a burden being tolerated, it is the design: an expression with no
 // entry reds, so adding one to a workflow forces a reviewer to write down what
 // it is and why it is safe. The allowlist IS the review artifact.

@@ -777,7 +777,7 @@ describe('no workflow in this repo interpolates a consumer string into program t
   // Every `${{ }}` occurrence in every file in this directory, found by a raw
   // byte scan that understands no YAML whatsoever, must be pinned to its exact
   // source line in `test/helpers/expression-allowlist.js` with a stated reason.
-  // 42 occurrences, 36 entries, no reader consulted -- so no unnamed step,
+  // Every occurrence, every entry, no reader consulted -- so no unnamed step,
   // nested block scalar, flow mapping, quoted key, escaped key, alias or file
   // extension can hide one. `test/raw-sweep-test.js` runs every bypass family
   // from all ten PR #38 reviews against it; this is the live-file half, stated

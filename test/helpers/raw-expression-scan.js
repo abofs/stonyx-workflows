@@ -36,9 +36,10 @@
 //
 // INDEPENDENCE IS ASSURED BY REVIEW OF THIS FILE, NOT BY AUTOMATION.
 //
-// This module is short, imports one line, and exports eight functions. A
-// reviewer reading it can see that it reaches no YAML reader; that reading is
-// the assurance, and it is the only assurance offered. `test/raw-sweep-test.js`
+// This module is short, its only imports are three `node:` builtins, and it
+// exports nine functions. A reviewer reading it can see that it reaches no YAML
+// reader; that reading is the assurance, and it is the only assurance offered.
+// `test/raw-sweep-test.js`
 // keeps ONE mechanical check beside it -- a whitelist over every occurrence of
 // the token `import` -- whose job is to stop the change that would be easy to
 // make without noticing, not to defeat an engineer who means it.
@@ -109,6 +110,8 @@
 // drifting back onto a reader.
 
 import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const WORKFLOWS_DIR = new URL('../../.github/workflows/', import.meta.url);
 
@@ -181,9 +184,22 @@ export function workflowFileNames(dir = WORKFLOWS_DIR) {
   return readdirSync(dir).sort();
 }
 
-/** The raw bytes of one file in `.github/workflows/`, read as UTF-8. */
+/**
+ * The raw bytes of one file in `.github/workflows/`, read as UTF-8.
+ *
+ * A PATH JOIN, NOT A URL RESOLUTION, and the difference is a hole. This used to
+ * do `new URL(name, dir)`, and a file URL PERCENT-DECODES on read: the
+ * enumerator listed the directory entry `%63i.yml` -- a perfectly valid
+ * filename that GitHub Actions will execute -- and `readWorkflowFile` handed
+ * back `ci.yml`'s bytes. The new file's content was never scanned and `ci.yml`'s
+ * was scanned twice under two names, so the two halves of the guarantee
+ * disagreed about what "a file" is (#37, Phase 3 §5b). It was fail-closed only
+ * because a separate pin exact-matches the five names -- and that pin is
+ * expected to be edited every time a workflow is legitimately added, which is
+ * the wrong thing to be relying on.
+ */
 export function readWorkflowFile(name, dir = WORKFLOWS_DIR) {
-  return readFileSync(new URL(name, dir), 'utf8');
+  return readFileSync(join(fileURLToPath(dir), name), 'utf8');
 }
 
 /**
@@ -505,7 +521,7 @@ export function escapeProblems(file, text, escapeAllowlist = {}) {
  *
  * Used only to hold the allowlist to account: an entry's `why` has to name at
  * least one of its own expression's references, so "safe" cannot be
- * bulk-pasted across forty-two entries. Written without a regex like everything
+ * bulk-pasted across the whole allowlist. Written without a regex like everything
  * else here.
  */
 export function referencesIn(expression) {
