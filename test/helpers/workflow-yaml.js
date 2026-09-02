@@ -121,6 +121,12 @@ export function onKeys(text) {
  * is no offline engine that could resolve it. Returns `{}` when the step
  * declares no `env:`; throws when the step does not exist, so a typo in a test
  * cannot masquerade as "this step has no env".
+ *
+ * Comment lines inside the block are skipped. Several `env:` mappings in
+ * `npm-publish.yml` carry a comment explaining why the value is passed through
+ * the environment at all (abofs/stonyx-workflows#32); without this skip the
+ * helper threw on exactly the YAML the fix introduced, and the natural repair
+ * would have been to delete the comment documenting the sink.
  */
 export function stepEnv(text, stepName) {
   const step = parseSteps(text).find((s) => s.name === stepName);
@@ -135,6 +141,7 @@ export function stepEnv(text, stepName) {
   for (let i = envIdx + 1; i < lines.length; i++) {
     if (lines[i].trim() === '') continue;
     if (indentOf(lines[i]) <= envIndent) break;
+    if (lines[i].trim().startsWith('#')) continue;
     const match = lines[i].match(/^\s*([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
     if (!match) throw new Error(`unrecognised env: entry in step ${JSON.stringify(stepName)}: ${lines[i]}`);
     env[match[1]] = match[2].trim();

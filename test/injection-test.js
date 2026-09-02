@@ -619,6 +619,29 @@ describe('Beyond AC1-AC7 -- same-shape sinks found while sweeping the file (#32)
     });
   }
 
+  // The fix moves values out of shell source and into step `env:` mappings,
+  // each with a comment saying why. `stepEnv` is the helper that reads those
+  // mappings back, so it has to survive the YAML the fix writes -- it threw on
+  // a comment inside an `env:` block, and the obvious "fix" for that exception
+  // would have been to delete the comment documenting the sink.
+  test(`"${COMMIT_BETA_STEP}" declares its env: mapping and stepEnv reads it past the comment`, () => {
+    assert.deepEqual(stepEnv(npmPublish, COMMIT_BETA_STEP), {
+      BRANCH: '${{ github.ref_name }}',
+      PUBLISHED_VERSION: '${{ steps.package-version.outputs.version }}',
+    });
+  });
+
+  test('stepEnv reads every step in both workflows without throwing', () => {
+    for (const [workflow, text] of Object.entries(WORKFLOWS)) {
+      for (const step of parseSteps(text)) {
+        assert.doesNotThrow(
+          () => stepEnv(text, step.name),
+          `stepEnv threw on ${workflow} step ${JSON.stringify(step.name)}`,
+        );
+      }
+    }
+  });
+
   test(`"${COMMIT_BETA_STEP}" does not execute a payload in the branch name`, () => {
     const run = runStep(COMMIT_BETA_STEP, {
       env: { BRANCH: 'dev"; touch "$CANARY_DIR/PWNED_BRANCH"; :"', PUBLISHED_VERSION: '0.1.1-beta.128' },
