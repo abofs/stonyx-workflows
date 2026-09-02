@@ -49,10 +49,16 @@ jobs:
             const packageName = process.env.PACKAGE_NAME;
             const publishedVersion = process.env.PUBLISHED_VERSION;
 
-            if (!/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(packageName || '')) {
+            // The same grammar the four npm-publish.yml validators enforce,
+            // including the 214-character npm bound. The copies are pinned
+            // string-identical by test/injection-test.js so this one cannot
+            // drift out of step with them.
+            if (typeof packageName !== 'string' || packageName.length === 0 || packageName.length > 214 ||
+                !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(packageName)) {
               throw new Error(`Refusing to cascade: ${JSON.stringify(packageName)} is not a valid npm package name`);
             }
-            if (!/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(publishedVersion || '')) {
+            if (typeof publishedVersion !== 'string' ||
+                !/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(publishedVersion)) {
               throw new Error(`Refusing to cascade: ${JSON.stringify(publishedVersion)} is not a valid semver version`);
             }
 

@@ -2,6 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -22,11 +23,26 @@ import { parseSteps, readWorkflow, stepEnv, stepRunBody, stepScriptBody } from '
 // (`bash -eo pipefail`). A payload that executes writes into `$CANARY_DIR`;
 // the assertion is that the directory stays empty and the step fails loudly.
 //
-// The seventh (AC5, the two `actions/github-script` sinks) is STRUCTURAL ONLY
-// and says so -- see the comment on that describe block. GitHub Actions
-// `${{ }}` substitution happens before the script is ever parsed, in the
-// runner, and there is no offline engine for it, so no execution of any body
-// can reach it. It is not padded out with a mock that would pass regardless.
+// The seventh (AC5, the two `actions/github-script` sinks) splits in two, and
+// the split is the point:
+//
+//   - The `${{ }}` SUBSTITUTION cannot be executed offline. The runner does it
+//     textually before the script is parsed and there is no offline engine for
+//     it, so the absence of any expression inside either `script:` body is
+//     asserted statically and cannot be more than that.
+//   - The guards' POST-SUBSTITUTION BEHAVIOUR is ordinary JavaScript, precisely
+//     because the fix removed every expression from the body. It is therefore
+//     executed here: the real `script:` text is extracted and run as an async
+//     function with a stubbed `github` client, zero dependencies, nothing
+//     dispatched. A `/throw new Error/` grep used to stand in for this and was
+//     green against four separate deletions of the guard it named.
+//
+// One structural-only case remains and is labelled where it lives: AC1's
+// `execFileSync` property (`builds no shell command string from a package
+// name`). No executed case can red it, because the name grammar admits no
+// shell-active character, so for every name that reaches `npmView` a shell
+// command line and an argv produce the same invocation. Defence in depth
+// working as designed, and stated rather than papered over.
 
 const npmPublish = readWorkflow('npm-publish.yml');
 const cascade = readWorkflow('cascade.yml');
@@ -49,6 +65,29 @@ const JS_BREAKOUT = `@stonyx/x'; require("fs").writeFileSync(process.env.CANARY_
 const SHELL_SUBST = '@stonyx/x$(touch "$CANARY_DIR/PWNED_EXECSYNC")';
 const SHELL_SEMICOLON = '@stonyx/x; touch "$CANARY_DIR/PWNED_SH" #';
 const OUTPUT_FORGERY = '@stonyx/x\nversion=9.9.9-EVIL\nmalicious=1';
+
+// The grammar tables. Module scope rather than inside AC4's describe block
+// because `cascade.yml` carries its own copy of the same grammar and is fed
+// the same strings through the executed dispatch harness below -- one table,
+// both enforcement points, so a divergence between them shows up as a failure
+// rather than as an untested copy.
+const ILLEGAL_NAMES = {
+  'leading dot': '.stonyx',
+  'leading underscore': '_stonyx',
+  'contains a space': '@stonyx/rest server',
+  'contains a newline': OUTPUT_FORGERY,
+  'contains a backtick': '@stonyx/x`id`',
+  'contains a pipe': '@stonyx/x|id',
+  'contains a backslash': '@stonyx/x\\u0000',
+  'empty': '',
+  'over 214 characters': '@stonyx/' + 'a'.repeat(220),
+  'breaks out of a JS string literal': JS_BREAKOUT,
+};
+
+// Guard against the opposite failure: a validator so tight it rejects the
+// repos that actually use this workflow would be a production incident on
+// every one of them.
+const LEGAL_NAMES = ['@stonyx/oauth', '@stonyx/rest-server', 'stonyx', '@stonyx/logs', 'some.pkg', 'a'];
 
 /** Strip the YAML block-scalar indentation without assuming a fixed depth. */
 function dedent(body) {
@@ -388,20 +427,8 @@ describe('AC4 -- npm naming grammar is enforced before any sink (#32)', () => {
   // Not a restatement of AC1/AC2: those pin the two exploit payloads, this
   // pins the grammar itself, so a validator narrowed to "reject quotes" (which
   // would keep AC1 green) still reds here.
-  const ILLEGAL = {
-    'leading dot': '.stonyx',
-    'leading underscore': '_stonyx',
-    'contains a space': '@stonyx/rest server',
-    'contains a newline': OUTPUT_FORGERY,
-    'contains a backtick': '@stonyx/x`id`',
-    'contains a pipe': '@stonyx/x|id',
-    'contains a backslash': '@stonyx/x\\u0000',
-    'empty': '',
-    'over 214 characters': '@stonyx/' + 'a'.repeat(220),
-  };
-
   for (const [stepName] of DERIVATION_STEPS) {
-    for (const [label, name] of Object.entries(ILLEGAL)) {
+    for (const [label, name] of Object.entries(ILLEGAL_NAMES)) {
       test(`"${stepName}" rejects a name that ${label}`, () => {
         const run = runDerivation(stepName, name);
         assert.notEqual(run.status, 0, `${JSON.stringify(name)} is not a legal npm package name`);
@@ -410,11 +437,7 @@ describe('AC4 -- npm naming grammar is enforced before any sink (#32)', () => {
     }
   }
 
-  // Guard against the opposite failure: a validator so tight it rejects the
-  // repos that actually use this workflow would be a production incident on
-  // every one of them.
-  const LEGAL = ['@stonyx/oauth', '@stonyx/rest-server', 'stonyx', '@stonyx/logs', 'some.pkg', 'a'];
-  for (const name of LEGAL) {
+  for (const name of LEGAL_NAMES) {
     test(`"${ALPHA_STEP}" accepts the legal name ${JSON.stringify(name)}`, () => {
       const run = runDerivation(ALPHA_STEP, name);
       assert.equal(run.status, 0, `${name} must be accepted; stderr was:\n${run.stderr}`);
@@ -422,22 +445,22 @@ describe('AC4 -- npm naming grammar is enforced before any sink (#32)', () => {
   }
 });
 
-// STRUCTURAL ONLY, BY CONSTRUCTION -- stated rather than papered over.
+// The SUBSTITUTION half of AC5 -- structural by construction, stated rather
+// than papered over.
 //
 // `actions/github-script` receives its `script:` after the runner has already
 // substituted `${{ }}` expressions into the text. That substitution happens in
 // the runner, before the JS is parsed, and there is no offline implementation
-// of it: `stepRunBody` cannot execute a `with: script:` block, and nothing in
-// this repo can evaluate a GitHub Actions expression. So these two sinks
-// cannot be exercised the way S1/S2/S4/S6 are.
+// of it: nothing in this repo can evaluate a GitHub Actions expression. So the
+// pre-fix shape of these two sinks cannot be reproduced here.
 //
 // What is asserted instead is the property that makes the sink impossible: no
 // `${{ }}` expression appears inside the script text at all, an `env:` mapping
-// carries the values, and the script reads them from `process.env`. This was
-// mutation-checked by restoring `const packageName = '${{ ... }}';` in each
-// file and confirming these tests go red; the local substitution PoC that
-// stands behind them is recorded in the PR body.
-describe('AC5 -- S3/S5: the two github-script sinks (structural only) (#32)', () => {
+// carries the values, and the script reads them from `process.env`.
+//
+// The BEHAVIOUR half is a separate describe block below and it is executed --
+// once no expression remains, the script body is plain JavaScript.
+describe('AC5 -- S3/S5: no expression reaches either github-script body (#32)', () => {
   const SINKS = [
     { workflow: 'npm-publish.yml', step: COMMENT_STEP, vars: { PACKAGE_NAME: 'package-name', PUBLISHED_VERSION: 'package-version' } },
     { workflow: 'cascade.yml', step: DISPATCH_STEP, vars: { PACKAGE_NAME: 'package-name', PUBLISHED_VERSION: 'published-version' } },
@@ -472,12 +495,260 @@ describe('AC5 -- S3/S5: the two github-script sinks (structural only) (#32)', ()
 
   // S5 is the critical half: this script runs with the org-level CASCADE_PAT,
   // not the repo-bound OIDC identity. Pin the token wiring so a future edit
-  // cannot quietly reintroduce an interpolation next to it.
-  test('cascade.yml dispatch still runs under CASCADE_PAT and validates the name it was handed', () => {
+  // cannot quietly move the script off that credential -- or onto a wider one.
+  test('cascade.yml dispatch still runs under CASCADE_PAT', () => {
     const step = parseSteps(cascade).find((s) => s.name === DISPATCH_STEP);
     assert.match(step.body, /github-token: \$\{\{ secrets\.CASCADE_PAT \}\}/);
-    const script = stepScriptBody(cascade, DISPATCH_STEP);
-    assert.match(script, /throw new Error/, 'an illegal package name must abort the dispatch, not index the map with it');
+  });
+});
+
+// The BEHAVIOUR half of AC5, EXECUTED.
+//
+// This block replaces an `assert.match(script, /throw new Error/)`, which was
+// green against all four of: deleting the package-name guard, deleting the
+// published-version guard, keeping a guard but weakening its regex to
+// always-match, and keeping both guards verbatim but moving them below the
+// dispatch loop. It asserted that the string `throw` survived somewhere, which
+// is not the property anyone cares about.
+//
+// The accepted AC5 limit is about `${{ }}` SUBSTITUTION, which has no offline
+// engine. It does not extend to what the guards do afterwards: because the fix
+// removed every expression from this body, the body is plain JavaScript, and
+// `actions/github-script` runs it as the body of an async function with
+// `require`, `github`, `context` and `core` in scope. So that is what happens
+// here -- the real `script:` text, a stubbed `github` client that records
+// rather than dispatches, zero dependencies, no network, nothing published.
+describe('AC5 -- S5: cascade.yml refuses hostile input before it dispatches (#32, executed)', () => {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const nodeRequire = createRequire(import.meta.url);
+  const DEP_MAP_URL = new URL('../dependency-map.json', import.meta.url);
+
+  /**
+   * Run the real dispatch script the way `actions/github-script` runs it.
+   *
+   * `require` is shimmed for one reason only: the script reads
+   * `dependency-map.json` by a path relative to the runner's checkout root, and
+   * this keeps the case independent of the test process's cwd. Everything else
+   * is the real module.
+   */
+  async function runDispatch({ packageName, publishedVersion = '0.1.1-beta.128' }) {
+    const script = dedent(stepScriptBody(cascade, DISPATCH_STEP));
+    const dispatched = [];
+    const logged = [];
+
+    const github = {
+      rest: {
+        repos: {
+          createDispatchEvent: async (args) => { dispatched.push(args); return { status: 204 }; },
+        },
+      },
+    };
+    const scriptRequire = (id) => {
+      const mod = nodeRequire(id);
+      if (id !== 'fs' && id !== 'node:fs') return mod;
+      return {
+        ...mod,
+        readFileSync: (path, ...rest) => mod.readFileSync(path === 'dependency-map.json' ? DEP_MAP_URL : path, ...rest),
+      };
+    };
+    const consoleStub = { log: (...args) => logged.push(args.join(' ')), error: (...args) => logged.push(args.join(' ')) };
+
+    const previous = { PACKAGE_NAME: process.env.PACKAGE_NAME, PUBLISHED_VERSION: process.env.PUBLISHED_VERSION };
+    const apply = (key, value) => { if (value === undefined) delete process.env[key]; else process.env[key] = value; };
+    apply('PACKAGE_NAME', packageName);
+    apply('PUBLISHED_VERSION', publishedVersion);
+
+    let error = null;
+    try {
+      const fn = new AsyncFunction('require', 'github', 'context', 'core', 'console', script);
+      await fn(scriptRequire, github, {}, {}, consoleStub);
+    } catch (e) {
+      error = e;
+    } finally {
+      apply('PACKAGE_NAME', previous.PACKAGE_NAME);
+      apply('PUBLISHED_VERSION', previous.PUBLISHED_VERSION);
+    }
+
+    return { error, dispatched, logged, repos: dispatched.map((d) => `${d.owner}/${d.repo}`) };
+  }
+
+  // The happy path first, so every hostile case below is known to be running
+  // against a harness that CAN dispatch. Without this the whole block could
+  // pass by never reaching the API at all.
+  test('a legal package name still dispatches to exactly its mapped dependents', async () => {
+    const one = await runDispatch({ packageName: '@stonyx/logs' });
+    assert.equal(one.error, null, `legal input must not throw: ${one.error && one.error.message}`);
+    assert.deepEqual(one.repos, ['abofs/stonyx']);
+
+    const six = await runDispatch({ packageName: 'stonyx' });
+    assert.equal(six.error, null);
+    assert.deepEqual(six.repos, [
+      'abofs/stonyx-cron',
+      'abofs/stonyx-rest-server',
+      'abofs/stonyx-oauth',
+      'abofs/stonyx-orm',
+      'abofs/stonyx-discord',
+      'abofs/stonyx-sockets',
+    ]);
+  });
+
+  test('the dispatched payload still carries the source package and version', async () => {
+    const { dispatched } = await runDispatch({ packageName: '@stonyx/logs', publishedVersion: '0.1.1-beta.128' });
+
+    assert.deepEqual(dispatched, [{
+      owner: 'abofs',
+      repo: 'stonyx',
+      event_type: 'cascade-publish',
+      client_payload: { source_package: '@stonyx/logs', source_version: '0.1.1-beta.128' },
+    }]);
+  });
+
+  for (const [label, name] of Object.entries(ILLEGAL_NAMES)) {
+    test(`a package-name that ${label} throws before any dispatch`, async () => {
+      const { error, dispatched } = await runDispatch({ packageName: name });
+
+      assert.notEqual(error, null, `${JSON.stringify(name.slice(0, 40))} must be refused, not indexed into the map`);
+      assert.match(error.message, /is not a valid npm package name/);
+      assert.deepEqual(dispatched, [], 'createDispatchEvent must never be reached with an unvalidated name');
+    });
+  }
+
+  test('an absent package-name throws rather than dispatching', async () => {
+    const { error, dispatched } = await runDispatch({ packageName: undefined });
+
+    assert.notEqual(error, null);
+    assert.match(error.message, /is not a valid npm package name/);
+    assert.deepEqual(dispatched, []);
+  });
+
+  for (const name of LEGAL_NAMES) {
+    test(`the legal package name ${JSON.stringify(name)} is not refused`, async () => {
+      const { error } = await runDispatch({ packageName: name });
+      assert.equal(error, null, `${name} must be accepted; threw: ${error && error.message}`);
+    });
+  }
+
+  // The version guard is independently reachable: a name that passes must not
+  // carry a hostile version through on its coat-tails.
+  const ILLEGAL_VERSIONS = {
+    'is empty': '',
+    'is not a version at all': 'latest',
+    'contains a newline': '0.1.1-beta.128\nmalicious=1',
+    'carries a shell payload': '1.0.0; touch /tmp/PWNED_CASCADE',
+    'breaks out of a JS string literal': `1.0.0'; throw new Error("owned"); const zz='`,
+    'is only a partial version': '0.1',
+  };
+  for (const [label, version] of Object.entries(ILLEGAL_VERSIONS)) {
+    test(`a published-version that ${label} throws before any dispatch`, async () => {
+      const { error, dispatched } = await runDispatch({ packageName: '@stonyx/logs', publishedVersion: version });
+
+      assert.notEqual(error, null, `${JSON.stringify(version)} must be refused`);
+      assert.match(error.message, /is not a valid semver version/);
+      assert.deepEqual(dispatched, [], 'createDispatchEvent must never be reached with an unvalidated version');
+    });
+  }
+
+  for (const version of ['0.1.1-beta.128', '1.2.3', 'v1.2.3', '0.1.1-beta.1+build.5']) {
+    test(`the legal published-version ${JSON.stringify(version)} still dispatches`, async () => {
+      const { error, repos } = await runDispatch({ packageName: '@stonyx/logs', publishedVersion: version });
+      assert.equal(error, null, `${version} must be accepted; threw: ${error && error.message}`);
+      assert.deepEqual(repos, ['abofs/stonyx']);
+    });
+  }
+
+  // `depMap[packageName]` is a bare object index. The grammar rejects
+  // `__proto__` outright; `constructor` and `toString` pass it and resolve to
+  // inherited functions, which the `!entry.dependents` early return catches.
+  // Pinned because the early return is the only thing standing between them
+  // and `entry.dependents.map`.
+  for (const key of ['constructor', 'toString', 'valueOf']) {
+    test(`the inherited key ${JSON.stringify(key)} dispatches nothing`, async () => {
+      const { error, dispatched } = await runDispatch({ packageName: key });
+      assert.equal(error, null, 'an inherited key is a legal npm name, so it must not throw');
+      assert.deepEqual(dispatched, [], 'an inherited Object.prototype member is not a dependency-map entry');
+    });
+  }
+
+  test('__proto__ is refused by the grammar', async () => {
+    const { error, dispatched } = await runDispatch({ packageName: '__proto__' });
+    assert.notEqual(error, null);
+    assert.match(error.message, /is not a valid npm package name/);
+    assert.deepEqual(dispatched, []);
+  });
+});
+
+// The grammar is a security contract for eleven repos and it is stated eight
+// times as eight string literals -- five copies of the npm name regex, three of
+// the semver regex -- because the steps that need it run before any checkout of
+// this repo exists on disk, so `scripts/` is genuinely unreachable from them.
+// Extraction is not available; pinning the copies together is.
+describe('the duplicated grammar literals do not drift apart (#32)', () => {
+  /** Every regex literal in `text` that starts with `opener` and ends at `$/` plus flags. */
+  function grammarLiterals(text, opener) {
+    const found = [];
+    for (let i = 0; ;) {
+      const start = text.indexOf(opener, i);
+      if (start === -1) return found;
+      const end = text.indexOf('$/', start);
+      if (end === -1) throw new Error(`unterminated regex literal at offset ${start}`);
+      let after = end + 2;
+      while (/[a-z]/.test(text[after] ?? '')) after++;
+      found.push(text.slice(start, after));
+      i = after;
+    }
+  }
+
+  const nameLiterals = [
+    ...grammarLiterals(npmPublish, '/^(?:@').map((literal) => ['npm-publish.yml', literal]),
+    ...grammarLiterals(cascade, '/^(?:@').map((literal) => ['cascade.yml', literal]),
+  ];
+
+  test('all five copies of the npm name grammar are string-identical', () => {
+    assert.equal(
+      nameLiterals.length,
+      5,
+      `expected the four npm-publish.yml validators plus cascade.yml's; found ${JSON.stringify(nameLiterals)}`,
+    );
+    const [[, first]] = nameLiterals;
+    for (const [file, literal] of nameLiterals) {
+      assert.equal(literal, first, `the name grammar in ${file} has drifted from the others`);
+    }
+    assert.equal(first, '/^(?:@[a-z0-9][a-z0-9._-]*\\/)?[a-z0-9][a-z0-9._-]*$/i');
+  });
+
+  test('every name-grammar site also carries the 214-character npm bound', () => {
+    const bounds = [npmPublish, cascade]
+      .map((text) => (text.match(/\.length > 214/g) ?? []).length)
+      .reduce((a, b) => a + b, 0);
+
+    assert.equal(bounds, nameLiterals.length, 'a regex site without the length bound accepts a name npm cannot host');
+  });
+
+  // The semver copies are deliberately two families, not one: a `package.json`
+  // `version` can never legitimately be `v`-prefixed, while `custom-version`
+  // and `published-version` are consumer-supplied tag-shaped strings and do
+  // accept it. That asymmetry is documented in the README; what is pinned here
+  // is that it is the ONLY difference between the copies.
+  const semverWithV = [
+    ...grammarLiterals(npmPublish, '/^v?\\d+').map((literal) => ['npm-publish.yml', literal]),
+    ...grammarLiterals(cascade, '/^v?\\d+').map((literal) => ['cascade.yml', literal]),
+  ];
+  const semverWithoutV = grammarLiterals(npmPublish, '/^\\d+').map((literal) => ['npm-publish.yml', literal]);
+
+  test('the three copies of the semver grammar differ only by the optional leading v', () => {
+    assert.equal(semverWithV.length, 2, `expected custom-version and published-version; found ${JSON.stringify(semverWithV)}`);
+    assert.equal(semverWithoutV.length, 1, `expected exactly one package.json version grammar; found ${JSON.stringify(semverWithoutV)}`);
+
+    const [[, withV]] = semverWithV;
+    for (const [file, literal] of semverWithV) {
+      assert.equal(literal, withV, `the semver grammar in ${file} has drifted from the other input validator`);
+    }
+    assert.equal(
+      semverWithoutV[0][1],
+      withV.replace('v?', ''),
+      'the package.json version grammar must be the input grammar minus the optional leading v, and nothing else',
+    );
+    assert.equal(withV, '/^v?\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$/');
   });
 });
 
