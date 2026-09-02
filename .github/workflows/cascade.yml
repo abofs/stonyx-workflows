@@ -29,13 +29,32 @@ jobs:
 
       - name: Dispatch to downstream dependents
         uses: actions/github-script@v7
+        env:
+          PACKAGE_NAME: ${{ inputs.package-name }}
+          PUBLISHED_VERSION: ${{ inputs.published-version }}
         with:
           github-token: ${{ secrets.CASCADE_PAT }}
           script: |
             const fs = require('fs');
             const depMap = JSON.parse(fs.readFileSync('dependency-map.json', 'utf8'));
-            const packageName = '${{ inputs.package-name }}';
-            const publishedVersion = '${{ inputs.published-version }}';
+
+            // These two values originate in a consumer's package.json and reach
+            // this step through workflow_call inputs. They are read from the
+            // step env rather than interpolated as a GitHub Actions expression:
+            // the runner substitutes those expressions into this source before
+            // the script is parsed, and this script holds the org-level
+            // CASCADE_PAT, so an interpolation here is a whole-org credential,
+            // not a repo-bound one (abofs/stonyx-workflows#32). No expression
+            // may appear below.
+            const packageName = process.env.PACKAGE_NAME;
+            const publishedVersion = process.env.PUBLISHED_VERSION;
+
+            if (!/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(packageName || '')) {
+              throw new Error(`Refusing to cascade: ${JSON.stringify(packageName)} is not a valid npm package name`);
+            }
+            if (!/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(publishedVersion || '')) {
+              throw new Error(`Refusing to cascade: ${JSON.stringify(publishedVersion)} is not a valid semver version`);
+            }
 
             const entry = depMap[packageName];
             if (!entry || !entry.dependents || entry.dependents.length === 0) {

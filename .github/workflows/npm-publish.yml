@@ -74,24 +74,64 @@ jobs:
 
       - name: Get package name
         id: package-name
-        run: echo "name=$(node -p "require('./package.json').name")" >> $GITHUB_OUTPUT
+        run: |
+          # The name is consumer-controlled. Validating it here is what keeps a
+          # newline in it from forging additional `key=value` lines in
+          # $GITHUB_OUTPUT, and it is the single point every later consumer of
+          # steps.package-name.outputs.name relies on (abofs/stonyx-workflows#32).
+          PKG_NAME=$(node -e '
+            const name = require("./package.json").name;
+            if (typeof name !== "string" || name.length === 0 || name.length > 214 ||
+                !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(name)) {
+              console.error("::error::package.json name is not a valid npm package name: " + JSON.stringify(name));
+              process.exit(1);
+            }
+            process.stdout.write(name);
+          ')
+          echo "name=$PKG_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Update all Stonyx dependencies to latest
         if: inputs.cascade-source != ''
         run: |
-          node -e "
-            const { execSync } = require('child_process');
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          node -e '
+            const { execFileSync } = require("child_process");
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+
+            // A dependency KEY is consumer-controlled, and it used to be
+            // concatenated into a shell command line. It is validated here and
+            // then only ever passed as a single argv element
+            // (abofs/stonyx-workflows#32).
+            function assertPackageName(value, label) {
+              if (typeof value !== "string" || value.length === 0 || value.length > 214 ||
+                  !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(value)) {
+                console.error("::error::" + label + " is not a valid npm package name: " + JSON.stringify(value));
+                process.exit(1);
+              }
+            }
+
+            // Returns the tag value, "" when the package has no such tag, or
+            // null when the package is genuinely absent from the registry.
+            // Anything else -- a network failure, an auth failure, a 5xx --
+            // fails the job. Swallowing it made a transient outage look
+            // identical to "not published" and silently skipped the update.
+            function npmView(depName, field) {
+              try {
+                return execFileSync("npm", ["view", depName, field], {
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "pipe"],
+                }).trim();
+              } catch (e) {
+                const stderr = String(e.stderr || "");
+                if (/E404|404 Not Found/.test(stderr)) return null;
+                console.error("::error::npm view " + depName + " " + field + " failed: " + (stderr.trim() || e.message));
+                process.exit(1);
+              }
+            }
 
             function getLatestVersion(depName) {
-              let beta = null, latest = null;
-              try {
-                beta = execSync('npm view ' + depName + ' dist-tags.beta', { encoding: 'utf8' }).trim();
-              } catch (e) {}
-              try {
-                latest = execSync('npm view ' + depName + ' dist-tags.latest', { encoding: 'utf8' }).trim();
-              } catch (e) {}
+              const beta = npmView(depName, "dist-tags.beta");
+              const latest = npmView(depName, "dist-tags.latest");
 
               if (!beta && !latest) return null;
               if (!beta) return { version: latest, isPrerelease: false };
@@ -99,8 +139,8 @@ jobs:
 
               // Compare versions: pick the higher one
               const parseSemver = (v) => {
-                const [core, pre] = v.split('-');
-                const [maj, min, pat] = core.split('.').map(Number);
+                const [core, pre] = v.split("-");
+                const [maj, min, pat] = core.split(".").map(Number);
                 return { maj, min, pat, pre: pre || null };
               };
               const b = parseSemver(beta);
@@ -109,38 +149,39 @@ jobs:
               if (b.maj !== l.maj) return b.maj > l.maj ? { version: beta, isPrerelease: true } : { version: latest, isPrerelease: false };
               if (b.min !== l.min) return b.min > l.min ? { version: beta, isPrerelease: true } : { version: latest, isPrerelease: false };
               if (b.pat !== l.pat) return b.pat > l.pat ? { version: beta, isPrerelease: true } : { version: latest, isPrerelease: false };
-              // Same core version: latest (stable) wins since it's the release of the same version
+              // Same core version: latest (stable) wins since it is the release of the same version
               return { version: latest, isPrerelease: false };
             }
 
             let changed = false;
-            for (const section of ['dependencies', 'devDependencies']) {
+            for (const section of ["dependencies", "devDependencies"]) {
               if (!pkg[section]) continue;
               for (const [dep, currentRange] of Object.entries(pkg[section])) {
-                if (dep !== 'stonyx' && !dep.startsWith('@stonyx/')) continue;
+                if (dep !== "stonyx" && !dep.startsWith("@stonyx/")) continue;
+                assertPackageName(dep, "dependency key in " + section);
                 const result = getLatestVersion(dep);
                 if (!result) {
-                  console.log('  [skip] ' + dep + ': not found on npm');
+                  console.log("  [skip] " + dep + ": not found on npm");
                   continue;
                 }
-                const newRange = result.isPrerelease ? result.version : '^' + result.version;
+                const newRange = result.isPrerelease ? result.version : "^" + result.version;
                 if (currentRange !== newRange) {
-                  console.log('  [update] ' + dep + ': ' + currentRange + ' -> ' + newRange);
+                  console.log("  [update] " + dep + ": " + currentRange + " -> " + newRange);
                   pkg[section][dep] = newRange;
                   changed = true;
                 } else {
-                  console.log('  [ok] ' + dep + ': ' + currentRange);
+                  console.log("  [ok] " + dep + ": " + currentRange);
                 }
               }
             }
 
             if (changed) {
-              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-              console.log('package.json updated.');
+              fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+              console.log("package.json updated.");
             } else {
-              console.log('All Stonyx dependencies already up to date.');
+              console.log("All Stonyx dependencies already up to date.");
             }
-          "
+          '
 
       - name: Install dependencies
         run: pnpm install ${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}
@@ -172,7 +213,22 @@ jobs:
 
       - name: Bump version (custom)
         if: steps.version-type.outputs.type == 'custom'
-        run: pnpm version ${{ inputs.custom-version }} --no-git-tag-version
+        env:
+          CUSTOM_VERSION: ${{ inputs.custom-version }}
+        run: |
+          # `custom-version` is a consumer dispatch input. It reaches the shell
+          # only as a quoted variable expansion, never as shell source, and only
+          # after it is proven to be a version (abofs/stonyx-workflows#32).
+          node -e '
+            const value = process.env.CUSTOM_VERSION;
+            const KEYWORDS = ["patch", "minor", "major", "prepatch", "preminor", "premajor", "prerelease", "from-git"];
+            const SEMVER = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+            if (typeof value !== "string" || (!KEYWORDS.includes(value) && !SEMVER.test(value))) {
+              console.error("::error::custom-version is not a valid semver version or npm version keyword: " + JSON.stringify(value));
+              process.exit(1);
+            }
+          '
+          pnpm version "$CUSTOM_VERSION" --no-git-tag-version
 
       - name: Resolve stonyx-workflows ref
         id: workflows-ref
@@ -197,48 +253,122 @@ jobs:
       - name: Calculate next alpha version
         id: alpha-version
         if: steps.version-type.outputs.type == 'alpha'
+        env:
+          PKG_NAME: ${{ steps.package-name.outputs.name }}
         run: |
-          PKG_NAME=$(node -p "require('./package.json').name")
-          NEXT_VERSION=$(node -e "
-            const { execSync } = require('child_process');
-            const pkg = '$PKG_NAME';
-            let latestStable, allVersions;
-            try {
-              latestStable = execSync('npm view ' + pkg + ' dist-tags.latest', { encoding: 'utf8' }).trim();
-              allVersions = JSON.parse(execSync('npm view ' + pkg + ' versions --json', { encoding: 'utf8' }));
-            } catch (e) {
-              latestStable = require('./package.json').version;
-              allVersions = [];
+          NEXT_VERSION=$(node -e '
+            const { execFileSync } = require("child_process");
+
+            // The package name arrives through the step env and is read here,
+            // never spliced into this program text and never concatenated into
+            // a shell command line (abofs/stonyx-workflows#32).
+            const pkg = process.env.PKG_NAME;
+            if (typeof pkg !== "string" || pkg.length === 0 || pkg.length > 214 ||
+                !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(pkg)) {
+              console.error("::error::PKG_NAME is not a valid npm package name: " + JSON.stringify(pkg));
+              process.exit(1);
             }
-            import('./.stonyx-workflows/scripts/derive-version.mjs').then(({ deriveVersion }) => {
-              console.log(deriveVersion({ channel: 'alpha', latestStable, allVersions }));
+
+            // null means the package is genuinely absent from the registry.
+            // Any other failure fails the job rather than silently restarting
+            // the prerelease counter from a stale local version.
+            function npmView(args) {
+              try {
+                return execFileSync("npm", ["view", pkg, ...args], {
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "pipe"],
+                }).trim();
+              } catch (e) {
+                const stderr = String(e.stderr || "");
+                if (/E404|404 Not Found/.test(stderr)) return null;
+                console.error("::error::npm view " + pkg + " " + args.join(" ") + " failed: " + (stderr.trim() || e.message));
+                process.exit(1);
+              }
+            }
+
+            const latestRaw = npmView(["dist-tags.latest"]);
+            const versionsRaw = latestRaw === null ? null : npmView(["versions", "--json"]);
+
+            let latestStable, allVersions;
+            if (latestRaw === null || versionsRaw === null) {
+              latestStable = require("./package.json").version;
+              allVersions = [];
+            } else {
+              latestStable = latestRaw;
+              try {
+                allVersions = JSON.parse(versionsRaw);
+              } catch (e) {
+                console.error("::error::npm view " + pkg + " versions --json returned unparseable output");
+                process.exit(1);
+              }
+            }
+
+            import("./.stonyx-workflows/scripts/derive-version.mjs").then(({ deriveVersion }) => {
+              console.log(deriveVersion({ channel: "alpha", latestStable, allVersions }));
             });
-          ")
-          echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
-          pnpm version $NEXT_VERSION --no-git-tag-version
+          ')
+          echo "version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          pnpm version "$NEXT_VERSION" --no-git-tag-version
 
       - name: Calculate next beta version
         id: beta-version
         if: steps.version-type.outputs.type == 'beta'
+        env:
+          PKG_NAME: ${{ steps.package-name.outputs.name }}
         run: |
-          PKG_NAME=$(node -p "require('./package.json').name")
-          NEXT_VERSION=$(node -e "
-            const { execSync } = require('child_process');
-            const pkg = '$PKG_NAME';
-            let latestStable, allVersions;
-            try {
-              latestStable = execSync('npm view ' + pkg + ' dist-tags.latest', { encoding: 'utf8' }).trim();
-              allVersions = JSON.parse(execSync('npm view ' + pkg + ' versions --json', { encoding: 'utf8' }));
-            } catch (e) {
-              latestStable = require('./package.json').version;
-              allVersions = [];
+          NEXT_VERSION=$(node -e '
+            const { execFileSync } = require("child_process");
+
+            // The package name arrives through the step env and is read here,
+            // never spliced into this program text and never concatenated into
+            // a shell command line (abofs/stonyx-workflows#32).
+            const pkg = process.env.PKG_NAME;
+            if (typeof pkg !== "string" || pkg.length === 0 || pkg.length > 214 ||
+                !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(pkg)) {
+              console.error("::error::PKG_NAME is not a valid npm package name: " + JSON.stringify(pkg));
+              process.exit(1);
             }
-            import('./.stonyx-workflows/scripts/derive-version.mjs').then(({ deriveVersion }) => {
-              console.log(deriveVersion({ channel: 'beta', latestStable, allVersions }));
+
+            // null means the package is genuinely absent from the registry.
+            // Any other failure fails the job rather than silently restarting
+            // the prerelease counter from a stale local version.
+            function npmView(args) {
+              try {
+                return execFileSync("npm", ["view", pkg, ...args], {
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "pipe"],
+                }).trim();
+              } catch (e) {
+                const stderr = String(e.stderr || "");
+                if (/E404|404 Not Found/.test(stderr)) return null;
+                console.error("::error::npm view " + pkg + " " + args.join(" ") + " failed: " + (stderr.trim() || e.message));
+                process.exit(1);
+              }
+            }
+
+            const latestRaw = npmView(["dist-tags.latest"]);
+            const versionsRaw = latestRaw === null ? null : npmView(["versions", "--json"]);
+
+            let latestStable, allVersions;
+            if (latestRaw === null || versionsRaw === null) {
+              latestStable = require("./package.json").version;
+              allVersions = [];
+            } else {
+              latestStable = latestRaw;
+              try {
+                allVersions = JSON.parse(versionsRaw);
+              } catch (e) {
+                console.error("::error::npm view " + pkg + " versions --json returned unparseable output");
+                process.exit(1);
+              }
+            }
+
+            import("./.stonyx-workflows/scripts/derive-version.mjs").then(({ deriveVersion }) => {
+              console.log(deriveVersion({ channel: "beta", latestStable, allVersions }));
             });
-          ")
-          echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
-          pnpm version $NEXT_VERSION --no-git-tag-version
+          ')
+          echo "version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          pnpm version "$NEXT_VERSION" --no-git-tag-version
 
       - name: Remove stonyx-workflows checkout
         if: always()
@@ -254,7 +384,20 @@ jobs:
 
       - name: Get package version
         id: package-version
-        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+        run: |
+          # Same shape as the package-name step: a newline in the value would
+          # otherwise forge additional $GITHUB_OUTPUT keys, and this output
+          # gates every publish step below (abofs/stonyx-workflows#32).
+          PKG_VERSION=$(node -e '
+            const version = require("./package.json").version;
+            if (typeof version !== "string" ||
+                !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
+              console.error("::error::package.json version is not a valid semver version: " + JSON.stringify(version));
+              process.exit(1);
+            }
+            process.stdout.write(version);
+          ')
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Publish to NPM (alpha)
         if: contains(steps.package-version.outputs.version, 'alpha')
@@ -308,10 +451,18 @@ jobs:
       - name: Comment on PR with alpha version
         if: contains(steps.package-version.outputs.version, 'alpha')
         uses: actions/github-script@v7
+        env:
+          PACKAGE_NAME: ${{ steps.package-name.outputs.name }}
+          PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}
         with:
           script: |
-            const version = '${{ steps.package-version.outputs.version }}';
-            const packageName = '${{ steps.package-name.outputs.name }}';
+            // Read from the step env rather than interpolating a GitHub
+            // Actions expression into this source: the runner substitutes those
+            // expressions textually, before the script is ever parsed, so a
+            // quote in the value breaks out of the literal
+            // (abofs/stonyx-workflows#32). No expression may appear below.
+            const version = process.env.PUBLISHED_VERSION;
+            const packageName = process.env.PACKAGE_NAME;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,

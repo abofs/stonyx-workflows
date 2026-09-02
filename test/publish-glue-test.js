@@ -64,7 +64,8 @@ function runDerivationStep(stepName) {
       join(workspace, '.stonyx-workflows', 'scripts', 'derive-version.mjs'),
     );
 
-    // A consumer package. The name is what the step reads and interpolates.
+    // A consumer package. Its version is the fallback the step uses when the
+    // package is not on the registry yet; its name matches PKG_NAME below.
     writeFileSync(
       join(workspace, 'package.json'),
       JSON.stringify({ name: '@stonyx/oauth', version: '0.1.0' }, null, 2),
@@ -109,7 +110,17 @@ function runDerivationStep(stepName) {
     // The shell GitHub Actions uses for a `run:` block.
     const result = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', scriptPath], {
       cwd: workspace,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_OUTPUT: githubOutput },
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        GITHUB_OUTPUT: githubOutput,
+        // The derivation steps read the package name from the step `env:`
+        // rather than re-deriving it, so that no consumer-controlled string is
+        // ever spliced into the program text (abofs/stonyx-workflows#32). The
+        // runner supplies it from steps.package-name.outputs.name; here it
+        // matches the workspace package.json above.
+        PKG_NAME: '@stonyx/oauth',
+      },
       encoding: 'utf8',
     });
 

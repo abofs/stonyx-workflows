@@ -38,7 +38,10 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
       const body = stepRunBody(npmPublish, step);
       assert.match(body, /scripts\/derive-version\.mjs/);
       assert.match(body, /deriveVersion\(/);
-      assert.match(body, new RegExp(`channel: '${channel}'`));
+      // Either quote form: #32 moved these programs inside a single-quoted
+      // `node -e '...'` so that nothing in the shell can expand into the
+      // program text, which forces double quotes on every JS string literal.
+      assert.match(body, new RegExp(`channel: ['"]${channel}['"]`));
     });
   }
 
