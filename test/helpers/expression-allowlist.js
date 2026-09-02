@@ -7,22 +7,46 @@
 // entry reds, so adding one to a workflow forces a reviewer to write down what
 // it is and why it is safe. The allowlist IS the review artifact.
 //
-// Each entry pins four things:
+// Each entry pins five things:
 //
 //   line         the EXACT source line, trimmed, that carries the expression.
 //                Pinning the step alone let an exemption follow its expression
 //                into an `eval "..."` wrapper, or into a `#` comment left
 //                behind by the very fix that closed the sink -- both measured
 //                green (abofs/stonyx-workflows#37, bypass 4 and NEW-5).
+//   context      the key the line is written UNDER -- `with`, `env`, `run`,
+//                `outputs`, `concurrency`, `steps` -- derived from raw text by
+//                `structuralContexts`. The trimmed line carries no context of
+//                its own, so an entry keyed on it alone approves the
+//                characters rather than the position: relocating
+//                `version: ${{ inputs.pnpm-version }}` byte-for-byte out of
+//                `pnpm/action-setup`'s `with:` and into a `run:` body left the
+//                guarantee reporting nothing, at 256 pass / 0 fail, with a
+//                `workflow_call` input reaching bash (#37, Phase 3 §4; Phase 1
+//                F5, independently, with `secrets.CASCADE_PAT`). That is bypass
+//                4 / NEW-5 recurring one granularity down, and this field is
+//                what stops it: move the line and the entry goes dead.
 //   expression   the expression itself, so a line rewritten around a different
 //                expression is not covered by the old entry.
 //   occurrences  how many times it appears on that line across the file, so a
 //                second copy is not free.
-//   why          what the expression is, and why it is safe HERE. Held to
-//                account mechanically: `entryShapeProblems` refuses a `why`
-//                shorter than 60 characters or one that names none of its own
-//                expression's references, so a generic reason cannot be pasted
-//                across the file.
+//   why          what the expression is, and why it is safe HERE. `why` is held
+//                to a FLOOR mechanically -- `entryShapeProblems` refuses one
+//                shorter than 60 characters, or one naming none of its own
+//                expression's references -- and that floor stops bulk paste,
+//                not bad reasoning. Well-formed noise passes it (measured: all
+//                36 reasons replaced, 256 pass / 0 fail, #37 Phase 4 NEW-4).
+//                What holds a `why` to account is the reviewer reading it in
+//                the diff; the floor only guarantees there is something to
+//                read.
+//
+// WHAT THE KEY STILL DOES NOT ENCODE. It pins WHICH LINE, not WHAT CONSUMES
+// the line's value. Swapping `uses: actions/checkout@v4` for a third-party
+// action in `cascade.yml` leaves `token: ${{ secrets.CASCADE_PAT }}` and its
+// context byte-identical, hands the org secret to that action, and is green --
+// measured at 256 pass / 0 fail (#37, Phase 4 NEW-5/N17). Roughly twenty of the
+// reasons below are justified by DESTINATION, and no check re-derives a
+// destination. Reviewing a `uses:` change is a human obligation here.
 //
 // The convention every `why` is measured against is #32's one sentence: no
 // consumer-controlled string ever becomes program text or a shell-string
@@ -42,6 +66,7 @@ export const EXPRESSION_ALLOWLIST = {
   'cascade.yml': [
     {
       line: 'token: ${{ secrets.CASCADE_PAT }}',
+      context: 'with',
       expression: '${{ secrets.CASCADE_PAT }}',
       occurrences: 1,
       why: 'secrets.CASCADE_PAT is an org-level secret, not a consumer-controlled string, and its destination '
@@ -50,6 +75,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'PACKAGE_NAME: ${{ inputs.package-name }}',
+      context: 'env',
       expression: '${{ inputs.package-name }}',
       occurrences: 1,
       why: 'inputs.package-name IS consumer-controlled -- it originates in a consumer package.json. It is safe '
@@ -58,6 +84,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'PUBLISHED_VERSION: ${{ inputs.published-version }}',
+      context: 'env',
       expression: '${{ inputs.published-version }}',
       occurrences: 1,
       why: 'inputs.published-version is consumer-controlled and reaches a step `env:` value, not program text. '
@@ -66,6 +93,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'github-token: ${{ secrets.CASCADE_PAT }}',
+      context: 'with',
       expression: '${{ secrets.CASCADE_PAT }}',
       occurrences: 1,
       why: 'The same org secret one line down, as the `github-token:` input of actions/github-script. '
@@ -77,6 +105,7 @@ export const EXPRESSION_ALLOWLIST = {
   'ci.yml': [
     {
       line: 'version: ${{ inputs.pnpm-version }}',
+      context: 'with',
       expression: '${{ inputs.pnpm-version }}',
       occurrences: 1,
       why: 'inputs.pnpm-version is a workflow_call input reaching the `version:` input of pnpm/action-setup. '
@@ -85,6 +114,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'node-version: ${{ inputs.node-version }}',
+      context: 'with',
       expression: '${{ inputs.node-version }}',
       occurrences: 1,
       why: 'inputs.node-version is a workflow_call input reaching the `node-version:` input of '
@@ -96,6 +126,7 @@ export const EXPRESSION_ALLOWLIST = {
   'npm-publish.yml': [
     {
       line: 'value: ${{ jobs.publish.outputs.published-version }}',
+      context: 'published-version',
       expression: '${{ jobs.publish.outputs.published-version }}',
       occurrences: 1,
       why: 'jobs.publish.outputs.published-version is this workflow plumbing its own job output out through a '
@@ -104,6 +135,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'value: ${{ jobs.publish.outputs.package-name }}',
+      context: 'package-name',
       expression: '${{ jobs.publish.outputs.package-name }}',
       occurrences: 1,
       why: 'jobs.publish.outputs.package-name, same workflow_call `outputs:` plumbing one declaration down. '
@@ -111,6 +143,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'value: ${{ jobs.publish.outputs.version-channel }}',
+      context: 'version-channel',
       expression: '${{ jobs.publish.outputs.version-channel }}',
       occurrences: 1,
       why: 'jobs.publish.outputs.version-channel, the third of three workflow_call `outputs:` declarations. '
@@ -118,6 +151,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'published-version: ${{ steps.package-version.outputs.version }}',
+      context: 'outputs',
       expression: '${{ steps.package-version.outputs.version }}',
       occurrences: 1,
       why: 'steps.package-version.outputs.version lifted from a step output to a job output. The producing '
@@ -126,6 +160,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'package-name: ${{ steps.package-name.outputs.name }}',
+      context: 'outputs',
       expression: '${{ steps.package-name.outputs.name }}',
       occurrences: 1,
       why: 'steps.package-name.outputs.name lifted from a step output to a job output. The producing step '
@@ -133,6 +168,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'version-channel: ${{ steps.version-type.outputs.type }}',
+      context: 'outputs',
       expression: '${{ steps.version-type.outputs.type }}',
       occurrences: 1,
       why: 'steps.version-type.outputs.type lifted to a job output. The producing step writes one of a fixed '
@@ -140,6 +176,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: "ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}",
+      context: 'with',
       expression: "${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}",
       occurrences: 1,
       why: 'A branch selector built from github.event_name, github.head_ref and github.ref -- all runner '
@@ -148,6 +185,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: "token: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}",
+      context: 'with',
       expression: "${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}",
       occurrences: 1,
       why: 'inputs.cascade-source is consumer-controlled but is used only as a boolean test; the two values '
@@ -156,6 +194,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'version: ${{ inputs.pnpm-version }}',
+      context: 'with',
       expression: '${{ inputs.pnpm-version }}',
       occurrences: 1,
       why: 'inputs.pnpm-version reaching pnpm/action-setup\'s `version:` input in the publish job. An action '
@@ -163,6 +202,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'node-version: ${{ inputs.node-version }}',
+      context: 'with',
       expression: '${{ inputs.node-version }}',
       occurrences: 1,
       why: 'inputs.node-version reaching actions/setup-node\'s `node-version:` input in the publish job. An '
@@ -170,6 +210,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: "run: pnpm install ${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}",
+      context: 'steps',
       expression: "${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}",
       occurrences: 1,
       why: 'THE ONE EXPRESSION IN A run: BODY THAT IS NOT A SINK. inputs.cascade-source is consumer-controlled '
@@ -179,6 +220,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'CASCADE_SOURCE: ${{ inputs.cascade-source }}',
+      context: 'env',
       expression: '${{ inputs.cascade-source }}',
       occurrences: 1,
       why: 'inputs.cascade-source is consumer-controlled and reaches a step `env:` value. That is #32\'s '
@@ -187,6 +229,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'CUSTOM_VERSION: ${{ inputs.custom-version }}',
+      context: 'env',
       expression: '${{ inputs.custom-version }}',
       occurrences: 2,
       why: 'inputs.custom-version is a consumer dispatch input, passed through a step `env:` value in the two '
@@ -195,6 +238,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'VERSION_TYPE: ${{ inputs.version-type }}',
+      context: 'env',
       expression: '${{ inputs.version-type }}',
       occurrences: 1,
       why: 'inputs.version-type is consumer-controlled and reaches a step `env:` value, per #32. The run: body '
@@ -202,6 +246,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'EVENT_NAME: ${{ github.event_name }}',
+      context: 'env',
       expression: '${{ github.event_name }}',
       occurrences: 1,
       why: 'github.event_name is runner context with a small fixed vocabulary, not consumer input, and it '
@@ -210,6 +255,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'GIT_REF: ${{ github.ref }}',
+      context: 'env',
       expression: '${{ github.ref }}',
       occurrences: 1,
       why: 'github.ref is runner context, not a workflow_call input, and reaches a step `env:` value. A ref '
@@ -218,6 +264,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'WORKFLOW_SHA: ${{ job.workflow_sha }}',
+      context: 'env',
       expression: '${{ job.workflow_sha }}',
       occurrences: 1,
       why: 'job.workflow_sha is runner context -- the commit of the reusable workflow itself -- and reaches a '
@@ -226,6 +273,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'ref: ${{ steps.workflows-ref.outputs.sha }}',
+      context: 'with',
       expression: '${{ steps.workflows-ref.outputs.sha }}',
       occurrences: 1,
       why: 'steps.workflows-ref.outputs.sha is the pinned stonyx-workflows commit produced by the step above, '
@@ -234,6 +282,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'PKG_NAME: ${{ steps.package-name.outputs.name }}',
+      context: 'env',
       expression: '${{ steps.package-name.outputs.name }}',
       occurrences: 2,
       why: 'steps.package-name.outputs.name is consumer-derived, and it reaches a step `env:` value in the '
@@ -242,6 +291,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'VERSION_TYPE: ${{ steps.version-type.outputs.type }}',
+      context: 'env',
       expression: '${{ steps.version-type.outputs.type }}',
       occurrences: 1,
       why: 'steps.version-type.outputs.type is one of a fixed keyword set produced by an earlier step in this '
@@ -250,6 +300,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'BRANCH: ${{ github.ref_name }}',
+      context: 'env',
       expression: '${{ github.ref_name }}',
       occurrences: 1,
       why: 'github.ref_name reaches a step `env:` value. A branch name may contain a double quote, so '
@@ -258,6 +309,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}',
+      context: 'env',
       expression: '${{ steps.package-version.outputs.version }}',
       occurrences: 3,
       why: 'steps.package-version.outputs.version reaching a step `env:` value in the three steps that commit, '
@@ -266,6 +318,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'tag_name: v${{ steps.package-version.outputs.version }}',
+      context: 'with',
       expression: '${{ steps.package-version.outputs.version }}',
       occurrences: 2,
       why: 'steps.package-version.outputs.version forming the `tag_name:` input of softprops/action-gh-release '
@@ -274,6 +327,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'name: v${{ steps.package-version.outputs.version }}',
+      context: 'with',
       expression: '${{ steps.package-version.outputs.version }}',
       occurrences: 2,
       why: 'The same validated steps.package-version.outputs.version forming the `name:` input of '
@@ -281,6 +335,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'PACKAGE_NAME: ${{ steps.package-name.outputs.name }}',
+      context: 'env',
       expression: '${{ steps.package-name.outputs.name }}',
       occurrences: 1,
       why: 'steps.package-name.outputs.name reaching a step `env:` value on the PR-comment step. The '
@@ -292,6 +347,7 @@ export const EXPRESSION_ALLOWLIST = {
   'security-audit.yml': [
     {
       line: 'version: ${{ inputs.pnpm-version }}',
+      context: 'with',
       expression: '${{ inputs.pnpm-version }}',
       occurrences: 1,
       why: 'inputs.pnpm-version reaching pnpm/action-setup\'s `version:` input in the audit job. An action '
@@ -299,6 +355,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'node-version: ${{ inputs.node-version }}',
+      context: 'with',
       expression: '${{ inputs.node-version }}',
       occurrences: 1,
       why: 'inputs.node-version reaching actions/setup-node\'s `node-version:` input in the audit job. An '
@@ -306,6 +363,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'run: pnpm audit --audit-level ${{ inputs.audit-level }}',
+      context: 'steps',
       expression: '${{ inputs.audit-level }}',
       occurrences: 1,
       why: 'KNOWN OPEN SINK, tracked as abofs/stonyx-workflows#34. inputs.audit-level is a workflow_call input '
@@ -318,6 +376,7 @@ export const EXPRESSION_ALLOWLIST = {
   'self-ci.yml': [
     {
       line: 'group: self-ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}',
+      context: 'concurrency',
       expression: '${{ github.event_name }}',
       occurrences: 1,
       why: 'github.event_name is runner context with a small fixed vocabulary, forming half of a `concurrency:` '
@@ -326,6 +385,7 @@ export const EXPRESSION_ALLOWLIST = {
     },
     {
       line: 'group: self-ci-${{ github.event_name }}-${{ github.head_ref || github.ref }}',
+      context: 'concurrency',
       expression: '${{ github.head_ref || github.ref }}',
       occurrences: 1,
       why: 'github.head_ref falling back to github.ref, forming the other half of the same `concurrency:` '

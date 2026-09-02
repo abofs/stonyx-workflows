@@ -6,8 +6,9 @@
 //   Every `${{ }}` occurrence in EVERY FILE under `.github/workflows/` --
 //   enumerated by directory listing with NO extension filter, found by a raw
 //   byte scan with no YAML understanding whatsoever -- must appear in an
-//   allowlist keyed by (file, exact source line, expression) with a stated
-//   reason.
+//   allowlist keyed by (file, structural context, exact source line,
+//   expression) with a stated reason. And no line in the directory may carry a
+//   backslash escape that could CONSTRUCT an opener the scan cannot see.
 //
 // WHY IT IS SHAPED THIS WAY, since the shape is the whole point.
 //
@@ -43,6 +44,34 @@
 // The only thing this module has in common with the extractor is the directory
 // path it reads, which is data rather than parsing logic.
 //
+// TWO THINGS A BYTE SCAN CANNOT DO, AND WHAT IS DONE ABOUT THEM.
+//
+// 1. It cannot see an opener that is CONSTRUCTED rather than written. A YAML
+//    double-quoted scalar is the one style that processes escapes, and it
+//    resolves them BEFORE anything looks for `${{`. Five spellings --
+//    `"\x24{{"`, `"\u0024{{"`, `"$\x7b{"`, and the two line-continuation
+//    forms `"$\`+newline+`{{"` and `"${\`+newline+`{"` -- all parse to
+//    `${{ ... }}` with ZERO literal `${{` in the bytes, verified against a real
+//    YAML parser, and two of them were measured appended to the real `ci.yml`
+//    at 256 pass / 0 fail (#37, Phase 3 §3).
+//
+//    `escapeProblems` REPORTS them rather than interpreting them. This block
+//    does not decide whether GitHub evaluates such a spelling, and it does not
+//    need to: EITHER it is a live bypass, OR the shape is silently unswept and
+//    this scan emits no record at all -- and failing open is precisely the
+//    property this redesign was bought to eliminate. An unmodelled shape must
+//    red. So it reds.
+//
+// 2. It cannot see what CONSUMES an expression. The key therefore carries the
+//    structural context the line sits under -- see `structuralContexts` -- so
+//    that an entry written for a `with:` input stops matching the moment its
+//    byte-identical line is moved into a `run:` body. Measured before that key
+//    field existed: relocating `version: ${{ inputs.pnpm-version }}` out of
+//    `pnpm/action-setup`'s `with:` and into a `run:` body left the guarantee
+//    reporting nothing at 256 pass / 0 fail, with a `workflow_call` input
+//    reaching bash (#37, Phase 3 §4; Phase 1 F5 reproduced it independently
+//    with `token: ${{ secrets.CASCADE_PAT }}`).
+//
 // This module is deliberately dull. `indexOf`, `slice`, `split` and `trim`. If
 // it ever needs to become clever, that is the signal that a guarantee is
 // drifting back onto a reader.
@@ -53,6 +82,16 @@ const WORKFLOWS_DIR = new URL('../../.github/workflows/', import.meta.url);
 
 const OPENER = '${{';
 const CLOSER = '}}';
+const BACKSLASH = '\\';
+
+// The only YAML double-quoted escapes that can CONSTRUCT an arbitrary
+// character, plus the line continuation. `\\x`, `\\u` and `\\U` name a code point;
+// a backslash at end of line joins the next one. Every other double-quoted
+// escape (`\\n`, `\\t`, `\\"`, `\\/`, `\\\\`, ...) resolves to a fixed character
+// that is not `$`, `{` or `}`, so no combination of them can build an opener.
+// That is a whitelist over the mechanism, not a blocklist of spellings.
+const CONSTRUCTING_ESCAPES = 'xuU';
+const TOP_LEVEL = '(top level)';
 
 /**
  * Every file in `dir`, sorted. NO EXTENSION FILTER, on purpose.
@@ -80,12 +119,75 @@ export function readWorkflowFile(name, dir = WORKFLOWS_DIR) {
 }
 
 /**
+ * How deep a line's CONTENT sits, in characters.
+ *
+ * Leading spaces, plus the `- ` of any list markers, because `- name: X` and
+ * the `run: y` under it are siblings in the same mapping and a reader-free key
+ * has to treat them that way. No YAML is understood here: this counts two
+ * characters.
+ */
+function contentIndent(raw) {
+  let i = 0;
+  while (i < raw.length) {
+    if (raw[i] === ' ') { i += 1; continue; }
+    if (raw[i] === '-' && raw[i + 1] === ' ') { i += 2; continue; }
+    break;
+  }
+  return i;
+}
+
+/** The mapping key a raw line opens, or `''` if it opens none. */
+function keyOf(raw) {
+  const body = raw.slice(contentIndent(raw));
+  const colon = body.indexOf(':');
+  return colon === -1 ? '' : body.slice(0, colon).trim();
+}
+
+/**
+ * For every line of `text`, the key of the nearest enclosing line -- the last
+ * preceding non-blank line whose content sits strictly further left.
+ *
+ * This is the context half of the allowlist key, and it exists because the
+ * trimmed line alone carries none. The same 33 characters mean "an input to
+ * `pnpm/action-setup`" under `with:` and "a line of bash" under `run:`; an
+ * entry keyed on the characters alone approves both, so an exemption follows
+ * its line into a sink (#37, Phase 3 §4 and Phase 1 F5, both measured green at
+ * 256 pass / 0 fail before this field existed).
+ *
+ * Derived from raw text -- indentation and the first colon -- never from the
+ * extractor. It is not a YAML path and does not claim to be one: it is the
+ * answer to "what key is this line written underneath", which is the thing
+ * that changes when a line moves between sinks.
+ */
+export function structuralContexts(text) {
+  const contexts = [];
+  const open = [];
+
+  for (const raw of text.split('\n')) {
+    if (raw.trim() === '') {
+      contexts.push(open.length === 0 ? TOP_LEVEL : open[open.length - 1].key);
+      continue;
+    }
+    const indent = contentIndent(raw);
+    while (open.length > 0 && open[open.length - 1].indent >= indent) open.pop();
+    contexts.push(open.length === 0 ? TOP_LEVEL : open[open.length - 1].key);
+    open.push({ indent, key: keyOf(raw) });
+  }
+
+  return contexts;
+}
+
+/**
  * Every `${{` occurrence in `text`, as
- * `{ lineNumber, line, expression }`.
+ * `{ lineNumber, context, line, expression }`.
  *
  * `line` is the source line with leading and trailing whitespace removed --
  * re-indenting a block is not a change to what the line does, but every other
  * byte of it is part of the key.
+ *
+ * `context` is the key the line sits under, from `structuralContexts`. Moving
+ * a byte-identical line from `with:` to `run:` changes it, which is what stops
+ * an exemption travelling with its text.
  *
  * `expression` is `null` when the opener does not close on its own line. That
  * is not a skip: a null expression can never match an allowlist entry, so the
@@ -93,11 +195,17 @@ export function readWorkflowFile(name, dir = WORKFLOWS_DIR) {
  * scanner does not model, and the fail-closed answer to a shape it does not
  * model is to red rather than to guess.
  *
- * Exactly one record per opener, always. The count of records IS the count of
- * `${{` occurrences in the file; nothing can drop out between the two.
+ * Exactly one record per opener, always -- the loop advances by one opener, not
+ * past one closer. It used to advance past the closer, so `a ${{ x ${{ y }}`
+ * emitted ONE record for TWO openers: the first expression's span swallowed the
+ * second opener, and the `scanned === split` cross-check that is supposed to
+ * corroborate the count silently disagreed with itself (#37, Phase 1 F4 /
+ * Phase 4 NEW-8). The count of records IS the count of `${{` occurrences in the
+ * file; nothing can drop out between the two.
  */
 export function rawExpressions(text) {
   const found = [];
+  const contexts = structuralContexts(text);
 
   text.split('\n').forEach((raw, i) => {
     const line = raw.trim();
@@ -107,14 +215,61 @@ export function rawExpressions(text) {
       const close = raw.indexOf(CLOSER, at + OPENER.length);
       found.push({
         lineNumber: i + 1,
+        context: contexts[i],
         line,
         expression: close === -1 ? null : raw.slice(at, close + CLOSER.length),
       });
-      at = raw.indexOf(OPENER, close === -1 ? at + OPENER.length : close + CLOSER.length);
+      at = raw.indexOf(OPENER, at + OPENER.length);
     }
   });
 
   return found;
+}
+
+/**
+ * Every backslash in `text` that could construct a character, as
+ * `{ lineNumber, line, escape }`.
+ *
+ * REPORTS, never interprets. A YAML double-quoted scalar resolves `\x24` to `$`
+ * and joins a trailing backslash to the next line before anything looks for an
+ * expression, so `run: "echo \x24{{ inputs.x }}"` carries no literal opener on
+ * disk and `run: "echo $\` + newline + `{{ inputs.x }}"` carries none either.
+ * Both were measured appended to the real `ci.yml` at 256 pass / 0 fail.
+ *
+ * This function does not decide whether the runner evaluates such a spelling,
+ * because the finding does not depend on the answer: if it does, that is a live
+ * bypass; if it does not, the shape is silently unswept and this scan has
+ * failed OPEN, which is the one property the raw scan was bought to eliminate.
+ * Either way an unmodelled shape must red.
+ *
+ * `indexOf`, and a look at the next character. Nothing more.
+ */
+export function escapeProblems(file, text) {
+  const problems = [];
+
+  text.split('\n').forEach((raw, i) => {
+    let at = raw.indexOf(BACKSLASH);
+
+    while (at !== -1) {
+      const next = raw[at + 1];
+      const continuation = next === undefined || next === '\r';
+      if (continuation || CONSTRUCTING_ESCAPES.includes(next)) {
+        problems.push(
+          `${file}:${i + 1} carries ${continuation ? 'a backslash at end of line' : `a \\${next} escape`} on `
+          + `${JSON.stringify(raw.trim())}. In a YAML double-quoted scalar that resolves BEFORE anything looks `
+          + `for ${OPENER}, so an opener can be CONSTRUCTED with no literal ${OPENER} in the bytes -- `
+          + 'measured green on the real ci.yml. This scanner reads bytes and will not guess which scalar style '
+          + 'a line is in. Either the runner evaluates the constructed opener, in which case this is a live '
+          + 'bypass, or it does not, in which case the shape is silently unswept and the guarantee has failed '
+          + 'open -- and failing open is the property a raw byte scan exists to eliminate. Write the line '
+          + 'without the escape, or extend this scanner deliberately.',
+        );
+      }
+      at = raw.indexOf(BACKSLASH, at + 1);
+    }
+  });
+
+  return problems;
 }
 
 /**
@@ -154,6 +309,12 @@ export function entryShapeProblems(file, entry) {
   if (typeof entry.line !== 'string' || entry.line === '') {
     problems.push(`${where} has no line:. An entry without a line exempts its expression anywhere in the file.`);
   }
+  if (typeof entry.context !== 'string' || entry.context === '') {
+    problems.push(
+      `${where} has no context:. The context is the key the line sits under -- without it the entry approves `
+      + 'the characters of a line rather than the position it occupies, so it follows its line into a sink.',
+    );
+  }
   if (typeof entry.expression !== 'string' || !entry.expression.startsWith(OPENER)) {
     problems.push(`${where} has no expression: beginning with the opener it exempts.`);
   }
@@ -182,13 +343,17 @@ export function entryShapeProblems(file, entry) {
 /**
  * Every problem the guarantee can report for one file.
  *
- * Three ways to red, and they are the whole contract:
+ * Five ways to red, and they are the whole contract:
  *
  *   1. an occurrence with no matching entry           -- an unapproved expression
  *   2. an occurrence count the entry does not pin     -- a second copy on the line
  *   3. an entry matching no occurrence                -- a dead exemption, which is
  *      what kept `security-audit.yml`'s sink allowlisted after the fix relocated
- *      it into a comment and into an `eval "..."` wrapper (#37, bypass 4, NEW-5)
+ *      it into a comment and into an `eval "..."` wrapper (#37, bypass 4, NEW-5),
+ *      and what now also catches an allowlisted line MOVED into a different
+ *      structural context, since the context is part of the key
+ *   4. an entry whose own shape is malformed          -- `entryShapeProblems`
+ *   5. a backslash that could construct an opener     -- `escapeProblems`
  *
  * An opener that does not close on its own line reds under (1) with its own
  * message, because `expression` is `null` and no entry can pin `null`.
@@ -199,8 +364,9 @@ export function rawSweepProblems(file, text, allowlist) {
   const tally = new Map();
 
   for (const entry of entries) problems.push(...entryShapeProblems(file, entry));
+  problems.push(...escapeProblems(file, text));
 
-  for (const { lineNumber, line, expression } of rawExpressions(text)) {
+  for (const { lineNumber, context, line, expression } of rawExpressions(text)) {
     if (expression === null) {
       problems.push(
         `${file}:${lineNumber} opens a ${OPENER} that does not close on the same line, on ${JSON.stringify(line)}. `
@@ -209,37 +375,40 @@ export function rawSweepProblems(file, text, allowlist) {
       );
       continue;
     }
-    const key = JSON.stringify([line, expression]);
-    const seen = tally.get(key) ?? { line, expression, count: 0, at: [] };
+    const key = JSON.stringify([context, line, expression]);
+    const seen = tally.get(key) ?? { context, line, expression, count: 0, at: [] };
     seen.count += 1;
     seen.at.push(lineNumber);
     tally.set(key, seen);
   }
 
-  for (const { line, expression, count, at } of tally.values()) {
-    const entry = entries.find((e) => e.line === line && e.expression === expression);
+  for (const { context, line, expression, count, at } of tally.values()) {
+    const entry = entries.find((e) => e.context === context && e.line === line && e.expression === expression);
     if (!entry) {
       problems.push(
-        `${file} carries ${expression} on line(s) ${at.join(', ')}, on the source line ${JSON.stringify(line)}. `
-        + 'No allowlist entry pins that expression to that line. Every GitHub Actions expression in this '
-        + 'directory needs an entry stating what it is and why it is safe -- adding one is the review.',
+        `${file} carries ${expression} on line(s) ${at.join(', ')}, under ${JSON.stringify(context)}, on the `
+        + `source line ${JSON.stringify(line)}. No allowlist entry in test/helpers/expression-allowlist.js pins `
+        + 'that expression to that line in that context. Every GitHub Actions expression in this directory needs '
+        + 'an entry stating what it is and why it is safe -- adding one is the review.',
       );
       continue;
     }
     if (count !== entry.occurrences) {
       problems.push(
-        `${file} carries ${expression} ${count} time(s) on ${JSON.stringify(line)} (line(s) ${at.join(', ')}); `
-        + `its allowlist entry pins ${entry.occurrences}. Recorded reason was: ${entry.why}`,
+        `${file} carries ${expression} ${count} time(s) on ${JSON.stringify(line)} under `
+        + `${JSON.stringify(context)} (line(s) ${at.join(', ')}); its entry in `
+        + `test/helpers/expression-allowlist.js pins ${entry.occurrences}. Recorded reason was: ${entry.why}`,
       );
     }
   }
 
   for (const entry of entries) {
-    if (tally.has(JSON.stringify([entry.line, entry.expression]))) continue;
+    if (tally.has(JSON.stringify([entry.context, entry.line, entry.expression]))) continue;
     problems.push(
-      `${file} no longer carries ${entry.expression} on the source line ${JSON.stringify(entry.line)}. `
-      + 'That allowlist entry is dead -- the expression it exempted is gone or has moved, so delete or re-pin '
-      + `it rather than letting it exempt something else. Recorded reason was: ${entry.why}`,
+      `${file} no longer carries ${entry.expression} under ${JSON.stringify(entry.context)} on the source line `
+      + `${JSON.stringify(entry.line)}. That entry in test/helpers/expression-allowlist.js is dead -- the `
+      + 'expression it exempted is gone, or has moved to a different line or a different structural context, so '
+      + `delete or re-pin it rather than letting it exempt something else. Recorded reason was: ${entry.why}`,
     );
   }
 

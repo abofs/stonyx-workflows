@@ -780,7 +780,7 @@ describe('AC6b -- the body population the DIAGNOSTICS quantify over is pinned of
     // scan regardless of what this reader believes about it.
     assertReports(
       rawSweepProblems('cascade.yml', W3, EXPRESSION_ALLOWLIST),
-      /No allowlist entry pins that expression to that line/,
+      /No allowlist entry in test\/helpers\/expression-allowlist\.js pins that expression/,
       'the raw scan reads bytes, so a reader that takes payload for a key costs it nothing',
     );
   });
