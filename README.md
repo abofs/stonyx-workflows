@@ -6,9 +6,15 @@ Shared GitHub Actions workflows for Stonyx framework packages.
 
 ## Available Workflows
 
-> **Editing a file in `.github/workflows/`?** Adding a `${{ }}` to one carries
-> three obligations, not zero, and the suite gates on all three. They are
-> stated in full under
+> **Editing a file in `.github/workflows/`?** Adding a `${{ }}` to one is not
+> free. It needs an **allowlist entry** saying why it is safe there, and if it
+> sits in a `run:` or `script:` body it needs a **second entry** in the
+> step-scoped allowlist as well. Nothing else: no count to bump anywhere.
+> Measured on this tree -- a `run:`-body expression in `ci.yml` is 285 pass /
+> 9 fail with no entry, 291 / 3 with the first, 294 / 0 with both; an
+> expression in a `with:`, `env:` or `concurrency:` position needs only the
+> first and is 288 / 6 without it, 294 / 0 with it. Both rules, and the
+> properties of the runner they are shaped around, are stated in full under
 > [The guarantee, and everything that is not one](#the-guarantee-and-everything-that-is-not-one).
 
 ### `ci.yml`
@@ -450,8 +456,14 @@ without anyone noticing, not to defeat an engineer who means it. A load site
 written without the token `import` is not seen; that gap is disclosed under
 *Honest gaps* and committed as a calibration of its own. Rounds 2, 3 and 4 tried
 five layered pins instead, including a `node:module` loader hook; all five were
-walked past at 282 pass / 0 fail and they produced four defects of their own and
-no live sink, so round 5 removed them. Fewer moving parts, each able to fail.
+walked past green at the tree they shipped on, and they produced four defects of
+their own and no live sink, so round 5 removed them. What is left is calibrated
+against the four spellings that defeated its predecessors, and it fails on each
+of them: measured on this tree, a static import of the extractor, an indented
+one, a dynamic `import()` of a relative specifier and one of an absolute
+`file://` URL are each **293 pass / 1 fail**, as is removing every static import
+so the non-vacuity guard has nothing to see. Fewer moving parts, each able to
+fail.
 
 The reason it is shaped that way is worth reading before changing it. The
 earlier sweep was founded on a YAML reader, and #37 found a sequence of shapes
@@ -485,14 +497,21 @@ an exemption for a **line**, not for a destination: swapping
 `token: ${{ secrets.CASCADE_PAT }}` and its context byte-identical and the suite
 green, with the entry's recorded reason now false. Reviewing **whatever consumes
 the value** -- a `uses:`, or the `run:` line that reads the `env:` var the entry
-approves -- is a human obligation here. Measured, and it lands on `#34`'s own
-prescribed remediation: `AUDIT_LEVEL: ${{ inputs.audit-level }}` in a step
-`env:`, both old entries deleted, a correct new entry written, and the body
-reading `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` is **282 pass / 0
-fail**, with the entry's reason -- *"an `env:` value is data the runner sets,
-not source that bash parses"* -- now false about the file it describes. Passing
-a value through `env:` is not on its own sufficient guidance; the line that
-reads `$AUDIT_LEVEL` is part of the same review.
+approves -- is a human obligation here. Measured on this tree, and it lands on
+`#34`'s own prescribed remediation: `AUDIT_LEVEL: ${{ inputs.audit-level }}` in
+a step `env:`, both old entries deleted, a correct new entry written, and the
+body reading `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` is **294 pass
+/ 0 fail** -- the same figure as the safe landing state, which is the point: the
+suite cannot tell them apart. The entry's reason -- *"an `env:` value is data the
+runner sets, not source that bash parses"* -- is then false about the file it
+describes, and nothing reds. **Passing a value through `env:` is not on its own
+sufficient guidance**, and `#34` should hear that before it writes the `env:`
+line: the line that reads `$AUDIT_LEVEL` is part of the same review, and the
+difference between `"$AUDIT_LEVEL"` and `eval "… $AUDIT_LEVEL"` is a human
+judgement this suite does not make. A mechanical floor is available and cheap --
+no `eval` in any `run:` body, green today and non-vacuous the moment one
+appears -- and is deliberately not added here, because it is a rule about shell
+rather than about `${{ }}` and belongs with `#34`.
 
 **The structural context is forgeable by one YAML shape, and that direction is
 fail-open.** The allowlist key carries the chain of keys a line is written
@@ -522,9 +541,18 @@ the pre-existing `with:` entry matches the forged line. No function of
 indentation and colons can tell those lines from real keys, because at the byte
 level they are what a real key looks like; closing it needs a parser, and the
 guarantee does not parse. `test/raw-sweep-test.js` carries this as a committed
-case that asserts the gap, so it cannot close or widen silently. The four
-shapes review measured -- an explicit `? run` key, a multi-line double-quoted
-`run:`, an ordinary `run: |`, and a `script:` body -- all red on the guarantee.
+case that asserts the gap, so it cannot close or widen silently, and the whole
+mutated `ci.yml` above is **294 pass / 0 fail** on this tree -- green, which is
+what fail-open means and why it is written down here.
+
+The four shapes review measured -- an explicit `? run` key, a multi-line
+double-quoted `run:`, an ordinary `run: |`, and a `script:` body -- all red on
+the guarantee itself rather than on a diagnostic. Re-measured on this tree as
+live edits to the real files: the multi-line double-quoted forgery on `ci.yml`
+is 288 / 6, the same shape moving `secrets.CASCADE_PAT` into a shell body in
+`npm-publish.yml` is 290 / 4, and the ordinary `run: |` forgery is 286 / 8. The
+line between them and the payload above is one of indentation, and that is the
+honest width of the fix.
 
 The sweeps in `test/helpers/interpolation-sweep.js` and the reader in
 `test/helpers/workflow-yaml.js` are **diagnostics only**. They say which step
@@ -532,12 +560,16 @@ and which sink an expression sits in, which is what makes a red actionable, and
 they feed the tests that execute real `run:` bodies. If either is wrong, a
 message gets less helpful; nothing goes unswept.
 
-Green still means the guard is armed, not that the workflows are clean. The
-one open sink in this repo is allowlisted with its issue number, on purpose.
+Green still means the guard is armed, not that the workflows are clean. The one
+open `${{ }}` sink in this repo is allowlisted with its issue number, on
+purpose, and it is not the only open issue against these workflows -- **#35**
+and **#36** are untouched by this suite and by this PR.
 
 The rules that bind anyone writing a workflow file here are about the **file**,
-not about the test. The first three are the contract a `${{ }}` costs; the last
-two are the properties of the runner those checks are shaped around:
+not about the test. **The entry**, **the second entry** and **the absent
+count** are what a `${{ }}` costs. **The `#`-comment sink** is the property of
+the runner those checks are shaped around, and **entries, never widened
+patterns** is the rule the checks themselves are built to:
 
 - **Any new `${{ }}` needs an allowlist entry**, in
   `test/helpers/expression-allowlist.js`, pinning
@@ -558,18 +590,30 @@ two are the properties of the runner those checks are shaped around:
   stops bulk paste, not bad reasoning.
 - **And if the expression sits in a `run:` or `script:` body, that is a second
   entry**, in the step-scoped `ALLOWLIST` in
-  `test/helpers/interpolation-sweep.js`, which additionally pins the step. The
-  first entry satisfies the guarantee; this one satisfies the diagnostic that
-  names the step and the sink. Both reds name their own file, so the message
-  tells you which of the two you still owe. Measured on this tree, adding a
-  `run:`-body expression to `ci.yml`: no entry anywhere 275 pass / 7 fail; with
-  the first entry and nothing else 279 / 3; with both 282 / 0.
+  `test/helpers/interpolation-sweep.js`. The first entry satisfies the
+  guarantee; this one satisfies the diagnostic that names the step and the sink.
+  Both reds name their own file, so the message tells you which of the two you
+  still owe. **It is a different shape from the first, in two ways that cost an
+  iteration if you copy rather than read**: its fields are
+  `{ step, line, expression, occurrences, why }` -- **`step`, not `context`**,
+  the step's `name:` exactly as written -- and its `line` is the line **of the
+  body**, with the `run: ` or `script: ` key prefix already removed. Writing
+  `line: 'run: echo "${{ … }}"'` here, which is the value you have just typed
+  into the other file, is *worse* than leaving the entry out -- **290 / 4**
+  against 291 / 3, because the dead-entry check fires as well as the unpinned
+  one. Measured on this tree, adding a
+  `run:`-body expression to `ci.yml`: no entry anywhere **285 pass / 9 fail**;
+  with the first entry and nothing else **291 / 3**; with both **294 / 0**.
 - **The occurrence total is derived, not pinned to a literal.** The three
   independent counts in `test/raw-sweep-test.js` -- the scanner's records, a
   raw `split('${{')`, and the allowlist's own `occurrences` sum -- have to
   agree with each other, and they move with the file. Adding an expression with
-  a correct entry does not require editing a number anywhere -- which is why the
-  measurement above ends at two edits in two files rather than three in three.
+  a correct entry does not require editing a number anywhere, and no test holds
+  a snapshot of which keys the five current files happen to use -- so an
+  ordinary construct written under a key none of them uses costs the entries
+  above and nothing more. Measured: a job-level `if:` on `ci.yml`'s only job is
+  286 pass / 7 fail unallowlisted and **294 / 0 with one entry in one file**,
+  wherever in that file's list the entry is written.
 - **An expression inside a shell `#` comment is a live sink.** The runner
   substitutes `${{ }}` into the run script textually before bash parses it, and
   a `workflow_call` input can contain a newline, so a commented-out command
@@ -584,7 +628,19 @@ two are the properties of the runner those checks are shaped around:
   under a different key, is reported as **dead**, which is how a fixed sink
   loses its exemption. The step-scoped `ALLOWLIST` in
   `test/helpers/interpolation-sweep.js` and `NON_BODY_KEY_LINES` beside it
-  follow the same rule: both are re-derived from the file every run.
+  follow the same rule: both are re-derived from the file every run. **This
+  binds the key's own shape too**, which is the least obvious form of it: the
+  `line` field is the source line minus leading and trailing whitespace and
+  **nothing else**. Normalising it further -- collapsing internal double spaces
+  so that an entry written for `a:  ${{ x }}` also exempts `a: ${{ x }}` -- is a
+  widened pattern wearing a tidy-up's clothes, and it was green at 293 pass /
+  0 fail until `test/raw-sweep-test.js` grew a case for it. The one check that
+  cannot be given a per-line entry would be the exception that proves the rule,
+  so the escape report has one: `ESCAPE_ALLOWLIST` in
+  `test/helpers/expression-allowlist.js` pins a `(line, escape)` pair with a
+  reason, and a dead entry reds, so the remedy for a false positive is never to
+  shrink `CONSTRUCTING_ESCAPES` or the lines it reads. It is empty today, and
+  that is asserted rather than assumed.
 
 ## Dependency Map
 
