@@ -652,9 +652,26 @@ describe('Beyond AC1-AC7 -- same-shape sinks found while sweeping the file (#32)
     // branch name arrived as ONE argument to `git push`.
     assert.equal(run.status, 0, `stderr was:\n${run.stderr}`);
     assert.ok(
-      run.gitArgs.some((args) => args[0] === 'push' && args[2] === 'dev"; touch "$CANARY_DIR/PWNED_BRANCH"; :"'),
+      run.gitArgs.some((args) => args[0] === 'push' && args.at(-1) === 'dev"; touch "$CANARY_DIR/PWNED_BRANCH"; :"'),
       `branch name was split or expanded: ${JSON.stringify(run.gitArgs)}`,
     );
+  });
+
+  // Quoting closes command injection; it does not close argument injection.
+  // Measured against real git 2.50: `git update-ref refs/heads/--force HEAD`
+  // succeeds where `git branch` refuses, and `git push origin '--force' --tags`
+  // then consumes the branch name as a FLAG -- a force-push of tags. Both
+  // invocations must therefore terminate option parsing before the ref.
+  test(`"${COMMIT_BETA_STEP}" passes an option-shaped branch name after --end-of-options`, () => {
+    const run = runStep(COMMIT_BETA_STEP, { env: { BRANCH: '--force', PUBLISHED_VERSION: '0.1.1-beta.128' } });
+
+    assert.equal(run.status, 0, `stderr was:\n${run.stderr}`);
+    for (const args of run.gitArgs.filter((a) => a[0] === 'pull' || a[0] === 'push')) {
+      const terminator = args.indexOf('--end-of-options');
+      assert.notEqual(terminator, -1, `git ${args[0]} must terminate option parsing: ${JSON.stringify(args)}`);
+      assert.equal(args[terminator + 1], '--force', 'the branch name must be the first argument after the terminator');
+      assert.equal(args.length, terminator + 2, 'nothing may follow the branch name and be re-read as a refspec');
+    }
   });
 
   test(`"${COMMIT_BETA_STEP}" still tags and pushes the published version`, () => {
@@ -665,8 +682,8 @@ describe('Beyond AC1-AC7 -- same-shape sinks found while sweeping the file (#32)
       ['add', 'package.json', 'pnpm-lock.yaml'],
       ['commit', '-m', 'chore: release v0.1.1-beta.128 [skip ci]'],
       ['tag', 'v0.1.1-beta.128'],
-      ['pull', '--rebase', '--autostash', 'origin', 'dev'],
-      ['push', 'origin', 'dev', '--tags'],
+      ['pull', '--rebase', '--autostash', 'origin', '--end-of-options', 'dev'],
+      ['push', '--tags', 'origin', '--end-of-options', 'dev'],
     ]);
   });
 });

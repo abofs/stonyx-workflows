@@ -448,8 +448,14 @@ jobs:
           git add package.json pnpm-lock.yaml
           git commit -m "chore: release v$PUBLISHED_VERSION [skip ci]"
           git tag "v$PUBLISHED_VERSION"
-          git pull --rebase --autostash origin "$BRANCH"
-          git push origin "$BRANCH" --tags
+          # `--end-of-options` because quoting alone leaves argv residue: git
+          # permits a ref named `--force` (porcelain refuses it, `update-ref`
+          # does not), and `git push origin "--force" --tags` consumes it as a
+          # FLAG rather than as a refspec. `--tags` moves ahead of the remote
+          # so it is not swallowed as a positional after the terminator; the
+          # ref set pushed is unchanged (abofs/stonyx-workflows#32).
+          git pull --rebase --autostash origin --end-of-options "$BRANCH"
+          git push --tags origin --end-of-options "$BRANCH"
 
       - name: Create GitHub Release (beta)
         if: contains(steps.package-version.outputs.version, 'beta')
