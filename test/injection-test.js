@@ -688,23 +688,31 @@ describe('no workflow in this repo interpolates a consumer string into program t
   const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
   const FILES = readdirSync(WORKFLOW_DIR).filter((name) => name.endsWith('.yml')).sort();
 
-  // Named exceptions only. Each entry says what it is and why it is tolerable;
-  // an entry that stops matching anything reds the suite, so closing #34 has
-  // to DELETE its entry rather than silently satisfy nothing.
+  // Named exceptions only, and each one is pinned to a step and to an exact
+  // occurrence count -- otherwise "this expression is tolerated in this file"
+  // silently tolerates a SECOND copy of it, or the same expression appearing
+  // in a step that has nothing to do with the recorded reason.
   const ALLOWLIST = {
     'npm-publish.yml': [{
+      step: 'Install dependencies',
       expression: "${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}",
+      occurrences: 1,
       why: 'Both arms are fixed literals selected by a boolean. No consumer string can reach the shell through it.',
     }],
     'security-audit.yml': [{
+      step: 'Run security audit',
       expression: '${{ inputs.audit-level }}',
+      occurrences: 1,
       why: 'KNOWN OPEN SINK, tracked as abofs/stonyx-workflows#34. A workflow_call input interpolated into a shell '
         + 'run: body -- the same defect class this suite closes, in a third file outside #32 two-file scope. '
         + 'Reported and tracked, not fixed here. When #34 lands, delete this entry.',
     }],
   };
 
-  const allowedIn = (file) => (ALLOWLIST[file] ?? []).map((entry) => entry.expression);
+  const exemption = (file, step, expression) => (ALLOWLIST[file] ?? [])
+    .find((entry) => entry.step === step && entry.expression === expression);
+
+  const countIn = (body, expression) => body.split(expression).length - 1;
 
   // Guards the sweep itself: if the directory read ever returned nothing, or a
   // file were renamed out from under it, every per-file case below would pass
@@ -726,10 +734,17 @@ describe('no workflow in this repo interpolates a consumer string into program t
           // do carry program text.
           continue;
         }
-        for (const expression of body.match(/\$\{\{[^}]*\}\}/g) ?? []) {
+        for (const expression of new Set(body.match(/\$\{\{[^}]*\}\}/g) ?? [])) {
+          const entry = exemption(file, step.name, expression);
           assert.ok(
-            allowedIn(file).includes(expression),
+            entry,
             `${file} step ${JSON.stringify(step.name)} interpolates ${expression} into shell source`,
+          );
+          assert.equal(
+            countIn(body, expression),
+            entry.occurrences,
+            `${file} step ${JSON.stringify(step.name)} interpolates ${expression} `
+            + `${countIn(body, expression)} time(s); the allowlist exempts ${entry.occurrences}`,
           );
         }
       }
@@ -756,10 +771,13 @@ describe('no workflow in this repo interpolates a consumer string into program t
   test('no allowlist entry is dead -- a fixed sink must lose its exemption', () => {
     for (const [file, entries] of Object.entries(ALLOWLIST)) {
       const text = readWorkflow(file);
-      for (const { expression, why } of entries) {
-        assert.ok(
-          text.includes(expression),
-          `${file} no longer contains ${expression}; delete its allowlist entry. Recorded reason was: ${why}`,
+      for (const { step, expression, occurrences, why } of entries) {
+        const body = stepRunBody(text, step);
+        assert.equal(
+          countIn(body, expression),
+          occurrences,
+          `${file} step ${JSON.stringify(step)} no longer interpolates ${expression} ${occurrences} time(s); `
+          + `delete or correct its allowlist entry. Recorded reason was: ${why}`,
         );
       }
     }
