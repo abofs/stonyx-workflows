@@ -677,6 +677,95 @@ describe('AC5 -- S5: cascade.yml refuses hostile input before it dispatches (#32
   });
 });
 
+// The anti-drift sweep, and the only mechanism enforcing this suite's
+// one-sentence rule. It used to iterate `npm-publish.yml` alone -- one of the
+// five workflow files in the repo -- so adding a `${{ inputs.package-name }}`
+// shell sink to `cascade.yml`, or a second `${{ inputs.audit-level }}` sink to
+// `security-audit.yml`, left the suite fully green. The rule is about this
+// repo's workflows, not about one file of them, and a file added later must
+// inherit it without anyone remembering to opt in.
+describe('no workflow in this repo interpolates a consumer string into program text (#32)', () => {
+  const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
+  const FILES = readdirSync(WORKFLOW_DIR).filter((name) => name.endsWith('.yml')).sort();
+
+  // Named exceptions only. Each entry says what it is and why it is tolerable;
+  // an entry that stops matching anything reds the suite, so closing #34 has
+  // to DELETE its entry rather than silently satisfy nothing.
+  const ALLOWLIST = {
+    'npm-publish.yml': [{
+      expression: "${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}",
+      why: 'Both arms are fixed literals selected by a boolean. No consumer string can reach the shell through it.',
+    }],
+    'security-audit.yml': [{
+      expression: '${{ inputs.audit-level }}',
+      why: 'KNOWN OPEN SINK, tracked as abofs/stonyx-workflows#34. A workflow_call input interpolated into a shell '
+        + 'run: body -- the same defect class this suite closes, in a third file outside #32 two-file scope. '
+        + 'Reported and tracked, not fixed here. When #34 lands, delete this entry.',
+    }],
+  };
+
+  const allowedIn = (file) => (ALLOWLIST[file] ?? []).map((entry) => entry.expression);
+
+  // Guards the sweep itself: if the directory read ever returned nothing, or a
+  // file were renamed out from under it, every per-file case below would pass
+  // by iterating an empty list.
+  test('every workflow file in the repo is swept', () => {
+    assert.deepEqual(FILES, ['cascade.yml', 'ci.yml', 'npm-publish.yml', 'security-audit.yml', 'self-ci.yml']);
+  });
+
+  for (const file of FILES) {
+    test(`no run: body in ${file} interpolates anything but its allowlisted expressions`, () => {
+      const text = readWorkflow(file);
+      for (const step of parseSteps(text)) {
+        let body;
+        try {
+          body = stepRunBody(text, step.name);
+        } catch {
+          // A `uses:` step. Its `with:` values are action inputs rather than
+          // shell or JS source; the `script:` sweep below covers the ones that
+          // do carry program text.
+          continue;
+        }
+        for (const expression of body.match(/\$\{\{[^}]*\}\}/g) ?? []) {
+          assert.ok(
+            allowedIn(file).includes(expression),
+            `${file} step ${JSON.stringify(step.name)} interpolates ${expression} into shell source`,
+          );
+        }
+      }
+    });
+
+    test(`no github-script body in ${file} interpolates anything at all`, () => {
+      const text = readWorkflow(file);
+      for (const step of parseSteps(text)) {
+        let script;
+        try {
+          script = stepScriptBody(text, step.name);
+        } catch {
+          continue; // no `script:` block on this step
+        }
+        assert.equal(
+          script.match(/\$\{\{[^}]*\}\}/g),
+          null,
+          `${file} step ${JSON.stringify(step.name)} interpolates an expression into JS source`,
+        );
+      }
+    });
+  }
+
+  test('no allowlist entry is dead -- a fixed sink must lose its exemption', () => {
+    for (const [file, entries] of Object.entries(ALLOWLIST)) {
+      const text = readWorkflow(file);
+      for (const { expression, why } of entries) {
+        assert.ok(
+          text.includes(expression),
+          `${file} no longer contains ${expression}; delete its allowlist entry. Recorded reason was: ${why}`,
+        );
+      }
+    }
+  });
+});
+
 // The grammar is a security contract for eleven repos and it is stated eight
 // times as eight string literals -- five copies of the npm name regex, three of
 // the semver regex -- because the steps that need it run before any checkout of
@@ -833,29 +922,6 @@ describe('AC7 -- S6: custom-version shell interpolation (#32)', () => {
 describe('Beyond AC1-AC7 -- same-shape sinks found while sweeping the file (#32)', () => {
   const TYPE_STEP = 'Determine version bump type';
   const COMMIT_BETA_STEP = 'Commit version bump and create tag (beta)';
-
-  // The one expression left in any `run:` body. It resolves to one of two
-  // fixed literals, so no consumer string can reach the shell through it --
-  // which is exactly why it is safe to allowlist and unsafe to allowlist
-  // loosely. Anything else appearing in a run body reds this.
-  const ALLOWED = ["${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}"];
-
-  test('no run: body in npm-publish.yml interpolates anything but the fixed-literal choice', () => {
-    for (const step of parseSteps(npmPublish)) {
-      let body;
-      try {
-        body = stepRunBody(npmPublish, step.name);
-      } catch {
-        continue; // a `uses:` step -- covered by AC5 instead
-      }
-      for (const expression of body.match(/\$\{\{[^}]*\}\}/g) ?? []) {
-        assert.ok(
-          ALLOWED.includes(expression),
-          `step ${JSON.stringify(step.name)} interpolates ${expression} into shell source`,
-        );
-      }
-    }
-  });
 
   test(`"${TYPE_STEP}" does not execute a payload in cascade-source`, () => {
     const run = runStep(TYPE_STEP, { env: { CASCADE_SOURCE: '@stonyx/x"; touch "$CANARY_DIR/PWNED_TYPE"; :"' } });
