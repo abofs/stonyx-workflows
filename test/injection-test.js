@@ -7,13 +7,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Script } from 'node:vm';
 
-import { parseSteps, readWorkflow, runBodyOf, stepEnv, stepRunBody, stepScriptBody } from './helpers/workflow-yaml.js';
+import {
+  MissingStepKeyError,
+  envOf,
+  parseSteps,
+  readWorkflow,
+  runBodyOf,
+  stepEnv,
+  stepNamed,
+  stepRunBody,
+  stepScriptBody,
+} from './helpers/workflow-yaml.js';
 import {
   ALLOWLIST,
   deadAllowlistProblems,
   duplicateNameProblems,
   runSweepProblems,
   scriptSweepProblems,
+  stepPopulationProblems,
 } from './helpers/interpolation-sweep.js';
 
 // Consumer-controlled-string injection sinks in the reusable workflows, for
@@ -527,7 +538,11 @@ describe('AC5 -- S3/S5: no expression reaches either github-script body (#32)', 
   // not the repo-bound OIDC identity. Pin the token wiring so a future edit
   // cannot quietly move the script off that credential -- or onto a wider one.
   test('cascade.yml dispatch still runs under CASCADE_PAT', () => {
-    const step = parseSteps(cascade).find((s) => s.name === DISPATCH_STEP);
+    // `stepNamed`, not `.find()`: this is the assertion guarding the org-level
+    // PAT, and a second step reusing this name would have resolved it to
+    // position 0 and passed while the duplicate carried a wider credential
+    // (measured; abofs/stonyx-workflows#37, bypass 1).
+    const step = stepNamed(cascade, DISPATCH_STEP);
     assert.match(step.body, /github-token: \$\{\{ secrets\.CASCADE_PAT \}\}/);
   });
 });
@@ -731,6 +746,16 @@ describe('no workflow in this repo interpolates a consumer string into program t
   // same functions called here (abofs/stonyx-workflows#37). A check whose only
   // value is that it can go red has to be shown going red.
   for (const file of FILES) {
+    // Guards the per-file population the three cases below quantify over. Each
+    // of them passes trivially over a step the reader never saw, so the counts
+    // are taken off the RAW FILE TEXT by code that shares nothing with the
+    // reader. An unnamed step -- the commonest step form in GitHub Actions --
+    // used to be invisible to both sweeps at 185 pass / 0 fail
+    // (abofs/stonyx-workflows#37, bypass 6a).
+    test(`every step and every run:/script: body in ${file} is inside the sweep`, () => {
+      assert.deepEqual(stepPopulationProblems(file, readWorkflow(file)), []);
+    });
+
     test(`no run: body in ${file} interpolates anything but its allowlisted expressions`, () => {
       assert.deepEqual(runSweepProblems(file, readWorkflow(file)), []);
     });
@@ -903,8 +928,13 @@ describe('every `node -e` program stays a single-quoted shell string (#32, S1a)'
         // Positional, never re-resolved by name: a duplicated step name used to
         // hand this the FIRST step's body twice (abofs/stonyx-workflows#37).
         body = runBodyOf(step);
-      } catch {
-        continue; // a `uses:` step carries no shell source
+      } catch (err) {
+        // Only "this step has no run:" is a skip. A body the extractor cannot
+        // READ must not vanish from the sweep -- that is the bare
+        // `catch { continue; }` this suite exists to catch, and it was still
+        // here (Phase 1 N2, Phase 4).
+        if (err.code === MissingStepKeyError.CODE) continue;
+        throw err;
       }
       for (const program of nodeEvalPrograms(body)) found.push({ step: step.name, ...program });
     }
@@ -1210,12 +1240,20 @@ describe('Beyond AC1-AC7 -- same-shape sinks found while sweeping the file (#32)
     });
   });
 
-  test('stepEnv reads every step in both workflows without throwing', () => {
+  // `envOf(step)`, not `stepEnv(text, step.name)`. This loop iterates
+  // positionally and then re-resolved BY NAME -- the exact aliasing
+  // `workflow-yaml.js` now documents as the cause of bypass 1, in the one call
+  // site that claims to read every step. Measured: with a duplicated name it
+  // read position 0's env twice, so the test's own title was false; and once
+  // the name-taking helpers began to throw, it red with a helper-ambiguity
+  // message from a test about `env:` comment handling
+  // (abofs/stonyx-workflows#37, Phase 1 W1).
+  test('envOf reads every step in both workflows without throwing', () => {
     for (const [workflow, text] of Object.entries(WORKFLOWS)) {
       for (const step of parseSteps(text)) {
         assert.doesNotThrow(
-          () => stepEnv(text, step.name),
-          `stepEnv threw on ${workflow} step ${JSON.stringify(step.name)}`,
+          () => envOf(step),
+          `envOf threw on ${workflow} step ${JSON.stringify(step.name)}`,
         );
       }
     }

@@ -12,26 +12,48 @@
 // `test/sweep-bypass-test.js` asserts it is non-empty for each of the five
 // mutations that used to pass. The same code produces both.
 //
-// The unifying principle, stated once: every one of the five bypasses was the
+// The unifying principle, stated once: every one of the bypasses was the
 // extractor disagreeing with the file and nothing noticing. PR #33's correction
 // C4 solved that for `node -e` by pinning the population from OUTSIDE the
-// extractor. This generalises it -- for every run/script body, the count of
-// `${{` openers in the raw text must equal the number of expressions the
-// matcher resolved -- so an evasion shape nobody anticipated reds on the COUNT
-// even when it defeats the matcher.
+// extractor, off the raw file text. This generalises it, and it has to be
+// applied at EVERY level the extractor can disagree at, because a pin is blind
+// to the level above the one it counts:
+//
+//   1. steps within a file    -- `stepPopulationProblems`, raw `- ` list items
+//   2. run/script bodies      -- `stepPopulationProblems`, raw `run:`/`script:`
+//                                key lines
+//   3. expressions in a body  -- `runSweepProblems`/`scriptSweepProblems`, raw
+//                                `${{` openers
+//
+// Level 3 alone was the first attempt at this repair, and it was not enough:
+// it counts openers off the body THE EXTRACTOR RETURNED, so an extractor that
+// never returns a body agrees with its own omission and the pin stays silent.
+// An unnamed step (`- run: echo "${{ inputs.package-name }}"`) was measured
+// green at 185 pass / 0 fail against the real `cascade.yml` on exactly that
+// gap, while the identical step carrying `node -e` RED -- because that sweep's
+// population is counted off the raw file. Same file, same step, opposite
+// results, one level of difference (abofs/stonyx-workflows#37, bypass 6).
 
 import {
+  MissingStepKeyError,
   duplicateStepNames,
   expressionOpenerCount,
   expressionsByLine,
   expressionsIn,
   parseSteps,
   runBodyOf,
+  scalarKeyLineCount,
   scriptBodyOf,
+  stepListItemCount,
 } from './workflow-yaml.js';
 
 // Named exceptions only. Each entry pins a step, the EXACT SOURCE LINE it
 // exempts, the expression, and an occurrence count.
+//
+// The count is pinned so that "this expression is tolerated in this file" does
+// not silently tolerate a SECOND copy of it on the same line, or the same
+// expression appearing in a step that has nothing to do with the recorded
+// reason.
 //
 // The line is the part that is new, and it is what closes bypass 4 and NEW-5.
 // Pinning `{step, expression, occurrences}` alone tolerated the expression
@@ -66,7 +88,9 @@ export const ALLOWLIST = {
   }],
 };
 
-const label = (file, step) => `${file} step ${JSON.stringify(step.name)} (position ${step.index})`;
+const label = (file, step) => (
+  `${file} step ${step.name === null ? '(unnamed)' : JSON.stringify(step.name)} (position ${step.index})`
+);
 
 /**
  * Read a step's `run:`/`script:` body, distinguishing "this step has none" from
@@ -77,15 +101,65 @@ const label = (file, step) => `${file} step ${JSON.stringify(step.name)} (positi
  * unclosed block now raises -- silently removed that step from the sweep. A
  * guard that discards its own failure signal is the defect this suite exists
  * to catch, so only the missing-key case is a skip.
+ *
+ * The discrimination is on a TYPED error, not on `err.message.includes(...)`.
+ * Deciding skip-vs-report by substring-matching another module's prose is the
+ * same defect one layer in: rewording `stepScalar`'s message would have turned
+ * every unreadable body back into a silent skip, and the kill mutation that
+ * guards this branch deletes the branch rather than changing the string it
+ * depended on, so nothing would have caught it (abofs/stonyx-workflows#37).
  */
 function readBody(step, key, read, problems, file) {
   try {
     return read(step);
   } catch (err) {
-    if (err.message.includes(`has no ${key}: key`)) return null;
+    if (err.code === MissingStepKeyError.CODE && err.key === key) return null;
     problems.push(`${label(file, step)}: the extractor could not read its ${key}: body -- ${err.message}`);
     return null;
   }
+}
+
+/**
+ * Problems with the POPULATION the sweep is about to inspect, counted off the
+ * raw file text by code that shares nothing with the extractor.
+ *
+ * Every assertion the sweeps make is universally quantified over what the
+ * extractor returned, so all of them pass trivially against a population of
+ * zero. These two pins are what make "the sweep is green" mean "the sweep
+ * looked at everything that is there" -- see the module header for why the
+ * per-body `${{` pin cannot do that job.
+ */
+export function stepPopulationProblems(file, text) {
+  const problems = [];
+  const steps = parseSteps(text);
+
+  const items = stepListItemCount(text);
+  if (items !== steps.length) {
+    problems.push(
+      `${file} has ${items} step list item(s) in its steps: block(s) but the reader resolved ${steps.length} `
+      + 'step(s). A step the reader cannot see is not swept at all, so every per-step check below passes over '
+      + 'it silently -- extend parseSteps rather than deleting this case.',
+    );
+  }
+
+  for (const [key, read] of [['run', runBodyOf], ['script', scriptBodyOf]]) {
+    const keyLines = scalarKeyLineCount(text, key);
+    // Counts successful reads only, on purpose: an unreadable body is a
+    // population gap here AND is reported by name in the sweeps below.
+    const bodies = steps.filter((step) => {
+      try { read(step); return true; } catch { return false; }
+    }).length;
+
+    if (keyLines !== bodies) {
+      problems.push(
+        `${file} holds ${keyLines} \`${key}:\` key line(s) in its raw text but the sweep read ${bodies} `
+        + `${key}: body(ies). A ${key}: body outside the sweep is program text nobody is checking -- extend the `
+        + 'reader, or move the snippet that is not really a key, rather than deleting this case.',
+      );
+    }
+  }
+
+  return problems;
 }
 
 /** Problems with `${{ }}` expressions in the `run:` bodies of one workflow. */
@@ -139,7 +213,14 @@ export function runSweepProblems(file, text, allowlist = ALLOWLIST) {
   return problems;
 }
 
-/** Problems with `${{ }}` expressions in the `github-script` bodies of one workflow. */
+/**
+ * Problems with `${{ }}` expressions in the `github-script` bodies of one
+ * workflow.
+ *
+ * No `allowlist` parameter, unlike its two siblings: JS source exempts nothing,
+ * by design. This step class holds the org-level `CASCADE_PAT`, so there is no
+ * expression here worth an exception.
+ */
 export function scriptSweepProblems(file, text) {
   const problems = [];
 
@@ -167,11 +248,16 @@ export function scriptSweepProblems(file, text) {
  * re-resolve bodies by name. They no longer do -- but a duplicated name still
  * makes every name-keyed assertion in this suite ambiguous, and it is the shape
  * an evasion takes, so it is reported in its own right.
+ *
+ * Scoped per job, because two jobs sharing a step name is legal and idiomatic
+ * and the reader -- not GitHub Actions -- is what a flat check would have been
+ * constraining.
  */
 export function duplicateNameProblems(file, text) {
-  return duplicateStepNames(text).map(({ name, count }) => (
-    `${file} has ${count} steps named ${JSON.stringify(name)}. A step name is not unique in GitHub Actions, `
-    + 'so a duplicate is how a step hides from a name-keyed check.'
+  return duplicateStepNames(text).map(({ job, name, count }) => (
+    `${file} job ${JSON.stringify(job)} has ${count} steps named ${JSON.stringify(name)}. A step name is not `
+    + 'unique in GitHub Actions, so a duplicate is how a step hides from a name-keyed check. The ~18 name-taking '
+    + 'reads in this suite need it to be unique within its job; rename the step.'
   ));
 }
 
@@ -186,10 +272,11 @@ export function duplicateNameProblems(file, text) {
  */
 export function deadAllowlistProblems(file, text, allowlist = ALLOWLIST) {
   const problems = [];
+  const allSteps = parseSteps(text);
 
   for (const entry of allowlist[file] ?? []) {
     const { step: stepName, line, expression, occurrences, why } = entry;
-    const steps = parseSteps(text).filter((s) => s.name === stepName);
+    const steps = allSteps.filter((s) => s.name === stepName);
 
     if (steps.length === 0) {
       problems.push(
@@ -235,6 +322,7 @@ export function deadAllowlistProblems(file, text, allowlist = ALLOWLIST) {
 /** Every problem the sweep can report for one workflow file. */
 export function sweepProblems(file, text, allowlist = ALLOWLIST) {
   return [
+    ...stepPopulationProblems(file, text),
     ...duplicateNameProblems(file, text),
     ...runSweepProblems(file, text, allowlist),
     ...scriptSweepProblems(file, text),

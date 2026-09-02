@@ -24,31 +24,142 @@ export function readWorkflow(name) {
 const indentOf = (line) => line.match(/^(\s*)/)[1].length;
 
 /**
- * Split a workflow's `steps:` list into `{ name, body }` entries. `body` is the
- * raw text of every line belonging to that step.
+ * The job a `steps:` list belongs to: the nearest enclosing mapping key.
+ *
+ * Used only to scope step-name uniqueness. Two different jobs may each have a
+ * step called `Checkout repository` -- that is idiomatic GitHub Actions, and
+ * keying uniqueness on the name alone would red the suite on a workflow nobody
+ * wrote wrong (abofs/stonyx-workflows#37, Phase 1 W2).
+ */
+function jobFor(lines, stepsIdx) {
+  const stepsIndent = indentOf(lines[stepsIdx]);
+  for (let i = stepsIdx - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line.trim() === '' || line.trim().startsWith('#')) continue;
+    if (indentOf(line) >= stepsIndent) continue;
+    return line.match(/^\s*([A-Za-z_][\w.-]*):\s*$/)?.[1] ?? null;
+  }
+  return null;
+}
+
+/**
+ * Split every `steps:` list in a workflow into `{ job, name, index, body }`
+ * entries. `body` is the raw text of every line belonging to that step, with
+ * the list item's own first key re-indented to the step's key depth so that
+ * `- run: echo hi` and `- name: X` + `run: echo hi` read identically.
+ *
+ * EVERY list item is a step. `name:` is OPTIONAL on a GitHub Actions step, and
+ * omitting it on a `uses:` step is the commonest step form there is -- but this
+ * reader used to recognise a step only at `^(\s*)- name: (.*)$` and append every
+ * other list item's lines to the PREVIOUS step's body, where `stepScalar` took
+ * the first `run:`/`script:` and never read the smuggled one. An unnamed step
+ * carrying a `workflow_call` input into shell source, or into the
+ * `actions/github-script` body that holds the org-level `CASCADE_PAT`, was
+ * therefore invisible to both sweeps with the suite green at 185 pass / 0 fail
+ * (abofs/stonyx-workflows#37, bypass 6a / M6a).
+ *
+ * A `name:` this cannot find is `null`, never a guess. Sweeps are positional so
+ * a null name costs them nothing; only the name-taking helpers care, and they
+ * already refuse to answer ambiguously.
+ *
+ * List items in shapes this reader does not understand -- flow mappings
+ * (`- {name: X, run: '...'}`), aliases (`- *base`) and merge keys
+ * (`- <<: *base`) -- THROW rather than being skipped. Skipping one would put a
+ * real step outside every sweep, which is the whole defect above.
  */
 export function parseSteps(text) {
   const lines = text.split('\n');
-  const stepsIdx = lines.findIndex((l) => /^\s*steps:\s*$/.test(l));
-  if (stepsIdx === -1) throw new Error('workflow has no steps: block');
+  const stepsIdxs = lines.map((l, i) => (/^\s*steps:\s*$/.test(l) ? i : -1)).filter((i) => i !== -1);
+  if (stepsIdxs.length === 0) throw new Error('workflow has no steps: block');
 
   const steps = [];
-  let listIndent = null;
-  let current = null;
 
-  for (let i = stepsIdx + 1; i < lines.length; i++) {
-    const match = lines[i].match(/^(\s*)- name: (.*)$/);
-    if (match && (listIndent === null || match[1].length === listIndent)) {
-      listIndent = match[1].length;
-      current = { name: match[2].trim(), lines: [] };
-      steps.push(current);
-      continue;
+  for (const stepsIdx of stepsIdxs) {
+    const stepsIndent = indentOf(lines[stepsIdx]);
+    const job = jobFor(lines, stepsIdx);
+    let listIndent = null;
+    let current = null;
+
+    for (let i = stepsIdx + 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim() !== '' && indentOf(line) <= stepsIndent) break;
+
+      const item = line.trim() === '' ? null : line.match(/^(\s*)-(\s+\S.*|\s*)$/);
+      if (item && (listIndent === null || item[1].length === listIndent)) {
+        listIndent = item[1].length;
+        const content = item[2].trim();
+        if (content !== '' && !/^(['"]?)[A-Za-z_][\w.-]*\1\s*:(\s|$)/.test(content)) {
+          throw new Error(
+            `unrecognised step list item in the steps: block at line ${i + 1}: ${JSON.stringify(line.trim())}. `
+            + 'This reader understands block-mapping steps only, so a flow mapping, an alias or a merge key '
+            + 'cannot be resolved -- and skipping it would put a real step outside every sweep. Extend the '
+            + 'reader instead of deleting the case that failed.',
+          );
+        }
+        current = { job, lines: content === '' ? [] : [`${' '.repeat(listIndent + 2)}${content}`] };
+        steps.push(current);
+        continue;
+      }
+      if (current) current.lines.push(line);
     }
-    if (current) current.lines.push(lines[i]);
   }
 
-  if (steps.length === 0) throw new Error('workflow steps: block contained no named steps');
-  return steps.map(({ name, lines: body }, index) => ({ name, index, body: body.join('\n') }));
+  if (steps.length === 0) throw new Error('workflow steps: block contained no steps');
+
+  return steps.map(({ job, lines: body }, index) => {
+    const text = body.join('\n');
+    const keyIndent = Math.min(...body.filter((l) => l.trim() !== '').map(indentOf));
+    const name = body
+      .find((l) => indentOf(l) === keyIndent && /^\s*name:(\s|$)/.test(l))
+      ?.replace(/^\s*name:\s*/, '')
+      .trim() ?? null;
+    return { job, name, index, body: text };
+  });
+}
+
+/**
+ * How many `- ` list items the `steps:` blocks of `text` contain, counted
+ * straight off the raw text.
+ *
+ * The AUTHORITATIVE population for `parseSteps`, and it deliberately shares no
+ * code with it. This is the pin PR #33's correction C4 gave the `node -e` sweep
+ * -- `candidateNodeEvalInvocations` counts candidates off the raw file so an
+ * extractor that under-counts cannot agree with its own omission -- applied at
+ * the level that actually failed: STEPS WITHIN A FILE. The `${{ }}` accounting
+ * pin counts openers off the body the extractor returned, so it is silent when
+ * the extractor never returns the body at all (abofs/stonyx-workflows#37,
+ * bypass 6a).
+ */
+export function stepListItemCount(text) {
+  const lines = text.split('\n');
+  let count = 0;
+  let stepsIndent = null;
+  let listIndent = null;
+
+  for (const line of lines) {
+    if (line.trim() === '') continue;
+    const indent = indentOf(line);
+    if (stepsIndent !== null && indent <= stepsIndent) { stepsIndent = null; listIndent = null; }
+    if (/^\s*steps:\s*$/.test(line)) { stepsIndent = indent; listIndent = null; continue; }
+    if (stepsIndent === null || !/^\s*-(\s|$)/.test(line)) continue;
+    if (listIndent === null) listIndent = indent;
+    if (indent === listIndent) count += 1;
+  }
+
+  return count;
+}
+
+/**
+ * How many lines of `text` open a scalar `key:` mapping entry, counted straight
+ * off the raw text -- the same authoritative-population trick one level down.
+ *
+ * Deliberately admits the `- run:` list-item form and a quoted key, because
+ * both are shapes the extractor missed. Over-broad on purpose: it counts a
+ * `run:` line inside a block scalar too, so a workflow that embeds a YAML
+ * snippet reds here rather than silently teaching the pin to look away.
+ */
+export function scalarKeyLineCount(text, key) {
+  return (text.match(new RegExp(`^[ \\t]*(?:-[ \\t]+)?['"]?${key}['"]?[ \\t]*:`, 'gm')) ?? []).length;
 }
 
 /**
@@ -93,12 +204,26 @@ export function stepNamed(text, stepName) {
 }
 
 /**
- * Step names that appear more than once in a workflow, with their count.
+ * Step names that appear more than once WITHIN ONE JOB, with their count.
+ *
+ * Scoped per job on purpose. GitHub Actions permits two jobs to each have a
+ * step called `Checkout repository` -- the single most idiomatic step name
+ * there is -- and keying uniqueness on the bare name would red the suite on a
+ * workflow nobody wrote wrong the day `npm-publish.yml` grows a second job
+ * (abofs/stonyx-workflows#37, Phase 1 W2).
+ *
+ * Unnamed steps are not counted: `name:` is optional, several steps may omit
+ * it, and an absent name hides nothing from a name-keyed check -- it is the
+ * step POPULATION pin that covers those (`stepListItemCount`).
  */
 export function duplicateStepNames(text) {
   const seen = new Map();
-  for (const step of parseSteps(text)) seen.set(step.name, (seen.get(step.name) ?? 0) + 1);
-  return [...seen].filter(([, n]) => n > 1).map(([name, count]) => ({ name, count }));
+  for (const step of parseSteps(text)) {
+    if (step.name === null) continue;
+    const key = JSON.stringify([step.job, step.name]);
+    seen.set(key, { job: step.job, name: step.name, count: (seen.get(key)?.count ?? 0) + 1 });
+  }
+  return [...seen.values()].filter(({ count }) => count > 1);
 }
 
 // A YAML block-scalar header: the style indicator, then an optional chomping
@@ -109,7 +234,68 @@ export function duplicateStepNames(text) {
 // inline branch and the helper returned the literal string `">"` as the entire
 // body -- every folded line, including any `${{ }}` in it, fell outside the
 // sweep with the suite green (abofs/stonyx-workflows#37, bypass 2 / M2).
-const BLOCK_SCALAR_HEADER = /^[|>](?:[-+][0-9]*|[0-9]+[-+]?)?$/;
+// The indentation indicator is a single digit `1`-`9`; `|0` and `|-23` are not
+// valid YAML, and this regex is the one thing standing between the sweep and a
+// repeat of bypass 2, so it says exactly what it means.
+const BLOCK_SCALAR_HEADER = /^[|>](?:[-+][1-9]?|[1-9][-+]?)?$/;
+
+/**
+ * The indices of the lines in `lines` that are STRUCTURAL -- YAML the reader is
+ * looking at, rather than text inside a block scalar's payload.
+ *
+ * `stepScalar` used to take the first line matching `^\s*<key>:(\s|$)` at ANY
+ * indentation, so a `run:` line sitting inside an EARLIER block scalar in the
+ * same step was returned as that step's run body and the real one was never
+ * read. Measured green at 185 pass / 0 fail on the real `cascade.yml` with a
+ * step-level `env:` value holding a YAML snippet -- a workflows repo writing a
+ * consumer snippet into `$GITHUB_STEP_SUMMARY` is the natural instance, and
+ * this repo's own README ships `run: pnpm test` snippets
+ * (abofs/stonyx-workflows#37, bypass 6b / M6b).
+ *
+ * Scoping the search this way closes the `script:` twin of the same shape (an
+ * `env:` snippet ahead of a `with: script:` block) and the heredoc case Phase 1
+ * raised as N10, which an indentation anchor on `run:` alone would leave open.
+ */
+function structuralLineIdxs(lines) {
+  const idxs = [];
+  let scalarIndent = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === '') continue;
+    const indent = indentOf(line);
+    if (scalarIndent !== null) {
+      if (indent > scalarIndent) continue;
+      scalarIndent = null;
+    }
+    idxs.push(i);
+    const value = line.match(/^\s*(?:['"]?[A-Za-z_][\w.-]*['"]?)\s*:\s*(.*?)\s*$/)?.[1];
+    if (value !== undefined && BLOCK_SCALAR_HEADER.test(value)) scalarIndent = indent;
+  }
+
+  return idxs;
+}
+
+/**
+ * A step that carries no `key:` at all, as distinct from one whose `key:` the
+ * extractor could not read.
+ *
+ * A typed error because that distinction is the entire job of
+ * `interpolation-sweep.js`'s `readBody`, and it used to make it by
+ * substring-matching this module's prose (`err.message.includes(...)`). A
+ * reworded message would have turned every unreadable body back into a silent
+ * skip -- the bare `catch { continue; }` that `readBody` exists to forbid,
+ * restored by a typo (abofs/stonyx-workflows#37, bypass 6c).
+ */
+export class MissingStepKeyError extends Error {
+  constructor(step, key) {
+    super(`step ${JSON.stringify(step.name)} has no ${key}: key`);
+    this.name = 'MissingStepKeyError';
+    this.code = MissingStepKeyError.CODE;
+    this.key = key;
+  }
+}
+MissingStepKeyError.CODE = 'MISSING_STEP_KEY';
 
 /** The lines belonging to a block scalar opened on `lines[headerIdx]`. */
 function blockScalarBody(lines, headerIdx, describe) {
@@ -133,13 +319,20 @@ function blockScalarBody(lines, headerIdx, describe) {
  * the one `run: >` broke. YAML tags (`!!str`), anchors (`&x`) and aliases
  * (`*x`) all change what the value is, so none of them may be handed back
  * verbatim.
+ *
+ * The key may be quoted: `"run": |` is valid YAML that GitHub Actions runs, and
+ * an unquoted-only probe made `stepScalar` report "this step has no run:" for a
+ * step that had one -- read as "nothing to sweep here" and green at 185/0
+ * (abofs/stonyx-workflows#37, bypass 6c).
  */
+const KEY_PROBE = (key) => new RegExp(`^\\s*(['"]?)${key}\\1\\s*:(\\s|$)`);
+
 function stepScalar(step, key) {
   const lines = step.body.split('\n');
-  const idx = lines.findIndex((l) => new RegExp(`^\\s*${key}:(\\s|$)`).test(l));
-  if (idx === -1) throw new Error(`step ${JSON.stringify(step.name)} has no ${key}: key`);
+  const idx = structuralLineIdxs(lines).find((i) => KEY_PROBE(key).test(lines[i])) ?? -1;
+  if (idx === -1) throw new MissingStepKeyError(step, key);
 
-  const value = lines[idx].replace(new RegExp(`^\\s*${key}:\\s*`), '').replace(/\s+$/, '');
+  const value = lines[idx].replace(new RegExp(`^\\s*(['"]?)${key}\\1\\s*:\\s*`), '').replace(/\s+$/, '');
   const where = `step ${JSON.stringify(step.name)} ${key}: block`;
 
   if (value === '' || BLOCK_SCALAR_HEADER.test(value)) return blockScalarBody(lines, idx, where);
@@ -232,7 +425,9 @@ export function stepEnv(text, stepName) {
 export function envOf(step) {
   const stepName = step.name;
   const lines = step.body.split('\n');
-  const envIdx = lines.findIndex((l) => /^\s*env:\s*$/.test(l));
+  // Structural, for the same reason `stepScalar` is: an `env:` line inside an
+  // earlier block scalar is payload text, not this step's env mapping.
+  const envIdx = structuralLineIdxs(lines).find((i) => /^\s*env:\s*$/.test(lines[i])) ?? -1;
   if (envIdx === -1) return {};
 
   const envIndent = indentOf(lines[envIdx]);
