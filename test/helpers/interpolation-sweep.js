@@ -128,6 +128,15 @@ function readBody(step, key, read, problems, file) {
  * zero. These two pins are what make "the sweep is green" mean "the sweep
  * looked at everything that is there" -- see the module header for why the
  * per-body `${{` pin cannot do that job.
+ *
+ * The step-item half is a REGRESSION backstop and is unreachable by any single
+ * committed mutation today, deliberately: `parseSteps` now throws on a list
+ * item it cannot resolve rather than skipping one, so there is no text where it
+ * silently under-counts. It becomes reachable the moment that changes, which is
+ * the thing being guarded. Measured: narrow `parseSteps` back to `- name:` AND
+ * append an unnamed step to `cascade.yml`, and this is the branch that fires
+ * (`every step and every run:/script: body in cascade.yml is inside the sweep`
+ * reds). The key-line half reds today, on the 6b shape.
  */
 export function stepPopulationProblems(file, text) {
   const problems = [];
