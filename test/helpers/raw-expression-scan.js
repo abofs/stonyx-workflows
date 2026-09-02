@@ -34,15 +34,32 @@
 // becomes the review artifact it should always have been -- adding an
 // expression to a workflow requires adding an entry that says why it is safe.
 //
-// INDEPENDENCE, MECHANICALLY. `test/raw-sweep-test.js` asserts, by reading this
-// file's own source, that it imports nothing from `workflow-yaml.js` or
-// `interpolation-sweep.js` and that it contains NO REGULAR EXPRESSION LITERAL
-// AT ALL. That second pin is the one that matters: PR #38's previous
-// "independent" population pin was independent in prose and shared the literal
-// `/^\s*steps:\s*$/` with the extractor it audited, so it was blind in exactly
-// the same place (#37, Phase 3 §5). A file with no regexes cannot share one.
-// The only thing this module has in common with the extractor is the directory
-// path it reads, which is data rather than parsing logic.
+// INDEPENDENCE IS ASSURED BY REVIEW OF THIS FILE, NOT BY AUTOMATION.
+//
+// This module is short, imports one line, and exports eight functions. A
+// reviewer reading it can see that it reaches no YAML reader; that reading is
+// the assurance, and it is the only assurance offered. `test/raw-sweep-test.js`
+// keeps ONE mechanical check beside it -- a whitelist over every occurrence of
+// the token `import` -- whose job is to stop the change that would be easy to
+// make without noticing, not to defeat an engineer who means it.
+//
+// Five layered pins used to make the stronger claim. They were removed in round
+// 5 of PR #38 because they produced four defects of their own and no live sink:
+// a regex-literal scan that never entered a template-literal `${...}` (41
+// substitutions, 586 characters of executable code unscanned, so the
+// extractor's own anchor ran inside this file at 282 pass / 0 fail); a
+// `node:module` loader hook that invoked every export with `undefined` -- six
+// of the eight threw on their first statement -- and then filtered
+// `!spec.startsWith('file://')`, discarding exactly the dependency form it
+// existed to record; and, defeating all five at once,
+// `process.getBuiltinModule('node:module').createRequire(...)` of an aliasing
+// proxy (#37, Phase 4 NEW-1/NEW-2, Phase 1 F1/F9, Phase 3 §5a). Ceremony
+// exceeding substrate: each repair bought another evasion.
+//
+// The property still holds and is still worth stating: the only thing this
+// module has in common with the extractor is the directory path it reads, which
+// is data rather than parsing logic. What changed is the honesty of the claim
+// about how that is known.
 //
 // TWO THINGS A BYTE SCAN CANNOT DO, AND WHAT IS DONE ABOUT THEM.
 //

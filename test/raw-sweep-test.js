@@ -1,6 +1,5 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -107,77 +106,6 @@ function loadSites(code) {
   });
 
   return sites;
-}
-
-/**
- * Every specifier the module at `url` resolves, recorded by a loader hook
- * registered in a CHILD PROCESS before the module is imported, with every
- * exported function then called.
- *
- * Reading `import` lines proves what a file says; this proves what the module
- * system did, which is the only thing that closes a dynamic `import()` inside a
- * function body. The module's own URL is dropped -- it is the entry point, not
- * a dependency.
- */
-function resolvedGraph(url) {
-  const dir = mkdtempSync(join(tmpdir(), 'raw-sweep-hook-'));
-  try {
-    const harness = join(dir, 'harness.mjs');
-    writeFileSync(harness, step(
-      "import { registerHooks } from 'node:module';",
-      'const seen = [];',
-      'registerHooks({ resolve(spec, ctx, next) { seen.push(spec); return next(spec, ctx); } });',
-      'const mod = await import(process.argv[2]);',
-      'for (const value of Object.values(mod)) {',
-      "  if (typeof value !== 'function') continue;",
-      '  try { await value(...new Array(value.length).fill(undefined)); } catch { /* shape, not behaviour */ }',
-      '}',
-      'console.log(JSON.stringify(seen));',
-      '',
-    ));
-    const out = execFileSync(process.execPath, [harness, url.href], { encoding: 'utf8' });
-    return JSON.parse(out).filter((spec) => spec !== url.href && !spec.startsWith('file://'));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-/**
- * Every index in `code` where a regex literal could open -- a `/` that is not
- * inside a string literal.
- *
- * This is what "contains no regular expression at all" has to mean to be
- * checkable. The round-2 version listed method names, so a regex reached
- * through an unlisted one (`.split(`, `.replaceAll(`) was invisible; a scan for
- * the literal itself has no list to be incomplete.
- */
-function regexOpeners(code) {
-  const found = [];
-  let quote = null;
-
-  for (let i = 0; i < code.length; i += 1) {
-    const ch = code[i];
-    if (quote !== null) {
-      if (ch === '\\') { i += 1; continue; }
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`') { quote = ch; continue; }
-    if (ch === '/') found.push(i);
-  }
-
-  return found;
-}
-
-/** The character after each backslash in `code`, stepping over the pair. */
-function escapeSequences(code) {
-  const found = [];
-  for (let i = 0; i < code.length; i += 1) {
-    if (code[i] !== '\\') continue;
-    found.push(code[i + 1]);
-    i += 1;
-  }
-  return found;
 }
 
 const sweep = (file, text, allowlist = EXPRESSION_ALLOWLIST) => rawSweepProblems(file, text, allowlist);
@@ -301,57 +229,55 @@ describe('G1 -- the raw ${{ }} guarantee is green on the workflows that ship (#3
 });
 
 describe('G1 -- the scanner owes nothing to the YAML reader (#37)', () => {
-  // PR #38's previous "independent" population pin was independent in prose and
-  // shared the literal `/^\s*steps:\s*$/` with the extractor it audited, so it
-  // was blind in exactly the same place (Phase 3 §5). These are the mechanical
-  // versions of that claim.
+  // ONE CHECK, DELIBERATELY. There used to be five.
   //
-  // ROUND 3 REBUILT THEM, because two of the three could not see what they
-  // excluded and one had already rotted (Phase 4 NEW-1/NEW-2 CRITICAL/HIGH;
-  // Phase 1 F1/F2, independently):
+  // The guarantee is that no `${{ }}` occurrence escapes the allowlist. This
+  // block does not test that; it tests a PROPERTY OF THE GUARANTEE'S SOURCE --
+  // that `raw-expression-scan.js` cannot reach the YAML extractor and inherit
+  // its blind spots. That is a claim about a 250-line self-contained file, and
+  // rounds 2, 3 and 4 each tried to automate it exhaustively:
   //
-  //   * "no regex at all" was a seven-token blocklist. `.split(/\n/)` passed it
-  //     -- `.split(` was not on the list -- and so did
-  //     `.replaceAll(/ *steps: */g, ...)`, which is a whitespace-tolerant twin
-  //     of the extractor's own `/^\s*steps:\s*$/`, the exact shared literal the
-  //     pin exists to exclude, because `.replaceAll(` does not substring-match
-  //     `.replace(` and the literal carries no backslash. Both 256 pass / 0
-  //     fail. It is now a scan for regex literals themselves: a `/` outside a
-  //     string is where one can open, and there must be none.
-  //   * the import pin read only lines beginning `import `, so an INDENTED
-  //     static import and a dynamic `import()` inside a function body were both
-  //     invisible; a dynamic import of a re-export proxy defeated all three
-  //     assertions at once at 256 pass / 0 fail. It is now backed by the
-  //     module's RESOLVED DEPENDENCY GRAPH, recorded by a loader hook in a
-  //     child process while the scanner's every exported function runs.
-  //   * the symbol pin had no existence calibration: renaming `parseSteps`
-  //     repo-wide left "`parseSteps` must not appear in the scanner" green. It
-  //     now asserts each name IS in the extractor before asserting it is not
-  //     here, so a rename reds and gets re-pointed deliberately.
+  //   * a seven-token method blocklist (`.replace(`, `.match(`, ...), defeated
+  //     by `.split(/\n/)` and `.replaceAll(/ *steps: */g, ...)` at 256 / 0;
+  //   * a scan for regex LITERALS, which never entered a template-literal
+  //     `${...}` -- 41 substitutions and 586 characters of executable code
+  //     unscanned, so the extractor's own anchor written as
+  //     `` `${expression.replaceAll(/ *steps: */g, ' ')} ` `` was 282 / 0
+  //     (#37, Phase 4 NEW-1);
+  //   * a `node:module` loader hook running in a child process, which was
+  //     DOUBLY vacuous: it invoked every export with `undefined`, and six of
+  //     the eight threw on their first statement, so nothing behind a
+  //     `typeof text === 'string'` guard ever ran; and it filtered
+  //     `!spec.startsWith('file://')`, discarding exactly the dependency form
+  //     it existed to record (#37, Phase 4 NEW-2, Phase 1 F9, Phase 3 §5a);
+  //   * and all five pins together were walked past at 282 / 0 by
+  //     `process.getBuiltinModule('node:module').createRequire(...)` of an
+  //     aliasing proxy, with `proxy.resolveItems === parseSteps` verified true.
   //
-  // The shape of a source-reading pin matters more than its subject: a
-  // WHITELIST over a constrained thing (what may be imported, where a regex may
-  // open) outlives the author's discipline; a BLOCKLIST of currently-known
-  // tokens does not.
+  // Three rounds, four defects of the machinery's own, and no live sink among
+  // them. So the machinery is gone and what is left is the one check that was
+  // doing the load-bearing work anyway (#37, Phase 1: the static import
+  // whitelist caught the dynamic-import defeat that the loader hook was bought
+  // to catch and did not).
+  //
+  // WHAT ASSURES INDEPENDENCE IS REVIEW, NOT THIS TEST. `raw-expression-scan.js`
+  // is short, exports eight functions, and imports one line. A reviewer reading
+  // it can see it reaches nothing; that is the assurance. This check exists to
+  // stop the ONE change that would be easy to make without noticing -- adding a
+  // load site -- and it is calibrated against the three spellings that defeated
+  // its predecessors. It is not a proof that no evasion exists. An engineer who
+  // wants the scanner to call the extractor can still do it; the point is that
+  // they cannot do it by accident, and cannot do it in a diff that looks
+  // uninteresting.
   const SCANNER = new URL('./helpers/raw-expression-scan.js', import.meta.url);
   const source = readFileSync(SCANNER, 'utf8');
   const code = stripComments(source);
 
-  test('it imports nothing but node: builtins', () => {
-    const imports = source.split('\n').filter((l) => l.startsWith('import '));
-    assert.ok(imports.length > 0, 'if this file stops importing anything the check below is vacuous');
-    for (const line of imports) {
-      assert.match(line, /from 'node:/, `the raw scanner may not import ${line}`);
-    }
-    assert.ok(!code.includes('workflow-yaml'), 'no path into the extractor');
-    assert.ok(!code.includes('interpolation-sweep'), 'no path into the extractor-based sweep');
-  });
-
-  test('every way this file can load code is a top-level node: import -- text half', () => {
-    // The whitelist the round-2 version was missing. Every occurrence of the
-    // token `import` is either `import.meta` or opens a line that ends in a
-    // `node:` specifier. An indented static import and a dynamic `import(` are
-    // both occurrences that are neither.
+  test('every way this file can load code is a top-level node: import', () => {
+    // A WHITELIST over the mechanism: every occurrence of the token `import` is
+    // either `import.meta` or opens a line ending in a `node:` specifier. An
+    // indented static import, a dynamic `import(`, and a computed specifier are
+    // all occurrences that are neither.
     for (const occurrence of loadSites(code)) {
       assert.ok(
         occurrence.kind === 'import.meta' || occurrence.kind === 'node: static import',
@@ -362,107 +288,36 @@ describe('G1 -- the scanner owes nothing to the YAML reader (#37)', () => {
       loadSites(code).some((o) => o.kind === 'node: static import'),
       'if there is no static import left, the assertion above is vacuous',
     );
+    assert.ok(!code.includes('workflow-yaml'), 'no path into the extractor');
+    assert.ok(!code.includes('interpolation-sweep'), 'no path into the extractor-based sweep');
 
-    // Calibration: the detector sees the three shapes that defeated the old
-    // one. Without these the check is a sentence about a `startsWith`.
+    // Calibration: the detector sees the shapes that defeated its predecessors.
+    // Without these the check is a sentence about a `startsWith`.
     for (const evasion of [
       "  import { parseSteps } from './workflow-yaml.js';",
       "const m = await import('./yaml-proxy.js');",
       "const m = await import(['./yaml', '-proxy.js'].join(''));",
+      "const m = await import(new URL('./yaml-proxy.js', import.meta.url).href);",
     ]) {
       assert.ok(
         loadSites(evasion).some((o) => o.kind !== 'import.meta' && o.kind !== 'node: static import'),
         `the load-site scan must see ${evasion}`,
       );
     }
-  });
 
-  test('every way this file can load code is a top-level node: import -- executed half', () => {
-    // The text half above reads bytes; this one records what the module system
-    // actually resolved. A loader hook is registered in a child process BEFORE
-    // the scanner is imported, then every exported function is called, so a
-    // dynamic `import()` buried in a function body is recorded when it runs --
-    // which is exactly the shape that defeated all three round-2 assertions.
-    assert.deepEqual(resolvedGraph(SCANNER), ['node:fs'], 'the scanner resolves node: builtins and nothing else');
-
-    // Calibration, against the defeating mutation itself: the same harness on a
-    // scanner that reaches the extractor through a dynamic re-export proxy must
-    // report the proxy. Without this the assertion above cannot be shown to
-    // fail.
-    const dir = mkdtempSync(join(tmpdir(), 'raw-sweep-graph-'));
-    try {
-      writeFileSync(join(dir, 'yaml-proxy.js'), 'export const resolveItems = () => [];\n');
-      writeFileSync(join(dir, 'proxied-scan.js'), step(
-        "import { readdirSync } from 'node:fs';",
-        'export function workflowFileNames() { return readdirSync(new URL(\'./\', import.meta.url)).sort(); }',
-        "export function readWorkflowFile() { return ''; }",
-        'export async function rawExpressions() {',
-        "  const proxy = await import('./yaml-proxy.js');",
-        '  return proxy.resolveItems();',
-        '}',
-        '',
-      ));
-      const graph = resolvedGraph(pathToFileURL(join(dir, 'proxied-scan.js')));
-      assert.ok(
-        graph.some((spec) => !spec.startsWith('node:')),
-        `a dynamic import of a proxy must show up in the graph; got ${JSON.stringify(graph)}`,
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test('it contains no regular expression at all, so it cannot share one', () => {
-    // Not a list of method names -- a scan for the thing itself. A regex
-    // literal opens at a `/` that is not inside a string, so the assertion is
-    // that the executable code contains no such `/` at all.
+    // And the honest limit, committed rather than left to the header: a load
+    // site written without the token `import` is INVISIBLE here. This is the
+    // shape that defeated all five of the pins this block replaced, and no
+    // amount of source reading closes it -- `getBuiltinModule` is one spelling
+    // of an unbounded set. It is disclosed in README.md's Honest gaps and it is
+    // why the sentence above says review rather than proof.
     assert.deepEqual(
-      regexOpeners(code),
+      loadSites("const load = process.getBuiltinModule('node:module').createRequire(import.meta.url);")
+        .filter((o) => o.kind !== 'import.meta'),
       [],
-      'a `/` outside a string literal is where a regex opens; the raw scanner must contain none',
+      'calibration on the DISCLOSED GAP: a require obtained without the token `import` is not seen here. '
+      + 'If this ever starts reporting, the gap has narrowed and README.md must say so',
     );
-
-    // Calibration against the two mutations that defeated the token blocklist,
-    // both measured at 256 pass / 0 fail against it. Both must be seen here.
-    assert.notDeepEqual(regexOpeners("const lines = text.split(/\\n/);"), [], 'N10: .split( with a regex literal');
-    assert.notDeepEqual(
-      regexOpeners("const s = expression.replaceAll(/ *steps: */g, ' ');"),
-      [],
-      'N11: .replaceAll( with a whitespace-tolerant twin of the extractor\'s own /^\\s*steps:\\s*$/',
-    );
-
-    // And the other direction, so the scan is not merely counting slashes: a
-    // path inside a string is not a regex, and the scanner is full of them.
-    assert.deepEqual(regexOpeners("const dir = new URL('../../.github/workflows/', import.meta.url);"), []);
-    assert.ok(code.includes('.github/workflows/'), 'if that string has gone, the line above proves nothing');
-
-    // The escape charset, kept from round 2 but with an escape-aware reader:
-    // the old one stepped one character at a time, so `'\\\\'` reported a stray
-    // `'` and the whole assertion was noise waiting to happen.
-    const escapes = escapeSequences(code);
-    assert.ok(escapes.length > 0, "if there are no escapes at all, split('\\n') has gone and this is vacuous");
-    assert.deepEqual(
-      [...new Set(escapes)].sort(),
-      ['\\', 'n', 'r'],
-      'the raw scanner escapes a newline, a carriage return and a backslash, and nothing else',
-    );
-  });
-
-  test('the extractor and its sweep are not in this file scan path at all', () => {
-    // The guarantee is `rawSweepProblems`. Nothing it calls reaches
-    // `parseSteps`, `stepScalar`, `readBody` or `structuralLineIdxs`.
-    //
-    // EXISTENCE FIRST. Round 2 asserted only absence, so renaming `parseSteps`
-    // repo-wide left this green at 256 pass / 0 fail while asserting nothing at
-    // all -- the pin had already rotted and reported success (Phase 1 F2).
-    const extractor = readFileSync(new URL('./helpers/workflow-yaml.js', import.meta.url), 'utf8');
-    for (const symbol of ['parseSteps', 'stepScalar', 'readBody', 'structuralLineIdxs', 'expressionsIn']) {
-      assert.ok(
-        extractor.includes(symbol),
-        `${symbol} is gone from the extractor -- re-point this list deliberately rather than leaving it green`,
-      );
-      assert.ok(!source.includes(symbol), `${symbol} must not appear in the raw scanner, even in a comment`);
-    }
   });
 });
 
