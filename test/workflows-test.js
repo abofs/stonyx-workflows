@@ -83,7 +83,7 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
     assert.match(checkout.body, /path: \.stonyx-workflows/);
 
     // ...and cleans it up again. Note the scope: `npm pack` does pack a
-    // dot-prefixed directory at the package root, but all nine current
+    // dot-prefixed directory at the package root, but all ten current
     // consumers declare a `files` allowlist that excludes it, so this step is
     // defence-in-depth for a consumer that later drops that allowlist -- not
     // the only thing standing between the checkout and a published tarball.

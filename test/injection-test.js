@@ -15,7 +15,7 @@ import { parseSteps, readWorkflow, stepEnv, stepRunBody, stepScriptBody } from '
 // string ever becomes program text or a shell-string fragment. A consumer owns
 // its own `package.json` `name`, its dependency keys, and the
 // `workflow_call`/`workflow_dispatch` inputs, so every one of those is hostile
-// input to a workflow that eleven repos share.
+// input to a workflow that ten repos share.
 //
 // Six of the seven sinks are proven here BY EXECUTION: the real `run:` body is
 // extracted from the YAML, dropped into a throwaway workspace with a fake
@@ -283,7 +283,7 @@ describe('AC1 -- S1a/S1b: alpha/beta derivation blocks (#32)', () => {
     });
   }
 
-  // The happy path is the thing that must not move: eleven repos share this
+  // The happy path is the thing that must not move: ten repos share this
   // file and every one of them references it at @main.
   for (const [stepName, channel, expected] of DERIVATION_STEPS) {
     test(`"${stepName}" still derives ${expected} for a valid name`, () => {
@@ -392,7 +392,7 @@ describe('AC3 -- S1/S2 fail loudly instead of catch (e) {} (#32)', () => {
     });
 
     // ...and the one case the fallback exists for must keep working, or the
-    // first publish of a new package breaks in all eleven repos.
+    // first publish of a new package breaks in all ten repos.
     test(`"${stepName}" still falls back to the local version on a genuine E404`, () => {
       const run = runDerivation(stepName, '@stonyx/oauth', { npm: NOT_PUBLISHED });
 
@@ -784,7 +784,7 @@ describe('no workflow in this repo interpolates a consumer string into program t
   });
 });
 
-// The grammar is a security contract for eleven repos and it is stated eight
+// The grammar is a security contract for ten repos and it is stated eight
 // times as eight string literals -- five copies of the npm name regex, three of
 // the semver regex -- because the steps that need it run before any checkout of
 // this repo exists on disk, so `scripts/` is genuinely unreachable from them.
@@ -958,7 +958,7 @@ describe('Beyond AC1-AC7 -- same-shape sinks found while sweeping the file (#32)
   });
 
   // The truth table is the thing that must not move: it decides the release
-  // channel for every publish in all eleven consumer repos.
+  // channel for every publish in all ten consumer repos.
   for (const [label, env, expected] of [
     ['a cascade', { CASCADE_SOURCE: '@stonyx/cron' }, 'type=beta'],
     ['a pull request', { EVENT_NAME: 'pull_request' }, 'type=alpha'],

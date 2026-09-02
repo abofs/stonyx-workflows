@@ -22,7 +22,7 @@ import { parseSteps, readWorkflow, stepRunBody } from './helpers/workflow-yaml.j
 //                                                 channels: $( ) captures only
 //                                                 stdout)
 //   4. the checkout `if:` narrowed to 'alpha'     (breaks every beta publish in
-//                                                 all nine consumers)
+//                                                 all ten consumers)
 //
 // (2) and (3) are behavioural and are killed below by executing the real `run:`
 // body offline against a fake `npm`. (1) and (4) are properties of step
@@ -179,7 +179,7 @@ describe('npm-publish.yml checkout-step invariants (#22 AC2)', () => {
   });
 
   // The checkout guard must be a superset of the two step guards. Narrowing it
-  // to 'alpha' alone breaks every beta publish across all nine consumers --
+  // to 'alpha' alone breaks every beta publish across all ten consumers --
   // the beta path being the merge-to-main path, the highest-traffic publish in
   // the org.
   test('the checkout runs on both the alpha and the beta path', () => {
