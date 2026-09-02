@@ -798,11 +798,16 @@ describe('AC6b -- the body population the DIAGNOSTICS quantify over is pinned of
       '    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: bash\n',
     );
     assert.notEqual(withDefaults, ci, 'the defaults: mutation must actually have applied');
-    assert.equal(scalarKeyLineCount(withDefaults, 'run'), 3, 'two real bodies plus the defaults mapping');
+
+    // Derived from the file, never snapshotted: a hard-coded count here would
+    // red on any benign added step, which is the churn tripwire this round
+    // deleted one test for.
+    const bodies = scalarKeyLineCount(ci, 'run');
+    assert.equal(scalarKeyLineCount(withDefaults, 'run'), bodies + 1, 'the defaults mapping adds one raw run: line');
 
     assertReports(
       stepPopulationProblems('ci.yml', withDefaults),
-      /holds 3 `run:` key line\(s\) in its raw text but the sweep read 2 run: body\(ies\)/,
+      new RegExp(`holds ${bodies + 1} \`run:\` key line\\(s\\) in its raw text but the sweep read ${bodies} `),
       'undeclared, it must red -- silence here would mean the pin had learned to skip a run: line',
     );
 
