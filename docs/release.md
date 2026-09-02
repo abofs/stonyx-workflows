@@ -20,7 +20,7 @@ Beta and stable releases also create a GitHub release.
 
 - **Versioning is automatic** -- managed by CI workflows defined in this repo (`stonyx-workflows`). No manual version bumps needed.
 - **PR-based workflow** -- open a PR, push commits, and alpha builds publish automatically. Merge to main for beta.
-- **Stable releases** -- nominally triggered via manual workflow dispatch in GitHub Actions (pending migration to branch-based per [stonyx-workflows#5](https://github.com/abofs/stonyx-workflows/issues/5)). `workflow_dispatch` on `abofs/stonyx*` is **frozen at present**, so the manual path documented above and in the pipeline table cannot currently be executed. This matters beyond release planning: dispatch is the only trigger that reaches the `version-type` and `custom-version` inputs, so the validators on those two inputs cannot be exercised in production today.
+- **Stable releases** -- nominally triggered via manual workflow dispatch in GitHub Actions (pending migration to branch-based per [stonyx-workflows#5](https://github.com/abofs/stonyx-workflows/issues/5)). `workflow_dispatch` on `abofs/stonyx*` is **frozen at present**, so the manual path documented above and in the pipeline table cannot currently be executed. This matters beyond release planning, but it does **not** mean the input validators are unreachable. Dispatch is the only trigger that reaches `custom-version`, so that input's validator genuinely cannot be exercised in production today. `version-type` is different: dispatch is its only *intended* trigger, but a malformed `repository_dispatch` carrying no `source_package` reaches it too. Measured against the real `Determine version bump type` body -- `cascade-source` empty, event neither `push` nor `pull_request`, `custom-version` empty -- every branch falls through to the final `else` and the job exits 1 with `::error::version-type must be one of patch, minor, major (got: )`. That validator is live in production today, on the one path that matters, and it is where a malformed cascade dispatch now stops instead of publishing an unbumped version. See the README's *Eight observable behaviour changes*, item 6.
 
 ## Cascade publishing
 
@@ -40,7 +40,7 @@ The same `catch`-removal landed in the alpha and beta version derivations, which
 
 ### Registry failures during any publish
 
-`Calculate next alpha version` runs on **every pull request**, and `Calculate next beta version` on **every push to a non-`main` branch**, in all 11 consumer repos. Both query npm for the current published versions, and both used to fall back to the local `package.json` version when that query failed for any reason.
+`Calculate next alpha version` runs on **every pull request**, and `Calculate next beta version` on **every push to a non-`main` branch**, in all ten consumer repos. Both query npm for the current published versions, and both used to fall back to the local `package.json` version when that query failed for any reason.
 
 That fallback is gone. Measured old versus new against a registry stub returning `ENETUNREACH`: the old body exited 0 with `version=0.1.1-alpha.0`; the new body exits 1. The old behaviour silently restarted the prerelease counter from a stale local version and published over it.
 

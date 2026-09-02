@@ -97,7 +97,7 @@ alphanumeric, `.`, `_` or `-`; 214 characters maximum. Note this is **not** a
 synonym for "a legal npm package name" in either direction -- it is *stricter*
 than npm, which tolerates `~`, `'`, `!`, `(`, `*` and `)` in legacy names, and
 *looser*, because the `/i` flag accepts uppercase where npm rejects it for new
-packages. No current consumer is affected by either divergence; a twelfth repo
+packages. No current consumer is affected by either divergence; an eleventh repo
 being onboarded should be checked against the regex above and not against npm's
 own rules.
 
@@ -115,7 +115,10 @@ store one that way. The two consumer-supplied inputs *may* be, because they are
 tag-shaped values a caller may reasonably pass as `v1.2.3`. A test pins all
 eight copies of these regexes string-identical apart from that one `v?`.
 
-**Six observable behaviour changes**, ordered by how often you will meet them:
+**Eight observable behaviour changes.** They are *not* ordered by how often you
+will meet them -- item 3 is the only one every publish run in every consumer
+meets, and items 2, 6 and 8 are unreachable for every consumer as wired today.
+Read the whole list rather than the top of it:
 
 1. **A registry lookup that fails for any reason other than a genuine `404`
    fails the job** -- in the alpha derivation, the beta derivation, *and* the
@@ -146,6 +149,26 @@ eight copies of these regexes string-identical apart from that one `v?`.
    `version-type: ${{ github.event.inputs.version-type || '' }}`: a
    hand-crafted `repository_dispatch` with no `source_package` reaches that
    branch with `""`.
+7. **A registry lookup that *succeeds* but returns output that is not JSON
+   fails the job.** Item 1 covers a lookup that fails; this one does not fail
+   -- `npm` exits 0 and prints something else, which is what a registry proxy
+   or a captive-portal error page does. Pre-fix the `JSON.parse` of
+   `npm view <pkg> versions --json` sat inside the same `try` as the lookup, so
+   unparseable output took the missing-package fallback; it is now its own
+   hard-fail. Measured with a stub exiting 0 and printing
+   `<html>502 Bad Gateway</html>` for `versions --json` and a healthy
+   `dist-tags.latest`: old body exit 0 `version=0.1.1-alpha.0`, new body exit 1.
+   Same two steps as item 1, so the same every-PR / every-push reach.
+8. **`custom-version` is no longer word-split.** It was interpolated unquoted
+   into `pnpm version ${{ inputs.custom-version }} --no-git-tag-version`, so a
+   multi-word value arrived as several argv elements; it is now a quoted
+   expansion behind the semver/keyword validator. Measured with
+   `custom-version: "prerelease --preid rc"` -- a documented npm form: old
+   `pnpm argv: version prerelease --preid rc --no-git-tag-version`, exit 0; new
+   exits 1 with `::error::custom-version is not a valid semver version or npm
+   version keyword`. Only single-token values (a semver, optionally
+   `v`-prefixed, or one npm version keyword) are accepted now. Dispatch-only,
+   and dispatch is frozen, so no consumer can currently reach it.
 
 *The failure text*, so a red job can be grepped rather than guessed at:
 
@@ -157,6 +180,7 @@ eight copies of these regexes string-identical apart from that one `v?`.
 ::error::custom-version is not a valid semver version or npm version keyword: "..."
 ::error::version-type must be one of patch, minor, major (got: ...)
 ::error::npm view <package> <field> failed: ...
+::error::npm view <package> versions --json returned unparseable output
 ```
 
 **Secrets:**
