@@ -101,13 +101,44 @@ const OPENER = '${{';
 const CLOSER = '}}';
 const BACKSLASH = '\\';
 
-// The only YAML double-quoted escapes that can CONSTRUCT an arbitrary
-// character, plus the line continuation. `\\x`, `\\u` and `\\U` name a code point;
-// a backslash at end of line joins the next one. Every other double-quoted
-// escape (`\\n`, `\\t`, `\\"`, `\\/`, `\\\\`, ...) resolves to a fixed character
-// that is not `$`, `{` or `}`, so no combination of them can build an opener.
-// That is a whitelist over the mechanism, not a blocklist of spellings.
+// THE ESCAPE ALPHABET, enumerated against libyaml rather than recalled.
+//
+// Every escape a YAML double-quoted scalar accepts was fed to Psych (libyaml
+// 5.3.1) one at a time as `k: "A\<e>B"`. The complete accepted set is
+//
+//   \<space> \" \/ \0 \L \N \P \\ \_ \a \b \e \f \n \r \t \v   (fixed character)
+//   \x \u \U                                                   (names a code point)
+//
+// and an escape outside it is a `Psych::SyntaxError` -- it fails loud at parse,
+// it does not silently construct. Not one fixed-character escape resolves to
+// `$` (U+0024), `{` (U+007B) or `}` (U+007D), so no combination of them can
+// build an opener; `\L`, `\N` and `\P` produce U+2028, U+0085 and U+2029, which
+// are line breaks but not opener characters, and they land INSIDE the resolved
+// scalar where they cannot re-trigger a continuation. So the constructing set
+// is exactly three escapes, plus the line continuation below. That is a
+// whitelist over the mechanism, not a blocklist of spellings.
 const CONSTRUCTING_ESCAPES = 'xuU';
+
+// THE LINE-BREAK ALPHABET, likewise enumerated against libyaml.
+//
+// A backslash at the end of a YAML line joins the next one. Round 4 tested
+// "end of line" as `next === undefined || next === '\r'` -- that is, the end of
+// a JavaScript `split('\n')` segment -- and libyaml's break alphabet has FIVE
+// members, not two: LF, CR, NEL U+0085, LS U+2028 and PS U+2029. Measured, each
+// of the five joins the next line: `k: "echo $\<BREAK>  {{ inputs.x }}"`
+// resolves to `echo ${{ inputs.x }}` for every one of them, and a NEL
+// continuation appended to each of the five real workflows was 282 pass / 0
+// fail with ZERO literal openers added (#37, Phase 3 §3). The controls matter
+// as much: `\` + SPACE and `\` + TAB do NOT continue, and `\` + VT, FF, NBSP,
+// U+2000, U+3000, ZWSP or BOM is a parse error, so this list is the whole set
+// rather than the part that was reported.
+//
+// LF is absent here because `escapeProblems` reads `text.split('\n')` segments,
+// so a backslash before an LF is a backslash at the end of a segment, which is
+// `next === undefined`. CRLF is covered by CR.
+const LINE_BREAK_CHARS = '\r\u0085\u2028\u2029';
+
+const END_OF_LINE = '(end of line)';
 const TOP_LEVEL = '(top level)';
 
 /**
@@ -244,8 +275,40 @@ export function rawExpressions(text) {
 }
 
 /**
- * Every backslash in `text` that could construct a character, as
- * `{ lineNumber, line, escape }`.
+ * Problems with an escape-allowlist entry's own shape.
+ *
+ * `escapeProblems` is the one check in this module whose subject is not an
+ * expression, so it needs its own entry shape. The refusals are the same in
+ * spirit as `entryShapeProblems`: an entry with no `line` would exempt its
+ * escape everywhere in the file, and an entry whose `why` says nothing is an
+ * approval nobody made.
+ */
+export function escapeEntryShapeProblems(file, entry) {
+  const problems = [];
+  const where = `${file} escape-allowlist entry for ${entry.escape ?? '(no escape)'}`;
+
+  if (typeof entry.line !== 'string' || entry.line === '') {
+    problems.push(`${where} has no line:. An entry without a line exempts its escape anywhere in the file.`);
+  }
+  if (typeof entry.escape !== 'string' || entry.escape === '') {
+    problems.push(
+      `${where} has no escape:. Name the escape it exempts -- one of `
+      + `${[...CONSTRUCTING_ESCAPES].join(', ')} or ${END_OF_LINE}.`,
+    );
+  }
+  if (typeof entry.why !== 'string' || entry.why.length < 60) {
+    problems.push(
+      `${where} needs a why: that states which scalar style the line is in and why the escape cannot build `
+      + `an ${OPENER} there.`,
+    );
+  }
+
+  return problems;
+}
+
+/**
+ * Every backslash in `text` that could construct a character, as a problem
+ * string, unless an escape-allowlist entry pins that exact `(line, escape)`.
  *
  * REPORTS, never interprets. A YAML double-quoted scalar resolves `\x24` to `$`
  * and joins a trailing backslash to the next line before anything looks for an
@@ -259,32 +322,86 @@ export function rawExpressions(text) {
  * failed OPEN, which is the one property the raw scan was bought to eliminate.
  * Either way an unmodelled shape must red.
  *
+ * THREE DOMAINS, EACH ENUMERATED AGAINST libyaml RATHER THAN AGAINST THE
+ * REPORTED PAYLOADS -- see the two alphabet blocks above for the first two.
+ *
+ *   1. WHICH ESCAPES CAN CONSTRUCT.       `\x`, `\u`, `\U`, and nothing else.
+ *   2. WHICH CHARACTERS END A YAML LINE.  LF, CR, U+0085, U+2028, U+2029.
+ *   3. WHICH SCALAR STYLES PROCESS `\`.   Measured: ONLY double-quoted. In a
+ *      single-quoted, plain, literal-block or folded-block scalar, `\x24` stays
+ *      four literal characters and a trailing backslash is a trailing
+ *      backslash.
+ *
+ * Domain 3 is the reason this function reports on EVERY LINE OF EVERY FILE with
+ * no filter of any kind, and the reason it must keep doing so. Deciding which
+ * style a line is in requires parsing, and each of the three plausible
+ * narrowings was measured turning a REAL constructed opener from 277 pass / 5
+ * fail into 282 / 0 (#37, Phase 4 NEW-4):
+ *
+ *   * stepping over backslash PAIRS, the natural "stop reporting `\\`" fix;
+ *   * reading only lines that contain a `"`, the natural "only double-quoted
+ *     scalars process escapes" fix -- but a multi-line double-quoted scalar
+ *     carries its continuation lines with NO quote character on them, and that
+ *     is where the escape sits (verified against Psych);
+ *   * skipping `#`-comment lines -- but a `#` inside a `run:` body is script
+ *     text, and the runner substitutes an expression into it before bash parses.
+ *
+ * So the check over-reports by design: it fires on a `\x` in a `run: |` body
+ * where YAML processes no escapes at all. THE WAY PAST IT IS AN ENTRY, NEVER A
+ * WIDENED PATTERN -- `ESCAPE_ALLOWLIST` in `expression-allowlist.js` pins a
+ * `(line, escape)` pair with a stated reason, exactly as the expression
+ * allowlist pins an occurrence, and a dead entry reds. Without that, the only
+ * available remedy would be to shrink `CONSTRUCTING_ESCAPES` or the population,
+ * which is the widening this repo's own rule forbids (#37, Phase 3 §5c).
+ *
  * `indexOf`, and a look at the next character. Nothing more.
  */
-export function escapeProblems(file, text) {
+export function escapeProblems(file, text, escapeAllowlist = {}) {
+  const entries = escapeAllowlist[file] ?? [];
   const problems = [];
+  const used = new Set();
+
+  for (const entry of entries) problems.push(...escapeEntryShapeProblems(file, entry));
 
   text.split('\n').forEach((raw, i) => {
+    const line = raw.trim();
     let at = raw.indexOf(BACKSLASH);
 
     while (at !== -1) {
       const next = raw[at + 1];
-      const continuation = next === undefined || next === '\r';
+      const continuation = next === undefined || LINE_BREAK_CHARS.includes(next);
       if (continuation || CONSTRUCTING_ESCAPES.includes(next)) {
-        problems.push(
-          `${file}:${i + 1} carries ${continuation ? 'a backslash at end of line' : `a \\${next} escape`} on `
-          + `${JSON.stringify(raw.trim())}. In a YAML double-quoted scalar that resolves BEFORE anything looks `
-          + `for ${OPENER}, so an opener can be CONSTRUCTED with no literal ${OPENER} in the bytes -- `
-          + 'measured green on the real ci.yml. This scanner reads bytes and will not guess which scalar style '
-          + 'a line is in. Either the runner evaluates the constructed opener, in which case this is a live '
-          + 'bypass, or it does not, in which case the shape is silently unswept and the guarantee has failed '
-          + 'open -- and failing open is the property a raw byte scan exists to eliminate. Write the line '
-          + 'without the escape, or extend this scanner deliberately.',
-        );
+        const escape = continuation ? END_OF_LINE : next;
+        const entry = entries.find((e) => e.line === line && e.escape === escape);
+        if (entry) {
+          used.add(entry);
+        } else {
+          problems.push(
+            `${file}:${i + 1} carries ${continuation ? 'a backslash at end of line' : `a \\${next} escape`} on `
+            + `${JSON.stringify(line)}. In a YAML double-quoted scalar that resolves BEFORE anything looks `
+            + `for ${OPENER}, so an opener can be CONSTRUCTED with no literal ${OPENER} in the bytes -- `
+            + 'measured green on the real ci.yml. A line ends at LF, CR, U+0085, U+2028 or U+2029, all five '
+            + 'verified against libyaml. This scanner reads bytes and will not guess which scalar style a line '
+            + 'is in. Either the runner evaluates the constructed opener, in which case this is a live bypass, '
+            + 'or it does not, in which case the shape is silently unswept and the guarantee has failed open -- '
+            + 'and failing open is the property a raw byte scan exists to eliminate. Write the line without the '
+            + `escape, or add an ESCAPE_ALLOWLIST entry pinning ${JSON.stringify(line)} and `
+            + `${JSON.stringify(escape)} with a reason. Do not widen the escape set or the line population.`,
+          );
+        }
       }
       at = raw.indexOf(BACKSLASH, at + 1);
     }
   });
+
+  for (const entry of entries) {
+    if (used.has(entry)) continue;
+    problems.push(
+      `${file} no longer carries a \\${entry.escape} on the source line ${JSON.stringify(entry.line)}. That `
+      + 'entry in the ESCAPE_ALLOWLIST in test/helpers/expression-allowlist.js is dead -- delete or re-pin it '
+      + `rather than letting it exempt something else. Recorded reason was: ${entry.why}`,
+    );
+  }
 
   return problems;
 }
@@ -338,7 +455,8 @@ export function entryShapeProblems(file, entry) {
   if (!Number.isInteger(entry.occurrences) || entry.occurrences < 1) {
     problems.push(`${where} must pin a positive integer occurrences:, so a second copy on the line is not free.`);
   }
-  if (typeof entry.line === 'string' && typeof entry.expression === 'string' && !entry.line.includes(entry.expression)) {
+  const bothStrings = typeof entry.line === 'string' && typeof entry.expression === 'string';
+  if (bothStrings && !entry.line.includes(entry.expression)) {
     problems.push(`${where} pins a line that does not contain the expression it exempts.`);
   }
   if (typeof entry.why !== 'string' || entry.why.length < 60) {
@@ -375,13 +493,13 @@ export function entryShapeProblems(file, entry) {
  * An opener that does not close on its own line reds under (1) with its own
  * message, because `expression` is `null` and no entry can pin `null`.
  */
-export function rawSweepProblems(file, text, allowlist) {
+export function rawSweepProblems(file, text, allowlist, escapeAllowlist = {}) {
   const entries = allowlist[file] ?? [];
   const problems = [];
   const tally = new Map();
 
   for (const entry of entries) problems.push(...entryShapeProblems(file, entry));
-  problems.push(...escapeProblems(file, text));
+  problems.push(...escapeProblems(file, text, escapeAllowlist));
 
   for (const { lineNumber, context, line, expression } of rawExpressions(text)) {
     if (expression === null) {

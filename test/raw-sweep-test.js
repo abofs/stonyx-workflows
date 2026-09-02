@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { EXPRESSION_ALLOWLIST } from './helpers/expression-allowlist.js';
+import { ESCAPE_ALLOWLIST, EXPRESSION_ALLOWLIST } from './helpers/expression-allowlist.js';
 import {
   entryShapeProblems,
   escapeProblems,
@@ -108,7 +108,8 @@ function loadSites(code) {
   return sites;
 }
 
-const sweep = (file, text, allowlist = EXPRESSION_ALLOWLIST) => rawSweepProblems(file, text, allowlist);
+const sweep = (file, text, allowlist = EXPRESSION_ALLOWLIST, escapes = ESCAPE_ALLOWLIST) =>
+  rawSweepProblems(file, text, allowlist, escapes);
 
 const UNPINNED = /No allowlist entry in test\/helpers\/expression-allowlist\.js pins that expression/;
 const DEAD = /expression-allowlist\.js is dead/;
@@ -377,7 +378,10 @@ describe('G1 -- every bypass family from all ten PR #38 reviews reds (#37)', () 
       "            const n = '${{ inputs.package-name }}';",
       '        uses: actions/github-script@v7',
     ))],
-    ['6a item-level flow mapping', appendStep(cascade, "      - {name: Flow, run: 'echo \"${{ inputs.package-name }}\"'}")],
+    ['6a item-level flow mapping', appendStep(
+      cascade,
+      "      - {name: Flow, run: 'echo \"${{ inputs.package-name }}\"'}",
+    )],
     ['6a alias resolved on the next line', appendStep(cascade, step(
       '      - name: Anchor holder',
       '        run: &sink echo "${{ inputs.package-name }}"',
@@ -647,7 +651,11 @@ describe('G1 -- the guarantee fails closed (#37)', () => {
     ));
 
     assert.ok(FIXTURE.includes(SINK), 'the fixture must still carry the #34 sink line to mutate it');
-    assert.deepEqual(rawSweepProblems('security-audit.yml', FIXTURE, ALLOWLIST_AT_E07E185), [], 'calibration: unmutated is clean');
+    assert.deepEqual(
+      rawSweepProblems('security-audit.yml', FIXTURE, ALLOWLIST_AT_E07E185),
+      [],
+      'calibration: unmutated is clean',
+    );
 
     for (const comment of [true, false]) {
       const fixed = fix34({ comment });
@@ -659,7 +667,11 @@ describe('G1 -- the guarantee fails closed (#37)', () => {
       );
       // The new env: line is itself an unpinned expression, so #34 also has to
       // write the entry that approves the remediation it introduces.
-      assertReports(rawSweepProblems('security-audit.yml', fixed, ALLOWLIST_AT_E07E185), UNPINNED, 'the env: line needs its own entry');
+      assertReports(
+        rawSweepProblems('security-audit.yml', fixed, ALLOWLIST_AT_E07E185),
+        UNPINNED,
+        'the env: line needs its own entry',
+      );
     }
 
     // Positive re-arming: with the sink fixed and the entry deleted, putting
@@ -788,12 +800,41 @@ describe('G1 -- an opener that is CONSTRUCTED rather than written is reported (#
   // shape is silently unswept and the scan has failed OPEN, and failing open is
   // the property this redesign was bought to eliminate.
 
+  // THE TWO ALPHABETS, ENUMERATED RATHER THAN SAMPLED. Round 4's fix was built
+  // as a whitelist over the ESCAPE alphabet -- correctly, and Phase 3 verified
+  // it complete against libyaml -- and still missed that "end of line" is
+  // ITSELF an alphabet with five members, of which two were handled. Both are
+  // now established against Psych/libyaml 5.3.1 and both are pinned below:
+  //
+  //   escapes that construct  \x \u \U               (complete; every other
+  //                                                   accepted escape resolves
+  //                                                   to a fixed character that
+  //                                                   is not $, { or })
+  //   characters ending a line  LF CR U+0085 U+2028 U+2029
+  //
+  // For each break character, `k: "echo $\<BREAK>  {{ inputs.x }}"` was parsed
+  // by Psych to `echo ${{ inputs.x }}`; `\` + SPACE and `\` + TAB do not
+  // continue, and `\` + VT / FF / NBSP / U+2000 / U+3000 / ZWSP / BOM is a
+  // parse error. LF is the `next === undefined` case here because this scanner
+  // reads `split('\n')` segments; CR covers CRLF.
+  const NEL = '\u0085';
+  const LS = '\u2028';
+  const PS = '\u2029';
+
   const SPELLINGS = [
     ['a  \\x24 hex escape for $', '        run: "echo \\x24{{ inputs.node-version }}"'],
     ['b  \\u0024 four-digit escape for $', '        run: "echo \\u0024{{ inputs.node-version }}"'],
     ['c  \\x7b hex escape for {', '        run: "echo $\\x7b{ inputs.node-version }}"'],
-    ['d  line continuation after $', '        run: "echo $\\\n          {{ inputs.node-version }}"'],
-    ['e  line continuation between the braces', '        run: "echo ${\\\n          { inputs.node-version }}"'],
+    ['d  LF continuation after $', '        run: "echo $\\\n          {{ inputs.node-version }}"'],
+    ['e  LF continuation between the braces', '        run: "echo ${\\\n          { inputs.node-version }}"'],
+    // The three break characters `next === undefined || next === '\r'` could not
+    // see. Each was measured appended to EVERY ONE of the five real workflows at
+    // 282 pass / 0 fail, with zero literal openers added (#37, Phase 3 §3).
+    // These payloads are a single `split('\n')` segment: the break is INSIDE it.
+    ['f  NEL U+0085 continuation', `        run: "echo $\\${NEL}          {{ inputs.node-version }}"`],
+    ['g  LS U+2028 continuation', `        run: "echo $\\${LS}          {{ inputs.node-version }}"`],
+    ['h  PS U+2029 continuation', `        run: "echo $\\${PS}          {{ inputs.node-version }}"`],
+    ['i  CR continuation (CRLF or a lone CR)', '        run: "echo $\\\r          {{ inputs.node-version }}"'],
   ];
 
   for (const [spelling, body] of SPELLINGS) {
@@ -847,6 +888,129 @@ describe('G1 -- an opener that is CONSTRUCTED rather than written is reported (#
     assert.deepEqual(escapeProblems('x.yml', 'script: |\n  const s = "a\\nb" + /^v?\\d+\\./.source;\n'), []);
     assert.equal(escapeProblems('x.yml', 'run: "a\\x41b"\n').length, 1);
     assert.equal(escapeProblems('x.yml', 'run: "a\\U0001F600"\n').length, 1);
+  });
+
+  test('the line-break alphabet has exactly five members, and \\ + a non-break is not a continuation', () => {
+    // The other half of the alphabet claim, and the half that stops the fix
+    // from being a blocklist that grew by three. Psych/libyaml: `\` + SPACE
+    // resolves to `$   {{` and `\` + TAB to `$\t  {{` -- neither builds an
+    // opener -- and `\` + VT / FF / NBSP / U+2000 / U+3000 / ZWSP / BOM is a
+    // `Psych::SyntaxError`. A check that reported every `\` would be as useless
+    // as one that reported none.
+    for (const [name, ch] of [['SPACE', ' '], ['TAB', '\t'], ['NBSP', '\u00a0'], ['ZWSP', '\u200b']]) {
+      assert.deepEqual(
+        escapeProblems('x.yml', `run: "echo $\\${ch}  {{ inputs.x }}"\n`),
+        [],
+        `\\ + ${name} does not end a YAML line, so it must not be reported as a continuation`,
+      );
+    }
+    for (const [name, ch] of [['CR', '\r'], ['NEL', '\u0085'], ['LS', '\u2028'], ['PS', '\u2029']]) {
+      assert.equal(
+        escapeProblems('x.yml', `run: "echo $\\${ch}  {{ inputs.x }}"\n`).length,
+        1,
+        `\\ + ${name} DOES end a YAML line, verified against libyaml`,
+      );
+    }
+    assert.equal(escapeProblems('x.yml', 'run: "echo $\\\n  {{ inputs.x }}"\n').length, 1, 'and \\ + LF');
+  });
+
+  test('the escape scan reads every line of the file, with no narrowing of any kind', () => {
+    // The population half. `rawExpressions`' population is pinned hard; its
+    // twin had no case at all, and each of the three plausible narrowings was
+    // measured turning a REAL constructed opener from 277 pass / 5 fail into
+    // 282 / 0 (#37, Phase 4 NEW-4). Two of the three are live shapes, not
+    // hypotheticals, and the reason they are live is domain 3: only a
+    // double-quoted scalar processes escapes, but a MULTI-LINE double-quoted
+    // scalar carries its continuation lines with no quote character on them.
+    //
+    // E_a -- stepping over backslash PAIRS. A `\x` immediately after a `\\`
+    // must still report, or "stop reporting `\\`" silently deletes it.
+    assert.equal(escapeProblems('x.yml', 'run: "a\\\\\\x24{{ inputs.x }}"\n').length, 1, 'E_a: after a \\\\ pair');
+
+    // E_d -- reading only lines that contain a `"`. Verified against Psych:
+    // this document's `run:` resolves to `start ${{ inputs.x }} end`, and the
+    // line carrying the escape has no quote character anywhere on it.
+    const noQuoteLine = step(
+      '      - name: Constructed sink',
+      '        run: "start',
+      '          \\x24{{ inputs.node-version }}',
+      '          end"',
+    );
+    const mutatedD = appendStep(ci, noQuoteLine);
+    assert.equal(mutatedD.split('${{').length - 1, ci.split('${{').length - 1, 'E_d adds no literal opener');
+    assertReports(sweep('ci.yml', mutatedD), CONSTRUCTED, 'E_d: the escape sits on a line with no quote on it');
+
+    // E_e -- skipping `#`-comment lines. A `#` inside a `run:` body is script
+    // text: the runner substitutes an expression into it TEXTUALLY before bash
+    // parses, which this suite measured with a written canary. The literal
+    // form of this shape is committed; this is the constructed form.
+    const commented = appendStep(ci, step(
+      '      - name: Constructed sink',
+      '        run: |',
+      '          # \\x24{{ inputs.node-version }}',
+      '          echo done',
+    ));
+    assertReports(sweep('ci.yml', commented), CONSTRUCTED, 'E_e: a # line in a run: body is script, not a comment');
+  });
+
+  test('the way past the escape report is an ENTRY, not a widened pattern', () => {
+    // The check over-reports by design -- domain 3: only a double-quoted scalar
+    // processes escapes, and no byte scan can tell which style a line is in. So
+    // it fires on a `\x` in a `run: |` body where nothing can be constructed.
+    // Without somewhere for that pressure to go, the only remedies are to
+    // shrink `CONSTRUCTING_ESCAPES` or the population -- the widening this
+    // repo's own rule forbids, and the one check that had no entry form
+    // (#37, Phase 3 §5c).
+    const text = 'run: |\n  printf "%s" "a\\x41b"\n';
+    const line = 'printf "%s" "a\\x41b"';
+    assert.equal(escapeProblems('x.yml', text).length, 1, 'calibration: unexempted, it reports');
+
+    const good = { 'x.yml': [{
+      line,
+      escape: 'x',
+      why: 'A literal-block run: body, where YAML processes no escapes at all: printf receives the six '
+        + 'characters a-backslash-x-4-1-b. Pinned rather than widening CONSTRUCTING_ESCAPES.',
+    }] };
+    assert.deepEqual(escapeProblems('x.yml', text, good), [], 'an entry pinning (line, escape) exempts it');
+
+    // Same fail-closed discipline as an expression entry: the exemption is
+    // re-derived from the file every run, so it cannot outlive its line.
+    assertReports(
+      escapeProblems('x.yml', 'run: |\n  echo done\n', good),
+      /escape-allowlist entry .* is dead|no longer carries a \\x/,
+      'an escape exemption whose line is gone must not survive as a standing permission',
+    );
+    assertReports(
+      escapeProblems('x.yml', text, { 'x.yml': [{ ...good['x.yml'][0], why: 'safe' }] }),
+      /needs a why:/,
+      'and an entry that says nothing is an approval nobody made',
+    );
+    assertReports(
+      escapeProblems('x.yml', text, { 'x.yml': [{ ...good['x.yml'][0], line: undefined }] }),
+      /has no line:/,
+      'an entry without a line would exempt its escape anywhere in the file',
+    );
+
+    // THE WIRING. `rawSweepProblems` has to consult the escape allowlist, not
+    // merely be able to. Deleting the argument is the defect class this suite
+    // pins elsewhere for `entryShapeProblems` (#37, Phase 4 N7).
+    const pinned = { 'x.yml': [] };
+    assertReports(rawSweepProblems('x.yml', text, pinned), CONSTRUCTED, 'calibration: unexempted through the sweep');
+    assert.deepEqual(
+      rawSweepProblems('x.yml', text, pinned, good).filter((p) => CONSTRUCTED.test(p)),
+      [],
+      'the guarantee must pass its escape allowlist through, not just accept one',
+    );
+  });
+
+  test('the shipped ESCAPE_ALLOWLIST is empty, and that is measured rather than assumed', () => {
+    // If a real entry is ever added, this reds and someone re-reads the case
+    // above deliberately. An empty allowlist is the strongest state; it is not
+    // the state the mechanism is designed for.
+    assert.deepEqual(ESCAPE_ALLOWLIST, {}, 'no shipped workflow line needs an escape exemption today');
+    for (const file of workflowFileNames()) {
+      assert.deepEqual(escapeProblems(file, readWorkflowFile(file), ESCAPE_ALLOWLIST), []);
+    }
   });
 });
 

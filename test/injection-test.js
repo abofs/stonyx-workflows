@@ -18,7 +18,7 @@ import {
   stepRunBody,
   stepScriptBody,
 } from './helpers/workflow-yaml.js';
-import { EXPRESSION_ALLOWLIST } from './helpers/expression-allowlist.js';
+import { ESCAPE_ALLOWLIST, EXPRESSION_ALLOWLIST } from './helpers/expression-allowlist.js';
 import { rawSweepProblems, readWorkflowFile, workflowFileNames } from './helpers/raw-expression-scan.js';
 import {
   ALLOWLIST,
@@ -788,7 +788,7 @@ describe('no workflow in this repo interpolates a consumer string into program t
   // wrong, a message gets less helpful; nothing goes unswept.
   test('every ${{ }} expression in .github/workflows/ is allowlisted against its source line', () => {
     for (const file of FILES) {
-      assert.deepEqual(rawSweepProblems(file, readWorkflowFile(file), EXPRESSION_ALLOWLIST), []);
+      assert.deepEqual(rawSweepProblems(file, readWorkflowFile(file), EXPRESSION_ALLOWLIST, ESCAPE_ALLOWLIST), []);
     }
   });
 

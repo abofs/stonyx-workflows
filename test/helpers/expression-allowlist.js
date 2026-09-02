@@ -394,3 +394,32 @@ export const EXPRESSION_ALLOWLIST = {
     },
   ],
 };
+
+// The named exceptions for the ESCAPE half of the guarantee -- the check that a
+// line carries no backslash that could CONSTRUCT an opener the byte scan cannot
+// see (`escapeProblems`).
+//
+// EMPTY TODAY, AND THAT IS THE MEASURED STATE, NOT AN OVERSIGHT: none of the
+// five shipped workflows carries a `\x`, `\u`, `\U` or an end-of-line
+// backslash. It exists because the check DELIBERATELY OVER-REPORTS and this
+// repo's rule is that the way past a check is an entry, never a widened
+// pattern. Only a double-quoted scalar processes escapes -- measured against
+// libyaml: in a single-quoted, plain, literal-block or folded-block scalar
+// `\x24` stays four literal characters -- but deciding which style a line is in
+// requires parsing, and all three plausible narrowings were measured turning a
+// real constructed opener from 277 pass / 5 fail into 282 / 0 (#37, Phase 4
+// NEW-4). So the check fires on every line of every file, and the pressure that
+// creates has somewhere to go that is not `CONSTRUCTING_ESCAPES` (#37, Phase 3
+// §5c).
+//
+// Each entry pins three things:
+//
+//   line     the EXACT source line, trimmed, that carries the backslash.
+//   escape   `x`, `u`, `U`, or `(end of line)` for a trailing backslash.
+//   why      which scalar style the line is in, and why the escape cannot
+//            build an opener there. Held to the same 60-character floor as an
+//            expression entry's reason.
+//
+// A dead entry reds, exactly as a dead expression entry does: an exemption
+// whose line is gone must not survive as a standing permission.
+export const ESCAPE_ALLOWLIST = {};
