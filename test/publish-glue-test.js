@@ -5,7 +5,7 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { parseSteps, readWorkflow, stepRunBody } from './helpers/workflow-yaml.js';
+import { readWorkflow, stepNamed, stepRunBody } from './helpers/workflow-yaml.js';
 
 // Behavioural coverage of the npm-publish.yml derivation glue, for
 // abofs/stonyx-workflows#22.
@@ -38,11 +38,11 @@ const fixture = JSON.parse(readFileSync(new URL('./fixtures/oauth-registry-state
 const CHECKOUT_STEP = 'Checkout stonyx-workflows (for version derivation script)';
 const RESOLVE_STEP = 'Resolve stonyx-workflows ref';
 
-const stepNamed = (name) => {
-  const step = parseSteps(npmPublish).find((s) => s.name === name);
-  assert.ok(step, `npm-publish.yml should have a step named ${JSON.stringify(name)}`);
-  return step;
-};
+// The exported `stepNamed`, not a local one. A local helper of the same name
+// used to shadow it with the OPPOSITE contract -- `.find()`, silently returning
+// the first match -- which is precisely what the export exists to refuse
+// (abofs/stonyx-workflows#37, bypass 1 / Phase 2 WARNING 3).
+const namedStep = (name) => stepNamed(npmPublish, name);
 
 /**
  * Run one derivation step's real `run:` body in a throwaway directory laid out
@@ -166,12 +166,12 @@ describe('npm-publish.yml checkout-step invariants (#22 AC2)', () => {
   // SME Phases 2 and 3 both flagged.
   test('the checkout ref is pinned to the resolved workflow SHA, not a moving branch', () => {
     assert.match(
-      stepNamed(CHECKOUT_STEP).body,
+      namedStep(CHECKOUT_STEP).body,
       /ref: \$\{\{ steps\.workflows-ref\.outputs\.sha \}\}/,
       'checkout ref must come from the Resolve stonyx-workflows ref step',
     );
 
-    const resolve = stepNamed(RESOLVE_STEP);
+    const resolve = namedStep(RESOLVE_STEP);
     assert.match(resolve.body, /job\.workflow_sha/, 'the ref must be derived from job.workflow_sha');
     // An empty ref makes actions/checkout fall back to the default branch,
     // silently restoring the skew. The step has to fail instead.
@@ -184,7 +184,7 @@ describe('npm-publish.yml checkout-step invariants (#22 AC2)', () => {
   // the org.
   test('the checkout runs on both the alpha and the beta path', () => {
     for (const name of [CHECKOUT_STEP, RESOLVE_STEP]) {
-      const { body } = stepNamed(name);
+      const { body } = namedStep(name);
       const guard = body.split('\n').find((l) => /^\s*if:/.test(l));
       assert.ok(guard, `${name} should carry an if: guard`);
       assert.match(guard, /'alpha'/, `${name} must run on the alpha path`);
