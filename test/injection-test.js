@@ -7,7 +7,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Script } from 'node:vm';
 
-import { parseSteps, readWorkflow, stepEnv, stepRunBody, stepScriptBody } from './helpers/workflow-yaml.js';
+import { parseSteps, readWorkflow, runBodyOf, stepEnv, stepRunBody, stepScriptBody } from './helpers/workflow-yaml.js';
+import {
+  ALLOWLIST,
+  deadAllowlistProblems,
+  duplicateNameProblems,
+  runSweepProblems,
+  scriptSweepProblems,
+} from './helpers/interpolation-sweep.js';
 
 // Consumer-controlled-string injection sinks in the reusable workflows, for
 // abofs/stonyx-workflows#32.
@@ -710,32 +717,6 @@ describe('AC5 -- S5: cascade.yml refuses hostile input before it dispatches (#32
 describe('no workflow in this repo interpolates a consumer string into program text (#32)', () => {
   const FILES = WORKFLOW_FILES;
 
-  // Named exceptions only, and each one is pinned to a step and to an exact
-  // occurrence count -- otherwise "this expression is tolerated in this file"
-  // silently tolerates a SECOND copy of it, or the same expression appearing
-  // in a step that has nothing to do with the recorded reason.
-  const ALLOWLIST = {
-    'npm-publish.yml': [{
-      step: 'Install dependencies',
-      expression: "${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}",
-      occurrences: 1,
-      why: 'Both arms are fixed literals selected by a boolean. No consumer string can reach the shell through it.',
-    }],
-    'security-audit.yml': [{
-      step: 'Run security audit',
-      expression: '${{ inputs.audit-level }}',
-      occurrences: 1,
-      why: 'KNOWN OPEN SINK, tracked as abofs/stonyx-workflows#34. A workflow_call input interpolated into a shell '
-        + 'run: body -- the same defect class this suite closes, in a third file outside #32 two-file scope. '
-        + 'Reported and tracked, not fixed here. When #34 lands, delete this entry.',
-    }],
-  };
-
-  const exemption = (file, step, expression) => (ALLOWLIST[file] ?? [])
-    .find((entry) => entry.step === step && entry.expression === expression);
-
-  const countIn = (body, expression) => body.split(expression).length - 1;
-
   // Guards the sweep itself: if the directory read ever returned nothing, or a
   // file were renamed out from under it, every per-file case below would pass
   // by iterating an empty list.
@@ -743,65 +724,33 @@ describe('no workflow in this repo interpolates a consumer string into program t
     assert.deepEqual(FILES, ['cascade.yml', 'ci.yml', 'npm-publish.yml', 'security-audit.yml', 'self-ci.yml']);
   });
 
+  // The sweep itself now lives in `test/helpers/interpolation-sweep.js` as a
+  // function of `(file, text)`. It moved there so it could be run against
+  // deliberately broken workflow text: five mutations used to leave it green at
+  // 161/0, and `test/sweep-bypass-test.js` runs every one of them through the
+  // same functions called here (abofs/stonyx-workflows#37). A check whose only
+  // value is that it can go red has to be shown going red.
   for (const file of FILES) {
     test(`no run: body in ${file} interpolates anything but its allowlisted expressions`, () => {
-      const text = readWorkflow(file);
-      for (const step of parseSteps(text)) {
-        let body;
-        try {
-          body = stepRunBody(text, step.name);
-        } catch {
-          // A `uses:` step. Its `with:` values are action inputs rather than
-          // shell or JS source; the `script:` sweep below covers the ones that
-          // do carry program text.
-          continue;
-        }
-        for (const expression of new Set(body.match(/\$\{\{[^}]*\}\}/g) ?? [])) {
-          const entry = exemption(file, step.name, expression);
-          assert.ok(
-            entry,
-            `${file} step ${JSON.stringify(step.name)} interpolates ${expression} into shell source`,
-          );
-          assert.equal(
-            countIn(body, expression),
-            entry.occurrences,
-            `${file} step ${JSON.stringify(step.name)} interpolates ${expression} `
-            + `${countIn(body, expression)} time(s); the allowlist exempts ${entry.occurrences}`,
-          );
-        }
-      }
+      assert.deepEqual(runSweepProblems(file, readWorkflow(file)), []);
     });
 
     test(`no github-script body in ${file} interpolates anything at all`, () => {
-      const text = readWorkflow(file);
-      for (const step of parseSteps(text)) {
-        let script;
-        try {
-          script = stepScriptBody(text, step.name);
-        } catch {
-          continue; // no `script:` block on this step
-        }
-        assert.equal(
-          script.match(/\$\{\{[^}]*\}\}/g),
-          null,
-          `${file} step ${JSON.stringify(step.name)} interpolates an expression into JS source`,
-        );
-      }
+      assert.deepEqual(scriptSweepProblems(file, readWorkflow(file)), []);
+    });
+
+    // A step name is not unique in GitHub Actions -- only `id` is -- so a
+    // duplicated name is how a step hides from every name-keyed assertion in
+    // this suite. Reported per file rather than globally so the message names
+    // the file that has to change.
+    test(`no two steps in ${file} share a name`, () => {
+      assert.deepEqual(duplicateNameProblems(file, readWorkflow(file)), []);
     });
   }
 
   test('no allowlist entry is dead -- a fixed sink must lose its exemption', () => {
-    for (const [file, entries] of Object.entries(ALLOWLIST)) {
-      const text = readWorkflow(file);
-      for (const { step, expression, occurrences, why } of entries) {
-        const body = stepRunBody(text, step);
-        assert.equal(
-          countIn(body, expression),
-          occurrences,
-          `${file} step ${JSON.stringify(step)} no longer interpolates ${expression} ${occurrences} time(s); `
-          + `delete or correct its allowlist entry. Recorded reason was: ${why}`,
-        );
-      }
+    for (const file of Object.keys(ALLOWLIST)) {
+      assert.deepEqual(deadAllowlistProblems(file, readWorkflow(file)), []);
     }
   });
 });
@@ -951,7 +900,9 @@ describe('every `node -e` program stays a single-quoted shell string (#32, S1a)'
     for (const step of parseSteps(text)) {
       let body;
       try {
-        body = stepRunBody(text, step.name);
+        // Positional, never re-resolved by name: a duplicated step name used to
+        // hand this the FIRST step's body twice (abofs/stonyx-workflows#37).
+        body = runBodyOf(step);
       } catch {
         continue; // a `uses:` step carries no shell source
       }
