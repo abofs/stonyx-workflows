@@ -1,38 +1,46 @@
-// The repo-wide `${{ }}` sweep, extracted from `test/injection-test.js`.
+// The `${{ }}` DIAGNOSTIC sweep. NOT the repo-wide guarantee -- that lives in
+// `test/helpers/raw-expression-scan.js` and owes nothing to any YAML reader.
 //
-// It lives in its own module for one reason: the sweep is a check whose entire
-// value is that it can go red, and PR #33 shipped it in a shape where five
-// separate mutations left it green at 161 pass / 0 fail
-// (abofs/stonyx-workflows#37). Proving it can fail means running it against
-// DELIBERATELY BROKEN workflow text, which is only possible if the sweep is a
-// function of `(file, text)` rather than a loop welded to the files on disk.
+// WHAT MOVED, AND WHY IT MATTERS WHEN READING THIS FILE.
 //
-// So every function here returns an array of problem strings.
-// `test/injection-test.js` asserts that array is empty for the real workflows;
-// `test/sweep-bypass-test.js` asserts it is non-empty for each of the five
-// mutations that used to pass. The same code produces both.
+// This sweep is founded on `workflow-yaml.js`: it asks the reader for the steps
+// of a file and for each step's `run:`/`script:` body, and reports the
+// expressions it finds inside them. Three review rounds on
+// abofs/stonyx-workflows#37 found nine ways to make that reader disagree with
+// the file -- an unnamed step, a `run:` key nested in an earlier block scalar,
+// a quoted `"run":` key, four multi-line flow/plain scalar shapes, a
+// single-line flow mapping under `with:`, a `.yaml` file extension, an explicit
+// `? run` key, an escaped key, a next-line alias -- each one found after the
+// previous fix shipped, each one leaving the suite green. Layered population
+// pins were the answer three times and a tenth shape was found each time.
 //
-// The unifying principle, stated once: every one of the bypasses was the
-// extractor disagreeing with the file and nothing noticing. PR #33's correction
-// C4 solved that for `node -e` by pinning the population from OUTSIDE the
-// extractor, off the raw file text. This generalises it, and it has to be
-// applied at EVERY level the extractor can disagree at, because a pin is blind
-// to the level above the one it counts:
+// So the guarantee moved off this file entirely. Every `${{ }}` occurrence in
+// every file under `.github/workflows/`, found by a raw byte scan with no YAML
+// understanding, must now be pinned to its exact source line in
+// `test/helpers/expression-allowlist.js`. That closes the whole family by
+// construction: none of the shapes above can hide three bytes from a byte scan.
 //
-//   1. steps within a file    -- `stepPopulationProblems`, raw `- ` list items
-//   2. run/script bodies      -- `stepPopulationProblems`, raw `run:`/`script:`
-//                                key lines
-//   3. expressions in a body  -- `runSweepProblems`/`scriptSweepProblems`, raw
-//                                `${{` openers
+// WHAT THIS FILE IS FOR NOW. Naming things. A raw scan can say "cascade.yml
+// line 33 carries `${{ inputs.package-name }}` and nothing approves it"; it
+// cannot say "in step `Dispatch to downstream dependents`, in the
+// `actions/github-script` body that holds the org-level CASCADE_PAT". That
+// second sentence is what makes a red actionable, and it needs a reader.
 //
-// Level 3 alone was the first attempt at this repair, and it was not enough:
-// it counts openers off the body THE EXTRACTOR RETURNED, so an extractor that
-// never returns a body agrees with its own omission and the pin stays silent.
-// An unnamed step (`- run: echo "${{ inputs.package-name }}"`) was measured
-// green at 185 pass / 0 fail against the real `cascade.yml` on exactly that
-// gap, while the identical step carrying `node -e` RED -- because that sweep's
-// population is counted off the raw file. Same file, same step, opposite
-// results, one level of difference (abofs/stonyx-workflows#37, bypass 6).
+// THE RELATIONSHIP, STATED SO NOBODY HAS TO INFER IT: if this file is wrong,
+// a message gets less helpful. NOTHING GOES UNSWEPT. Every check below may be
+// read as a diagnostic; none of them is the last line of defence, and none of
+// them should be argued about as though it were.
+//
+// The one pin here that is NOT purely diagnostic is the `run:`/`script:`
+// key-line count in `stepPopulationProblems`. It does not guard the `${{ }}`
+// guarantee -- the raw scan does that -- it guards the EXECUTED `run:`-body
+// tests from vacuity: a body the reader never returns is a body those tests
+// silently stop executing. It is kept for that, and labelled as that.
+//
+// Everything here is a function of `(file, text)` rather than a loop welded to
+// the files on disk, so `test/sweep-bypass-test.js` can run it against
+// deliberately broken workflow text. A check whose value is that it can go red
+// has to be shown going red.
 
 import {
   MissingStepKeyError,
@@ -44,7 +52,6 @@ import {
   runBodyOf,
   scalarKeyLineCount,
   scriptBodyOf,
-  stepListItemCount,
 } from './workflow-yaml.js';
 
 // Named exceptions only. Each entry pins a step, the EXACT SOURCE LINE it
@@ -119,40 +126,79 @@ function readBody(step, key, read, problems, file) {
   }
 }
 
+// `run:`/`script:` key lines in the raw text that are NOT step bodies.
+//
+// `scalarKeyLineCount` is deliberately over-broad -- it counts a `run:` line
+// wherever one appears -- so it also counts a `defaults:` mapping:
+//
+//     defaults:
+//       run:
+//         shell: bash
+//
+// which is a job-level default, not a body. That shape is not hypothetical, it
+// is the exact remediation `test/injection-test.js` recommends for the
+// `bash -e` vs `bash -eo pipefail` gap, and a contributor who took the suite's
+// own advice met a red whose two suggested remedies both said "extend the
+// reader" and neither applied (#37, Phase 3 N7). With no escape hatch, the
+// cheapest way out was to narrow the pin -- teaching a guard to look away,
+// arriving by the front door.
+//
+// So there is a third remedy, and it is a recorded decision rather than a
+// silent narrowing: declare the line here with a reason. Each declaration is
+// re-derived from the file every run, so one that matches nothing reds as dead
+// exactly like an allowlist entry does. Empty today; the calibration in
+// `test/sweep-bypass-test.js` exercises it in both directions.
+export const NON_BODY_KEY_LINES = {};
+
 /**
- * Problems with the POPULATION the sweep is about to inspect, counted off the
- * raw file text by code that shares nothing with the extractor.
+ * Problems with the `run:`/`script:` BODY POPULATION the diagnostics below
+ * quantify over.
  *
- * Every assertion the sweeps make is universally quantified over what the
- * extractor returned, so all of them pass trivially against a population of
- * zero. These two pins are what make "the sweep is green" mean "the sweep
- * looked at everything that is there" -- see the module header for why the
- * per-body `${{` pin cannot do that job.
+ * NOT the `${{ }}` guarantee. That is `rawSweepProblems`, which counts nothing
+ * off this reader. This pin has one job: keep the EXECUTED `run:`-body tests
+ * honest. Those tests extract a real step body and run it under bash, so a body
+ * the reader never returns is a test that silently stops executing the thing it
+ * names -- and every per-step check here is universally quantified, so it
+ * passes trivially over a body that is not there.
  *
- * The step-item half is a REGRESSION backstop and is unreachable by any single
- * committed mutation today, deliberately: `parseSteps` now throws on a list
- * item it cannot resolve rather than skipping one, so there is no text where it
- * silently under-counts. It becomes reachable the moment that changes, which is
- * the thing being guarded. Measured: narrow `parseSteps` back to `- name:` AND
- * append an unnamed step to `cascade.yml`, and this is the branch that fires
- * (`every step and every run:/script: body in cascade.yml is inside the sweep`
- * reds). The key-line half reds today, on the 6b shape.
+ * The count comes off the raw text and the reader has to match it. Over-broad
+ * on purpose: it counts a `run:` line inside a block scalar too, so a workflow
+ * embedding a YAML snippet reds rather than the pin quietly learning to skip
+ * one. `NON_BODY_KEY_LINES` above is where a line that is genuinely not a body
+ * gets recorded.
+ *
+ * The step-item half of this pin is GONE. Phase 3 measured it as effectively
+ * dead: replacing `stepListItemCount` with a call to the very extractor it
+ * audited left 206/0 green, deleting it outright left 206/0 green, and its
+ * independence was false by construction -- the literal `/^\s*steps:\s*$/` sat
+ * in both the pin and the reader, so a shape defeating one defeated the other
+ * identically. Under the raw scan it is also redundant: a step the reader
+ * cannot see can no longer hide an expression, because the guarantee never asks
+ * the reader what the steps are. An unfalsifiable guard is the defect #37 exists
+ * to close, so it was deleted rather than commented.
  */
-export function stepPopulationProblems(file, text) {
+export function stepPopulationProblems(file, text, nonBody = NON_BODY_KEY_LINES) {
   const problems = [];
   const steps = parseSteps(text);
-
-  const items = stepListItemCount(text);
-  if (items !== steps.length) {
-    problems.push(
-      `${file} has ${items} step list item(s) in its steps: block(s) but the reader resolved ${steps.length} `
-      + 'step(s). A step the reader cannot see is not swept at all, so every per-step check below passes over '
-      + 'it silently -- extend parseSteps rather than deleting this case.',
-    );
-  }
+  const lines = text.split('\n');
 
   for (const [key, read] of [['run', runBodyOf], ['script', scriptBodyOf]]) {
-    const keyLines = scalarKeyLineCount(text, key);
+    let declared = 0;
+
+    for (const entry of (nonBody[file] ?? []).filter((e) => e.key === key)) {
+      const actual = lines.filter((l) => l.trim() === entry.line).length;
+      if (actual !== entry.count) {
+        problems.push(
+          `${file} declares ${entry.count} non-body \`${key}:\` key line(s) reading ${JSON.stringify(entry.line)} `
+          + `but the raw text holds ${actual}. A declaration that matches nothing is a standing exemption nobody `
+          + `re-derives -- delete or re-pin it. Recorded reason was: ${entry.why}`,
+        );
+        continue;
+      }
+      declared += actual;
+    }
+
+    const keyLines = scalarKeyLineCount(text, key) - declared;
     // Counts successful reads only, on purpose: an unreadable body is a
     // population gap here AND is reported by name in the sweeps below.
     const bodies = steps.filter((step) => {
@@ -162,8 +208,10 @@ export function stepPopulationProblems(file, text) {
     if (keyLines !== bodies) {
       problems.push(
         `${file} holds ${keyLines} \`${key}:\` key line(s) in its raw text but the sweep read ${bodies} `
-        + `${key}: body(ies). A ${key}: body outside the sweep is program text nobody is checking -- extend the `
-        + 'reader, or move the snippet that is not really a key, rather than deleting this case.',
+        + `${key}: body(ies). A ${key}: body outside the sweep is a body the executed tests are not really `
+        + `running -- extend the reader, move the snippet that is not really a key, or if the line is not a step `
+        + `body at all (a \`defaults:\` mapping is the usual case) declare it in NON_BODY_KEY_LINES with a reason. `
+        + 'Do not delete this case.',
       );
     }
   }

@@ -1,13 +1,39 @@
 // Minimal, purpose-built reader for the workflow YAML in this repo.
 //
-// This repo has no dependencies by design (abofs/stonyx-workflows#22), so there
-// is no YAML library available. These helpers do not implement YAML; they
-// extract the two specific shapes the tests assert on -- a step's `run:` block
-// and a workflow's top-level trigger keys -- and throw loudly rather than
-// returning something plausible when the shape is not what they expect.
+// DIAGNOSTICS ONLY. NO GUARANTEE IN THIS SUITE DEPENDS ON THIS FILE.
 //
-// A silent wrong answer here would make the anti-drift assertions vacuous, so
-// every lookup failure is an exception, never a default.
+// It used to carry one. Three review rounds on abofs/stonyx-workflows#37 found
+// nine ways to hide a `${{ }}` expression from a sweep founded on this reader
+// -- an unnamed step, a `run:` key nested in an earlier block scalar, a quoted
+// `"run":` key, four multi-line flow/plain scalar shapes, a single-line flow
+// mapping under `with:`, a `.yaml` file extension, an explicit `? run` key, an
+// escaped `"ru\x6e":` key, a next-line alias -- each one found AFTER the
+// previous fix shipped. Every one was the same failure: this reader disagreed
+// with the file and the guard agreed with this reader.
+//
+// So the repo-wide `${{ }}` guarantee moved to `test/helpers/raw-expression-scan.js`,
+// which understands no YAML at all and therefore has nothing to disagree with a
+// file about. What is left here has two jobs, both of which are real:
+//
+//   1. DIAGNOSIS. Naming which step and which sink an expression sits in is
+//      what makes a red actionable, and that needs a reader.
+//   2. The EXECUTED `run:`-body tests, which genuinely need real step bodies to
+//      drop into a throwaway workspace and run.
+//
+// The consequence is worth stating in the form that decides review priority: if
+// this reader is wrong, a message gets less helpful and a `run:`-body test may
+// stop executing what it thinks it executes. NOTHING GOES UNSWEPT. A bug here
+// is a diagnostics bug, not a hole in the guarantee.
+//
+// PR #38's hardening of this reader stays, and the discipline it was written
+// under stays with it: these helpers do not implement YAML, they extract the
+// specific shapes the tests assert on, and they throw loudly rather than
+// returning something plausible when the shape is not what they expect. A
+// silent wrong answer would make the executed assertions vacuous, so every
+// lookup failure is an exception, never a default.
+//
+// This repo has no dependencies by design (abofs/stonyx-workflows#22), so there
+// is no YAML library available to any of it.
 
 import { readFileSync } from 'node:fs';
 
@@ -118,38 +144,6 @@ export function parseSteps(text) {
 }
 
 /**
- * How many `- ` list items the `steps:` blocks of `text` contain, counted
- * straight off the raw text.
- *
- * The AUTHORITATIVE population for `parseSteps`, and it deliberately shares no
- * code with it. This is the pin PR #33's correction C4 gave the `node -e` sweep
- * -- `candidateNodeEvalInvocations` counts candidates off the raw file so an
- * extractor that under-counts cannot agree with its own omission -- applied at
- * the level that actually failed: STEPS WITHIN A FILE. The `${{ }}` accounting
- * pin counts openers off the body the extractor returned, so it is silent when
- * the extractor never returns the body at all (abofs/stonyx-workflows#37,
- * bypass 6a).
- */
-export function stepListItemCount(text) {
-  const lines = text.split('\n');
-  let count = 0;
-  let stepsIndent = null;
-  let listIndent = null;
-
-  for (const line of lines) {
-    if (line.trim() === '') continue;
-    const indent = indentOf(line);
-    if (stepsIndent !== null && indent <= stepsIndent) { stepsIndent = null; listIndent = null; }
-    if (/^\s*steps:\s*$/.test(line)) { stepsIndent = indent; listIndent = null; continue; }
-    if (stepsIndent === null || !/^\s*-(\s|$)/.test(line)) continue;
-    if (listIndent === null) listIndent = indent;
-    if (indent === listIndent) count += 1;
-  }
-
-  return count;
-}
-
-/**
  * How many lines of `text` open a scalar `key:` mapping entry, counted straight
  * off the raw text -- the same authoritative-population trick one level down.
  *
@@ -213,8 +207,10 @@ export function stepNamed(text, stepName) {
  * (abofs/stonyx-workflows#37, Phase 1 W2).
  *
  * Unnamed steps are not counted: `name:` is optional, several steps may omit
- * it, and an absent name hides nothing from a name-keyed check -- it is the
- * step POPULATION pin that covers those (`stepListItemCount`).
+ * it, and an absent name hides nothing from a name-keyed check. Nor does a
+ * duplicated one hide an expression any more -- the repo-wide guarantee does
+ * not read step names, or steps. This reports the ambiguity that the ~18
+ * name-taking reads in this suite would otherwise resolve silently.
  */
 export function duplicateStepNames(text) {
   const seen = new Map();
@@ -425,20 +421,39 @@ export function stepEnv(text, stepName) {
 export function envOf(step) {
   const stepName = step.name;
   const lines = step.body.split('\n');
-  // Structural, for the same reason `stepScalar` is: an `env:` line inside an
-  // earlier block scalar is payload text, not this step's env mapping.
-  const envIdx = structuralLineIdxs(lines).find((i) => /^\s*env:\s*$/.test(lines[i])) ?? -1;
+  // Structural at BOTH levels: an `env:` line inside an earlier block scalar is
+  // payload text rather than this step's env mapping, and so is a `KEY: value`
+  // line inside one of this mapping's OWN block-scalar values.
+  //
+  // The second half was missing while this comment claimed both. The value scan
+  // was a raw walk by indent, so a multi-line env value -- ordinary GitHub
+  // Actions -- had its payload read as further mapping entries. Measured: an
+  // `env:` holding `PACKAGE_NAME: <expr>` followed by `NOTE: |` whose payload
+  // line reads `PACKAGE_NAME: overwritten` returned
+  // `{PACKAGE_NAME: 'overwritten', NOTE: '|'}` -- payload SILENTLY SHADOWING a
+  // real key, which is precisely the "something plausible" this file's header
+  // forbids returning (#37, Phase 1 verification WARNING).
+  //
+  // A block-scalar value is now resolved to its body rather than reported as
+  // the header string, for the same reason: `NOTE: '|'` is a plausible wrong
+  // answer, and there is no reason to hand one back when `blockScalarBody` is
+  // already sitting in this file.
+  const structural = structuralLineIdxs(lines);
+  const envIdx = structural.find((i) => /^\s*env:\s*$/.test(lines[i])) ?? -1;
   if (envIdx === -1) return {};
 
   const envIndent = indentOf(lines[envIdx]);
   const env = {};
-  for (let i = envIdx + 1; i < lines.length; i++) {
-    if (lines[i].trim() === '') continue;
+  for (const i of structural) {
+    if (i <= envIdx) continue;
     if (indentOf(lines[i]) <= envIndent) break;
     if (lines[i].trim().startsWith('#')) continue;
     const match = lines[i].match(/^\s*([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
     if (!match) throw new Error(`unrecognised env: entry in step ${JSON.stringify(stepName)}: ${lines[i]}`);
-    env[match[1]] = match[2].trim();
+    const value = match[2].trim();
+    env[match[1]] = BLOCK_SCALAR_HEADER.test(value)
+      ? blockScalarBody(lines, i, `step ${JSON.stringify(stepName)} env: value ${match[1]}`)
+      : value;
   }
   return env;
 }

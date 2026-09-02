@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 
+import { EXPRESSION_ALLOWLIST } from './helpers/expression-allowlist.js';
+import { rawSweepProblems } from './helpers/raw-expression-scan.js';
 import {
   ALLOWLIST,
+  NON_BODY_KEY_LINES,
   deadAllowlistProblems,
   duplicateNameProblems,
   runSweepProblems,
@@ -14,6 +17,8 @@ import {
 } from './helpers/interpolation-sweep.js';
 import {
   MissingStepKeyError,
+  duplicateStepNames,
+  envOf,
   expressionOpenerCount,
   expressionsIn,
   parseSteps,
@@ -21,7 +26,6 @@ import {
   runBodyOf,
   scalarKeyLineCount,
   scriptBodyOf,
-  stepListItemCount,
   stepNamed,
 } from './helpers/workflow-yaml.js';
 
@@ -42,7 +46,11 @@ const securityAudit = readWorkflow('security-audit.yml');
 const npmPublish = readWorkflow('npm-publish.yml');
 
 const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
-const WORKFLOW_FILES = readdirSync(WORKFLOW_DIR).filter((n) => n.endsWith('.yml')).sort();
+// No extension filter: GitHub Actions reads `.yaml` too, and filtering here is
+// what made the pin that guards this population unable to fire (#37, Phase 3
+// §4). The list is asserted below, so a non-workflow file in this directory
+// reds and gets a decision rather than a silent exemption.
+const WORKFLOW_FILES = readdirSync(WORKFLOW_DIR).sort();
 
 /**
  * Append a step to a workflow's `steps:` list.
@@ -563,11 +571,22 @@ describe('AC6 -- bypass 6: a step the reader cannot see is not swept (#37)', () 
     const unnamed = withExtraStep(securityAudit, `      - ${sink.trim()}`);
     const named = withExtraStep(securityAudit, ['      - name: Second audit', sink].join('\n'));
 
+    // The assertion pins the LINE, not merely the expression. Matching on the
+    // expression alone made this test a placebo: under K9 (`parseSteps`
+    // narrowed back to `- name:`) the appended item re-indents the merged
+    // step's keys, the step LOSES its `name:`, the file's own pre-existing
+    // allowlist entry stops matching, and what reds is `security-audit.yml`'s
+    // OWN `pnpm audit` line -- never the sink this test appends. It passed
+    // under the exact revert it exists to guard, and the PR body called it
+    // "the finding in one assertion" (#37, Phase 4 verification, CRITICAL).
+    const ECHO_LINE = /on the line "echo \\"level \$\{\{ inputs\.audit-level \}\}\\""/;
+
     for (const [shape, text] of [['unnamed', unnamed], ['named', named]]) {
       assertReports(
         runSweepProblems('security-audit.yml', text),
-        /interpolates \$\{\{ inputs\.audit-level \}\} into shell source/,
-        `the ${shape} form must red; if only one of these two reds, the sweep is keyed on the name again`,
+        ECHO_LINE,
+        `the ${shape} form must red ON THE APPENDED LINE; if only one of these two reds, or if the red names `
+        + 'a different line, the sweep is keyed on the name again',
       );
     }
   });
@@ -692,61 +711,23 @@ describe('AC6 -- bypass 6: a step the reader cannot see is not swept (#37)', () 
   });
 });
 
-describe('AC6b -- the population the sweep inspects is pinned off raw text (#37)', () => {
-  // Every assertion the sweeps make is universally quantified over what the
-  // reader returned, so all of them pass trivially over a step the reader never
-  // saw. These pins are what make "the sweep is green" mean "the sweep looked
-  // at everything that is there".
-
-  /** The reader shape that failed: a step is a list item whose first key is `name:`. */
-  const legacyNamedStepCount = (text) => {
-    const lines = text.split('\n');
-    const stepsIdx = lines.findIndex((l) => /^\s*steps:\s*$/.test(l));
-    let listIndent = null;
-    let count = 0;
-    for (let i = stepsIdx + 1; i < lines.length; i++) {
-      const match = lines[i].match(/^(\s*)- name: (.*)$/);
-      if (!match || (listIndent !== null && match[1].length !== listIndent)) continue;
-      listIndent = match[1].length;
-      count += 1;
-    }
-    return count;
-  };
-
-  test('the step-item and key-line counts agree with the reader on every real workflow', () => {
-    // Calibration: if these disagreed on the unmodified files the pins would be
-    // permanently red and would be deleted rather than believed.
-    const counted = {};
-    for (const file of WORKFLOW_FILES) {
-      const text = readWorkflow(file);
-      counted[file] = { items: stepListItemCount(text), steps: parseSteps(text).length };
-      assert.deepEqual(stepPopulationProblems(file, text), [], `${file} must have no population gap unmodified`);
-    }
-
-    assert.deepEqual(counted, {
-      'cascade.yml': { items: 2, steps: 2 },
-      'ci.yml': { items: 5, steps: 5 },
-      'npm-publish.yml': { items: 26, steps: 26 },
-      'security-audit.yml': { items: 5, steps: 5 },
-      'self-ci.yml': { items: 5, steps: 5 },
-    });
-  });
-
-  test('the step-item count is taken off raw text, so a name-keyed reader disagrees with it', () => {
-    // This is the pin's whole purpose stated as a measurement. The count comes
-    // from the file; the reader has to have matched it. Narrow the reader back
-    // to `- name:` -- the shape that shipped -- and the two numbers separate.
-    const mutated = withExtraStep(cascade, '      - run: echo "${{ inputs.package-name }}"');
-
-    assert.equal(stepListItemCount(mutated), 3, 'the raw text holds three step list items');
-    assert.equal(parseSteps(mutated).length, 3, 'the repaired reader sees all three');
-    assert.equal(legacyNamedStepCount(mutated), 2, 'the reader shape that shipped saw only two');
-    assert.notEqual(
-      stepListItemCount(mutated),
-      legacyNamedStepCount(mutated),
-      'if these now agree, this pin has stopped being able to catch the reader narrowing again',
-    );
-  });
+describe('AC6b -- the body population the DIAGNOSTICS quantify over is pinned off raw text (#37)', () => {
+  // Scope, stated because it changed. This is no longer any part of the
+  // `${{ }}` guarantee -- that is a raw byte scan over the whole directory
+  // (`test/raw-sweep-test.js`) and it counts nothing off this reader. What is
+  // left here keeps the EXECUTED `run:`-body tests honest: they extract a real
+  // step body and run it under bash, so a body the reader never returns is a
+  // test that silently stops executing the thing it names.
+  //
+  // The STEP-ITEM half of this pin is deleted, not demoted. Phase 3 measured it
+  // effectively dead -- re-deriving `stepListItemCount` from the very extractor
+  // it audited left 206/0 green, deleting it outright left 206/0 green, and the
+  // only committed test that spoke to its defining property compared it against
+  // a reader RE-IMPLEMENTED INSIDE THE TEST FILE rather than against the real
+  // `parseSteps`, so the re-derivation passed it. Its snapshot companion
+  // hard-coded a per-file count and reds on a benign added step: a churn
+  // tripwire, not a security signal (Phase 4 verification). Under the raw scan
+  // it is redundant as well as unfalsifiable, so it is gone.
 
   test('the run:/script: key-line pin reds when a body is outside the sweep', () => {
     // A live red rather than a hypothetical one: the 6b shape leaves two `run:`
@@ -764,8 +745,192 @@ describe('AC6b -- the population the sweep inspects is pinned off raw text (#37)
     assertReports(
       stepPopulationProblems('cascade.yml', M6b),
       /holds 2 `run:` key line\(s\) in its raw text but the sweep read 1 run: body\(ies\)/,
-      'a run: key line the sweep never read is program text nobody is checking',
+      'a run: key line the sweep never read is a body the executed tests are not really running',
     );
+  });
+
+  test('the key-line pin also reds when a REAL body escapes the reader, not only on payload over-count', () => {
+    // The honest calibration the pin was missing. In `M6b` above the real body
+    // IS read correctly and the pin reds purely because `scalarKeyLineCount`
+    // over-counts a `run:` line inside a block scalar -- its documented
+    // false-positive path, and K12's only red. That never exercised the case
+    // the pin exists for (Phase 4 verification, WARNING).
+    //
+    // Here the real body genuinely escapes: `structuralLineIdxs` opens a block
+    // scalar only on a key its regex recognises, and `"my snippet"` -- a quoted
+    // key containing a space -- is not one, so the payload is treated as
+    // structure and `run: pnpm test` wins over the real body.
+    const W3 = withExtraStep(cascade, [
+      '      - name: Emit the consumer snippet',
+      '        env:',
+      '          "my snippet": |',
+      '            run: pnpm test',
+      '        run: |',
+      '          echo "cascading ${{ inputs.package-name }}"',
+    ].join('\n'));
+
+    assert.equal(runBodyOf(parseSteps(W3).at(-1)), 'pnpm test', 'the reader takes the payload line, not the body');
+    assertReports(
+      stepPopulationProblems('cascade.yml', W3),
+      /key line\(s\) in its raw text but the sweep read/,
+      'a body the reader never returned must red here, or the executed tests are running something else',
+    );
+
+    // And the guarantee does not care either way: the sink is found by the raw
+    // scan regardless of what this reader believes about it.
+    assertReports(
+      rawSweepProblems('cascade.yml', W3, EXPRESSION_ALLOWLIST),
+      /No allowlist entry pins that expression to that line/,
+      'the raw scan reads bytes, so a reader that takes payload for a key costs it nothing',
+    );
+  });
+
+  test('a non-body `run:` key line is declarable, and a declaration that matches nothing reds', () => {
+    // `defaults: run: shell: bash` is the EXACT remediation this suite's own
+    // `injection-test.js` recommends for the `bash -e` / `pipefail` gap, and
+    // `scalarKeyLineCount` counts its `run:` line. With no escape hatch the
+    // first contributor to take that advice met a red offering two remedies,
+    // neither of which applied, and the cheapest way out was to narrow the pin
+    // (#37, Phase 3 N7). So it is a recorded decision instead.
+    const ci = readWorkflow('ci.yml');
+    const withDefaults = ci.replace(
+      '    runs-on: ubuntu-latest\n',
+      '    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: bash\n',
+    );
+    assert.notEqual(withDefaults, ci, 'the defaults: mutation must actually have applied');
+    assert.equal(scalarKeyLineCount(withDefaults, 'run'), 3, 'two real bodies plus the defaults mapping');
+
+    assertReports(
+      stepPopulationProblems('ci.yml', withDefaults),
+      /holds 3 `run:` key line\(s\) in its raw text but the sweep read 2 run: body\(ies\)/,
+      'undeclared, it must red -- silence here would mean the pin had learned to skip a run: line',
+    );
+
+    const declared = {
+      'ci.yml': [{
+        key: 'run',
+        line: 'run:',
+        count: 1,
+        why: 'A job-level `defaults: run:` mapping, not a step body. It is what closes the bash -e / pipefail '
+          + 'gap injection-test.js documents.',
+      }],
+    };
+    assert.deepEqual(
+      stepPopulationProblems('ci.yml', withDefaults, declared),
+      [],
+      'a declared non-body key line must silence the pin without narrowing it',
+    );
+
+    assert.deepEqual(
+      stepPopulationProblems('ci.yml', ci, declared),
+      [
+        'ci.yml declares 1 non-body `run:` key line(s) reading "run:" but the raw text holds 0. A declaration '
+        + 'that matches nothing is a standing exemption nobody re-derives -- delete or re-pin it. Recorded '
+        + 'reason was: ' + declared['ci.yml'][0].why,
+      ],
+      'a declaration is re-derived from the file every run, exactly like an allowlist entry',
+    );
+
+    assert.deepEqual(NON_BODY_KEY_LINES, {}, 'nothing is declared against the workflows that ship today');
+  });
+
+  test('the `>` half of the block-scalar test is load-bearing, not decoration', () => {
+    // Bypass 2's exact shape recurring in the newest code: `structuralLineIdxs`
+    // enumerates `|` and `>` , and narrowing it to `|` alone left 206/0 --
+    // untested, in the fix for a bug that WAS an enumerated header grammar
+    // forgetting `>` (Phase 4 verification, WARNING P6).
+    const folded = withExtraStep(cascade, [
+      '      - name: Emit the consumer snippet',
+      '        env:',
+      '          SNIPPET: >',
+      '            run: pnpm test',
+      '        run: |',
+      '          echo "cascading ${{ inputs.package-name }}"',
+    ].join('\n'));
+
+    const body = runBodyOf(parseSteps(folded).at(-1));
+    assert.match(body, /echo "cascading/, 'the folded env: payload must not win over the real run: body');
+    assert.doesNotMatch(body, /pnpm test/, 'narrowing the block-scalar test to `|` returns the payload line here');
+  });
+
+  test('an empty block-scalar body is reported, never mistaken for an absent key', () => {
+    // `readBody` skips only on MissingStepKeyError. Typing `blockScalarBody`'s
+    // "is empty" error as MISSING_STEP_KEY turned that body into a silent skip
+    // at 206/0 -- the same skip-vs-report branch bypass 6c exists for (Phase 4
+    // verification, NIT P8).
+    const empty = withExtraStep(cascade, [
+      '      - name: Empty run body',
+      '        run: |',
+    ].join('\n'));
+
+    assertReports(
+      runSweepProblems('cascade.yml', empty),
+      /the extractor could not read its run: body -- .*is empty/,
+      'an unreadable body must be reported by name; only a genuinely absent key is a skip',
+    );
+  });
+
+  test('duplicate step names are scoped per job, and the scoping is exercised', () => {
+    // Keying uniqueness on the bare name reds a workflow nobody wrote wrong the
+    // day a file grows a second job -- and left 206/0, because every workflow in
+    // this repo has exactly one `steps:` block so the scenario never occurred
+    // (Phase 4 verification, WARNING P4).
+    const twoJobs = [
+      'jobs:',
+      '  test:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - name: Checkout repository',
+      '        uses: actions/checkout@v4',
+      '      - name: Test',
+      '        run: pnpm test',
+      '  publish:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - name: Checkout repository',
+      '        uses: actions/checkout@v4',
+      '      - name: Publish',
+      '        run: pnpm publish',
+      '',
+    ].join('\n');
+
+    assert.equal(parseSteps(twoJobs).length, 4, 'both jobs must be read, or this proves nothing');
+    assert.deepEqual(duplicateStepNames(twoJobs), [], 'two jobs sharing `Checkout repository` is idiomatic');
+    assert.deepEqual(duplicateNameProblems('two-jobs.yml', twoJobs), []);
+
+    const sameJob = twoJobs.replace('      - name: Test\n', '      - name: Checkout repository\n');
+    assert.notEqual(sameJob, twoJobs, 'the same-job mutation must actually have applied');
+    assertReports(
+      duplicateNameProblems('two-jobs.yml', sameJob),
+      /job "test" has 2 steps named "Checkout repository"/,
+      'within one job a duplicate is still how a step hides from every name-keyed read in this suite',
+    );
+  });
+
+  test('envOf scopes its VALUE scan structurally, not only its key lookup', () => {
+    // The comment claimed both; only the key lookup was structural. A
+    // block-scalar env value whose payload is mapping-shaped had that payload
+    // read as further entries, SILENTLY SHADOWING a real key -- the
+    // "something plausible" this module's header forbids returning (#37, Phase
+    // 1 verification, WARNING).
+    const shadowing = [
+      '  name: Dispatch',
+      '  env:',
+      '    PACKAGE_NAME: ${{ inputs.package-name }}',
+      '    NOTE: |',
+      '      PACKAGE_NAME: overwritten',
+      '  run: echo hi',
+    ].join('\n');
+
+    const env = envOf({ name: 'Dispatch', body: shadowing });
+    assert.equal(env.PACKAGE_NAME, '${{ inputs.package-name }}', 'block-scalar payload must not shadow a real key');
+    assert.match(env.NOTE, /PACKAGE_NAME: overwritten/, 'and the scalar value resolves to its body, not to "|"');
+
+    // The other direction: prose in a block-scalar value used to THROW, because
+    // the payload line was read as a malformed mapping entry.
+    const prose = shadowing.replace('      PACKAGE_NAME: overwritten', '      this is prose, not a mapping');
+    assert.notEqual(prose, shadowing, 'the prose mutation must actually have applied');
+    assert.equal(envOf({ name: 'Dispatch', body: prose }).PACKAGE_NAME, '${{ inputs.package-name }}');
   });
 
   test('the `${{` pin is body-scoped and the step pin is file-scoped -- the A/B that found this', () => {

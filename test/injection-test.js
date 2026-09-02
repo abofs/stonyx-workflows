@@ -18,6 +18,8 @@ import {
   stepRunBody,
   stepScriptBody,
 } from './helpers/workflow-yaml.js';
+import { EXPRESSION_ALLOWLIST } from './helpers/expression-allowlist.js';
+import { rawSweepProblems, readWorkflowFile } from './helpers/raw-expression-scan.js';
 import {
   ALLOWLIST,
   deadAllowlistProblems,
@@ -77,12 +79,18 @@ const registry = JSON.parse(readFileSync(new URL('./fixtures/oauth-registry-stat
 
 const WORKFLOWS = { 'npm-publish.yml': npmPublish, 'cascade.yml': cascade };
 
-// Every workflow file in the repo, for the two repo-wide sweeps below. Read
-// from disk rather than listed, so a file added later inherits both sweeps
-// without anyone remembering to opt it in; each sweep pins the resulting list
-// so a failed read cannot make it iterate nothing.
+// Every file in `.github/workflows/`, for the repo-wide sweeps below. Read from
+// disk rather than listed, so a file added later inherits them without anyone
+// remembering to opt it in; the list itself is pinned below so a failed read
+// cannot make the sweeps iterate nothing.
+//
+// NO EXTENSION FILTER. GitHub Actions reads `.yaml` as well as `.yml`, and this
+// line used to filter to `.yml` -- which also made the pin that guards it
+// unable to fire, because it deep-equalled the ALREADY-FILTERED list. A
+// complete `.github/workflows/evil.yaml` carrying a `workflow_call` input into
+// a shell body measured 206 pass / 0 fail (#37, Phase 3 §4).
 const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
-const WORKFLOW_FILES = readdirSync(WORKFLOW_DIR).filter((name) => name.endsWith('.yml')).sort();
+const WORKFLOW_FILES = readdirSync(WORKFLOW_DIR).sort();
 
 const ALPHA_STEP = 'Calculate next alpha version';
 const BETA_STEP = 'Calculate next beta version';
@@ -722,21 +730,56 @@ describe('AC5 -- S5: cascade.yml refuses hostile input before it dispatches (#32
   });
 });
 
-// The anti-drift sweep, and the only mechanism enforcing this suite's
-// one-sentence rule. It used to iterate `npm-publish.yml` alone -- one of the
-// five workflow files in the repo -- so adding a `${{ inputs.package-name }}`
-// shell sink to `cascade.yml`, or a second `${{ inputs.audit-level }}` sink to
-// `security-audit.yml`, left the suite fully green. The rule is about this
-// repo's workflows, not about one file of them, and a file added later must
-// inherit it without anyone remembering to opt in.
+// The anti-drift sweeps enforcing this suite's one-sentence rule.
+//
+// One of them is a guarantee and the rest are diagnostics, and which is which
+// is the whole subject of #37. The guarantee is the raw byte scan: every
+// `${{ }}` occurrence in every file in this directory, pinned to its exact
+// source line with a reason, no YAML understanding anywhere in it. The
+// per-file `run:`/`script:`/population/duplicate-name cases below are founded
+// on `test/helpers/workflow-yaml.js` and exist to NAME things -- which step,
+// which sink, which body the executed tests are really running.
+//
+// That split was earned. This block used to iterate `npm-publish.yml` alone, so
+// a `${{ inputs.package-name }}` shell sink in `cascade.yml` left the suite
+// green; widening it to every file left nine further shapes that made the
+// reader disagree with the file while the guard agreed with the reader, each
+// found after the previous fix shipped. The guarantee stopped being founded on
+// a reader rather than being given a tenth pin.
 describe('no workflow in this repo interpolates a consumer string into program text (#32)', () => {
   const FILES = WORKFLOW_FILES;
 
   // Guards the sweep itself: if the directory read ever returned nothing, or a
   // file were renamed out from under it, every per-file case below would pass
   // by iterating an empty list.
-  test('every workflow file in the repo is swept', () => {
+  //
+  // `FILES` is now the UNFILTERED directory listing, which is what lets this
+  // fire at all. Filtering to `.yml` first meant a `.yaml` workflow -- or
+  // `ci.yml` renamed to `ci.yaml`, the exact drift the old docstring claimed to
+  // guard -- was removed before the assertion saw it, and the four per-file
+  // cases for that file silently stopped existing (#37, Phase 3 §4).
+  test('every file in .github/workflows/ is swept, with no extension filter', () => {
     assert.deepEqual(FILES, ['cascade.yml', 'ci.yml', 'npm-publish.yml', 'security-audit.yml', 'self-ci.yml']);
+  });
+
+  // THE GUARANTEE. Everything else in this describe block is a diagnostic.
+  //
+  // Every `${{ }}` occurrence in every file in this directory, found by a raw
+  // byte scan that understands no YAML whatsoever, must be pinned to its exact
+  // source line in `test/helpers/expression-allowlist.js` with a stated reason.
+  // 42 occurrences, 36 entries, no reader consulted -- so no unnamed step,
+  // nested block scalar, flow mapping, quoted key, escaped key, alias or file
+  // extension can hide one. `test/raw-sweep-test.js` runs every bypass family
+  // from all ten PR #38 reviews against it; this is the live-file half, stated
+  // in the file that carries the convention it enforces.
+  //
+  // The per-file sweeps below still name WHICH STEP and WHICH SINK an
+  // expression sits in, which is what makes a red actionable. If they are
+  // wrong, a message gets less helpful; nothing goes unswept.
+  test('every ${{ }} expression in .github/workflows/ is allowlisted against its source line', () => {
+    for (const file of FILES) {
+      assert.deepEqual(rawSweepProblems(file, readWorkflowFile(file), EXPRESSION_ALLOWLIST), []);
+    }
   });
 
   // The sweep itself now lives in `test/helpers/interpolation-sweep.js` as a
