@@ -67,11 +67,24 @@ you pin governs the derivation logic as well as the workflow. No change to your
 
 | Input | Description | Default |
 |-------|-------------|---------|
-| `version-type` | Version bump type (patch/minor/major) | — |
-| `custom-version` | Explicit version string | — |
+| `version-type` | Version bump type. Must be `patch`, `minor` or `major` when it is used at all; any other value fails the job | — |
+| `custom-version` | Explicit version string. Must be a semver version or an npm version keyword (`patch`, `minor`, `major`, `prepatch`, `preminor`, `premajor`, `prerelease`, `from-git`) | — |
 | `cascade-source` | Source package that triggered cascade (non-empty enables cascade mode) | `''` |
 | `node-version` | Node.js version | `24.13.0` |
 | `pnpm-version` | pnpm version | `9` |
+
+**Validation and failure behaviour.** Every value this workflow takes from a
+consumer -- the `package.json` `name` and `version`, each `@stonyx/*`
+dependency key, and the inputs above -- is validated before it is used, and
+reaches a shell or a `github-script` only as an environment variable, never as
+program text (abofs/stonyx-workflows#32). Two consequences worth knowing about:
+
+- A `package.json` `name` that is not a legal npm package name, or a `version`
+  that is not semver, **fails the job** rather than being passed through.
+- A registry lookup that fails for any reason other than "the package is not
+  published" **fails the job**. A `404` still means "not published yet" and
+  keeps the existing first-publish behaviour, but a transient npm outage during
+  a cascade is now a red job instead of a silently skipped dependency.
 
 **Secrets:**
 
