@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 import {
   ALLOWLIST,
@@ -32,7 +32,6 @@ import {
 // paraphrases of them.
 
 const cascade = readWorkflow('cascade.yml');
-const securityAudit = readWorkflow('security-audit.yml');
 
 const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
 const WORKFLOW_FILES = readdirSync(WORKFLOW_DIR).filter((n) => n.endsWith('.yml')).sort();
@@ -254,11 +253,40 @@ describe('AC3 -- an expression containing } is matched, unmatched openers are im
 });
 
 describe('AC4 -- the allowlist entry dies with its sink (#37)', () => {
+  // These run against a FIXTURE of `security-audit.yml` at e07e185, not against
+  // the live file, and against a local copy of its allowlist entry rather than
+  // the shared `ALLOWLIST`.
+  //
+  // That is deliberate hand-off work, not indirection. #34 will fix this exact
+  // sink and delete this exact entry -- and if these cases read the live file
+  // and the live allowlist, all four of them would evaporate the day #34
+  // merges, taking the proof of the repair with them. The property being proven
+  // here is a property of the SWEEP, so it is pinned to the text the bypass was
+  // measured against. `test/injection-test.js` keeps sweeping the real files
+  // with the real allowlist, which is where drift in `security-audit.yml`
+  // itself has to show up.
+  //
+  // Same precedent as `test/fixtures/npm-publish-692d122.yml`.
+  const FIXTURE = readFileSync(new URL('./fixtures/security-audit-e07e185.yml', import.meta.url), 'utf8');
+
   const ORIGINAL_SINK = '        run: pnpm audit --audit-level ${{ inputs.audit-level }}';
-  assert.ok(securityAudit.includes(ORIGINAL_SINK), 'the #34 sink line must still be present to mutate');
+
+  // A verbatim copy of the live entry as it stands before #34.
+  const ALLOWLIST_AT_E07E185 = {
+    'security-audit.yml': [{
+      step: 'Run security audit',
+      line: 'pnpm audit --audit-level ${{ inputs.audit-level }}',
+      expression: '${{ inputs.audit-level }}',
+      occurrences: 1,
+      why: 'KNOWN OPEN SINK, tracked as abofs/stonyx-workflows#34.',
+    }],
+  };
+
+  const runProblems = (text) => runSweepProblems('security-audit.yml', text, ALLOWLIST_AT_E07E185);
+  const deadProblems = (text) => deadAllowlistProblems('security-audit.yml', text, ALLOWLIST_AT_E07E185);
 
   /** #34's likely fix shape: the input moved to step `env:`, the body reading "$AUDIT_LEVEL". */
-  const fix34 = ({ comment }) => securityAudit.replace(ORIGINAL_SINK, [
+  const fix34 = ({ comment }) => FIXTURE.replace(ORIGINAL_SINK, [
     '        env:',
     '          AUDIT_LEVEL: ${{ inputs.audit-level }}',
     '        run: |',
@@ -273,19 +301,30 @@ describe('AC4 -- the allowlist entry dies with its sink (#37)', () => {
 
   // NEW-5, from review 5087736712: same step, same expression, same occurrence
   // count, different shell position. 161 pass / 0 fail.
-  const NEW5 = securityAudit.replace(
+  const NEW5 = FIXTURE.replace(
     ORIGINAL_SINK,
     '        run: eval "pnpm audit --audit-level ${{ inputs.audit-level }}"',
   );
 
+  test('the fixture is the text these mutations were measured against, and it sweeps clean', () => {
+    assert.ok(FIXTURE.includes(ORIGINAL_SINK), 'the fixture must still carry the #34 sink line to mutate it');
+    assert.notEqual(M4, FIXTURE, 'the M4 replacement must actually have applied');
+    assert.notEqual(NEW5, FIXTURE, 'the NEW-5 replacement must actually have applied');
+
+    // Calibration: unmutated, with the entry present, nothing is reported. If
+    // this were red the three cases below would be proving nothing.
+    assert.deepEqual(runProblems(FIXTURE), []);
+    assert.deepEqual(deadProblems(FIXTURE), []);
+  });
+
   test('M4: #34 fix plus a run-body comment quoting the expression reds twice', () => {
     assertReports(
-      deadAllowlistProblems('security-audit.yml', M4),
+      deadProblems(M4),
       /no longer carries the exempted source line/,
       'the entry must be named DEAD -- the sink it recorded is gone. 161/0 green before the line pin.',
     );
     assertReports(
-      runSweepProblems('security-audit.yml', M4),
+      runProblems(M4),
       /interpolates \$\{\{ inputs\.audit-level \}\} into shell source/,
       'the expression is now on a comment line the allowlist never pinned, so it is an unexempted sink',
     );
@@ -297,12 +336,12 @@ describe('AC4 -- the allowlist entry dies with its sink (#37)', () => {
     // same run as M4 so the two are read together -- one comment is the entire
     // difference between them.
     assertReports(
-      deadAllowlistProblems('security-audit.yml', CALIBRATION),
+      deadProblems(CALIBRATION),
       /no longer carries the exempted source line/,
       'deleting the entry is what #34 must do; keeping it must stay red',
     );
     assert.deepEqual(
-      runSweepProblems('security-audit.yml', CALIBRATION),
+      runProblems(CALIBRATION),
       [],
       'without the comment there is no expression left in the run: body, so the run sweep is clean',
     );
@@ -310,14 +349,40 @@ describe('AC4 -- the allowlist entry dies with its sink (#37)', () => {
 
   test('NEW-5: relocating the expression into eval "..." reds the sweep', () => {
     assertReports(
-      runSweepProblems('security-audit.yml', NEW5),
+      runProblems(NEW5),
       /interpolates \$\{\{ inputs\.audit-level \}\} into shell source/,
       'same step, same expression, same count -- the exemption pinned none of the position. 161/0 green.',
     );
     assertReports(
-      deadAllowlistProblems('security-audit.yml', NEW5),
+      deadProblems(NEW5),
       /no longer carries the exempted source line/,
       "the entry's recorded `why` stopped describing reality and nothing noticed",
+    );
+  });
+
+  test('#34 re-arming: re-applying the original sink line to the fixed workflow reds the sweep', () => {
+    // The assertion #34 owes, proven here on the mechanism it will rely on.
+    // Deleting an allowlist entry and never consulting one look identical, so
+    // #34 must re-apply `pnpm audit --audit-level ${{ inputs.audit-level }}` to
+    // its OWN FIXED workflow, with the entry deleted, and observe the sweep go
+    // red. If it stays green the exemption survived somewhere.
+    const fixedAndDisarmed = CALIBRATION;
+    const noAllowlist = { 'security-audit.yml': [] };
+    assert.deepEqual(
+      runSweepProblems('security-audit.yml', fixedAndDisarmed, noAllowlist),
+      [],
+      'with the sink fixed and the entry deleted, the sweep is clean -- the state #34 lands in',
+    );
+
+    const reArmed = fixedAndDisarmed.replace(
+      '          pnpm audit --audit-level "$AUDIT_LEVEL"',
+      '          pnpm audit --audit-level ${{ inputs.audit-level }}',
+    );
+    assert.notEqual(reArmed, fixedAndDisarmed, 'the re-arming replacement must actually have applied');
+    assertReports(
+      runSweepProblems('security-audit.yml', reArmed, noAllowlist),
+      /interpolates \$\{\{ inputs\.audit-level \}\} into shell source/,
+      'the sweep must be positively re-armable; a sweep that stays green here is guarding nothing',
     );
   });
 
@@ -345,9 +410,9 @@ describe('AC4 -- the allowlist entry dies with its sink (#37)', () => {
   });
 
   test('the allowlist itself pins a line for every entry', () => {
-    // A structural guard on the allowlist, not on the workflows: an entry added
-    // later without a `line` would fall back to exempting the whole step, which
-    // is the shape bypass 4 and NEW-5 both exploited.
+    // A structural guard on the live allowlist: an entry added later without a
+    // `line` would fall back to exempting the whole step, which is the shape
+    // bypass 4 and NEW-5 both exploited.
     for (const [file, entries] of Object.entries(ALLOWLIST)) {
       for (const entry of entries) {
         assert.equal(typeof entry.line, 'string', `${file}: allowlist entry for ${entry.expression} pins no line`);
