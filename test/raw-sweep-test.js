@@ -38,6 +38,7 @@ import {
 
 const cascade = readWorkflowFile('cascade.yml');
 const ci = readWorkflowFile('ci.yml');
+const npmPublish = readWorkflowFile('npm-publish.yml');
 const FIXTURE = readFileSync(new URL('./fixtures/security-audit-e07e185.yml', import.meta.url), 'utf8');
 
 /** Append a step to a workflow's `steps:` list. Every workflow here sits at six spaces. */
@@ -1198,69 +1199,176 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     });
   }
 
-  test('DISCLOSED GAP: a multi-line flow scalar can still forge the chain, and this is fail-OPEN', () => {
-    // THE DOMAIN, AND WHERE IT RUNS OUT. The question the fix had to answer is
-    // "which lines can legitimately establish context", and the answer turns on
-    // one property measured against Psych / libyaml 5.3.1: can a scalar's
-    // content sit at an indentation LESS THAN OR EQUAL TO its own key line's?
-    //
-    //   literal block `|`  NO   folded block `>`  NO   plain multi-line  NO
-    //   double-quoted      YES  single-quoted     YES  flow map / seq    YES
-    //
-    // The three NO styles are closed by the chain and by the `(scalar)` link,
-    // and the four payloads above are all of them. For the YES styles a
-    // continuation may sit at EXACTLY the indentation a legitimate key would
-    // occupy, so a payload can reproduce a legitimate ladder link for link, and
-    // no function of indentation and colons can tell the difference -- at the
-    // byte level the forged lines ARE what a real key looks like. Closing it
-    // needs a parser; the guarantee does not parse.
-    //
-    // The payload below is valid YAML (Psych: `run` resolves to
-    // `true with: node-version: ${{ inputs.node-version }} `, a shell string
-    // carrying a live expression) and the guarantee returns `[]`.
-    //
-    // THIS CASE ASSERTS THE GAP, so that it is visible here and not only in
-    // README.md's Honest gaps. If it ever starts redding, the gap has closed
-    // and the disclosure has to be rewritten -- deliberately, not silently.
-    const defanged = ci.replace(
-      '          node-version: ${{ inputs.node-version }}',
-      "          node-version: '24.13.0'",
-    );
-    const forged = appendStep(defanged, step(
-      '      - name: Forged context dedent',
+  // THE DEDENTED FORGERY, and why the chain alone could not see it.
+  //
+  // Every forgery above writes its `with:` line INDENTED under the opener, so
+  // the opener's frame is still on the stack when the payload line is read and
+  // the chain lengthens -- `... > run (scalar) > with` -- which is what makes
+  // the entry stop matching. Round 5 measured the one spelling that does not
+  // do that: dedent the forged `with:` to the enclosing key's OWN content
+  // indent and its frame pops immediately, so the derived chain comes out
+  // BYTE-IDENTICAL to the legitimate line it replaced. The entry matches, the
+  // entry is not dead, and the guarantee returns `[]`.
+  //
+  // Measured on `1a98115`, all eight rows below: guarantee `[]`, suite
+  // 294 pass / 0 fail, with `(inputs.cascade-source != '' && secrets.CASCADE_PAT)
+  // || github.token` -- an org-level PAT with write across ten repos --
+  // substituted into a live shell string. Seven of the eight are valid YAML
+  // whose `run` Psych resolves to that string (PR #38, Phase 3 round 5
+  // §4a/§4c/§4e). The same transform reached 34 of the 36 allowlist entries.
+  //
+  // WHAT CLOSED IT, and why it is not a parser. The three forgeable scalar
+  // styles are not defined by indentation or by colons -- each is defined by an
+  // OPENER THAT HAS NOT CLOSED YET, which is a fact about bytes on the PREVIOUS
+  // line. `structuralContexts` used to discard that at every `\n`. It now
+  // carries quote and flow-collection state across the break, and a line that
+  // BEGAN inside an open scalar may not open a mapping. See `walk`.
+  //
+  // ROW 2 IS THE KILL MUTATION, and it is here because it broke the reviewer's
+  // first prototype: that version reset quote state per line and treated any
+  // line containing `"'}]` as a terminator, so a decoy `}` -- ordinary content
+  // inside a double-quoted scalar -- cleared the flag one line early and the
+  // forgery went green again. A plausible implementation passes rows 1 and 4.
+  // Only a correct one passes row 2.
+  const PAT_LINE = "          token: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}";
+  const DEPATTED = npmPublish.replace(`${PAT_LINE}\n`, '');
+
+  const DEDENTED = [
+    ['D1  double-quoted, dedented -- the residue as disclosed', step(
+      '      - name: Forged',
       '        run: "true',
       '        with:',
-      '          node-version: ${{ inputs.node-version }}',
+      PAT_LINE,
+      '        "',
+    )],
+    ['D2  KILL MUTATION: a decoy `}` line, which is content inside a double quote', step(
+      '      - name: Forged',
+      '        run: "true',
+      '        }',
+      '        with:',
+      PAT_LINE,
+      '        "',
+    )],
+    ['D3  decoy escaped quotes `\\"x\\"` on the opening line', step(
+      '      - name: Forged',
+      '        run: "true \\"x\\"',
+      '        with:',
+      PAT_LINE,
+      '        "',
+    )],
+    ['D4  single-quoted, dedented', step(
+      '      - name: Forged',
+      "        run: 'true",
+      '        with:',
+      PAT_LINE,
+      "        '",
+    )],
+    ["D5  decoy doubled quotes `''x''`, which are an escape inside a single quote", step(
+      '      - name: Forged',
+      "        run: 'true ''x''",
+      '        with:',
+      PAT_LINE,
+      "        '",
+    )],
+    ['D6  the scalar opened by `name:` rather than `run:`', step(
+      '      - name: "Forged',
+      '        with:',
+      PAT_LINE,
+      '        "',
+      '        run: echo hi',
+    )],
+    ['D7  a flow mapping opener -- invalid YAML, and must still not go green', step(
+      '      - name: Forged',
+      '        env: {',
+      '        with:',
+      PAT_LINE,
+      '        }',
+      '        run: echo hi',
+    )],
+    ['D8  a `#` on the opening line, to bail the character walk out early', step(
+      '      - name: Forged',
+      '        run: "true # x',
+      '        with:',
+      PAT_LINE,
+      '        "',
+    )],
+  ];
+
+  for (const [label, forgery] of DEDENTED) {
+    test(`${label} -- the guarantee reds`, () => {
+      assert.notEqual(DEPATTED, npmPublish, 'the PAT line must actually have been removed');
+      const problems = sweep('npm-publish.yml', appendStep(DEPATTED, forgery));
+      assertReports(problems, UNPINNED, 'a line that began inside an open scalar is shell text, not an action input');
+      assertReports(problems, DEAD, 'and the entry it was written for now matches nothing');
+    });
+  }
+
+  test('the dedented forgery no longer derives the chain of the line it replaced', () => {
+    // THE MECHANISM, ASSERTED DIRECTLY, so that the eight cases above cannot
+    // all pass for some unrelated reason. This is the exact equality the old
+    // DISCLOSED-GAP case asserted -- it read `assert.equal(forged, legit)` and
+    // passed, which was the whole finding. It is now an inequality, and the
+    // forged chain has to carry the `(scalar)` link that says so.
+    const forged = appendStep(DEPATTED, step(
+      '      - name: Forged',
+      '        run: "true',
+      '        with:',
+      PAT_LINE,
       '        "',
     ));
-    assert.notEqual(defanged, ci, 'the defanging replacement must actually have applied');
-    assert.deepEqual(
-      sweep('ci.yml', forged),
-      [],
-      'DISCLOSED: a double-quoted continuation dedented to exactly the key indent reproduces the legitimate '
-      + 'chain, so the existing entry matches the forged line and NOTHING is reported -- not even a dead entry, '
-      + 'because the entry is not dead. If this now reds, the gap has closed: update README.md Honest gaps and '
-      + 'the module header deliberately rather than deleting this case',
-    );
-    // Stated exactly, because the first draft of this case claimed the vacated
-    // entry would still be reported dead and the assertion refused it: the
-    // forgery is COMPLETE. The shell line's derived context is byte-identical
-    // to the action input's, which is why the existing entry covers it.
-    //
-    // Derived on both sides rather than snapshotted -- a literal list of the
-    // file's contexts here would red on the next expression anyone adds to
-    // `ci.yml`, which is the churn-tripwire class this round deleted twice.
-    const contextOf = (text, needle) => {
-      const found = rawExpressions(text).filter((e) => e.line.includes(needle));
-      assert.equal(found.length, 1, `${needle} must occur once in this text`);
+    const contextOf = (text) => {
+      const found = rawExpressions(text).filter((e) => e.line.includes('secrets.CASCADE_PAT'));
+      assert.equal(found.length, 1, 'the PAT expression must occur exactly once in this text');
       return found[0].context;
     };
-    assert.equal(
-      contextOf(forged, 'node-version: ${{ inputs.node-version }}'),
-      contextOf(ci, 'node-version: ${{ inputs.node-version }}'),
-      'the shell line and the action input derive the same context, which is what makes the entry match',
+    const legit = contextOf(npmPublish);
+    assert.equal(legit, 'jobs > publish > steps > with', 'the legitimate line is an actions/checkout input');
+    assert.notEqual(
+      contextOf(forged),
+      legit,
+      'the forged line must NOT derive the chain of the action input it replaced -- if these are equal again, '
+      + 'the quote state is being discarded at the line break and the residue is back open',
+    );
+    assert.ok(
+      contextOf(forged).includes('(scalar)'),
+      `a line that began inside an open double-quoted scalar must carry a (scalar) link; got ${contextOf(forged)}`,
     );
   });
+
+  test('calibration: the discriminator does not red the five real workflows', () => {
+    // THE COST OF THE ABOVE, MEASURED RATHER THAN ASSUMED. A rule that poisons
+    // links is only free if no legitimate line trips it. `G1 -- green on the
+    // workflows that ship` already covers this file by file; this states it as
+    // the discriminator's own false-positive figure so that the next person to
+    // touch `walk` sees the number it is allowed to move.
+    //
+    // It is also the reason `walk` is suspended inside a block scalar: shell
+    // bodies are full of unbalanced apostrophes and brackets, and without the
+    // suspension one `don't` would poison every line after it in the file.
+    for (const file of workflowFileNames()) {
+      assert.deepEqual(sweep(file, readWorkflowFile(file)), [], `${file} must sweep clean`);
+    }
+  });
+
+  test('the discriminator is monotone: it can poison a link, never clean one', () => {
+    // WHY THE OTHER 292 PINS DID NOT NEED RE-AUDITING. Dirty state can only
+    // ever turn a bare link into a `(scalar)` link. It has no branch that
+    // removes one, so it can cost an occurrence its entry -- more problems --
+    // and can never make an occurrence match an entry it did not match before.
+    //
+    // Asserted over a shape, not over a claim: the same two lines, once with a
+    // clean opener and once with an open quote, and the second must be a strict
+    // lengthening of the first.
+    const clean = structuralContexts('a:\n  b:\n    c: ${{ x }}\n');
+    const dirty = structuralContexts('a: "open\n  b:\n    c: ${{ x }}\n');
+    assert.equal(clean[2], 'a > b', 'two legitimate mapping keys, neither carrying a value');
+    assert.equal(dirty[2], 'a (scalar) > b (scalar)', 'both links poisoned once the line began inside a quote');
+    assert.ok(
+      dirty.every((c, i) => c.length >= clean[i].length),
+      'no line may derive a SHORTER context under the discriminator than without it',
+    );
+  });
+
 
   test('N15: an allowlisted env: line relocated verbatim into a run: body reds', () => {
     const stripped = cascade.replace('          PACKAGE_NAME: ${{ inputs.package-name }}\n', '');
