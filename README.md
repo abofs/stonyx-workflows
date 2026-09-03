@@ -10,10 +10,10 @@ Shared GitHub Actions workflows for Stonyx framework packages.
 > free. It needs an **allowlist entry** saying why it is safe there, and if it
 > sits in a `run:` or `script:` body it needs a **second entry** in the
 > step-scoped allowlist as well. Nothing else: no count to bump anywhere.
-> Measured on this tree -- a `run:`-body expression in `ci.yml` is 285 pass /
-> 9 fail with no entry, 291 / 3 with the first, 294 / 0 with both; an
+> Measured on this tree -- a `run:`-body expression in `ci.yml` is 296 pass /
+> 9 fail with no entry, 302 / 3 with the first, 305 / 0 with both; an
 > expression in a `with:`, `env:` or `concurrency:` position needs only the
-> first and is 288 / 6 without it, 294 / 0 with it. Both rules, and the
+> first and is 299 / 6 without it, 305 / 0 with it. Both rules, and the
 > properties of the runner they are shaped around, are stated in full under
 > [The guarantee, and everything that is not one](#the-guarantee-and-everything-that-is-not-one).
 
@@ -402,8 +402,8 @@ default branch.
 | `test/lift-equivalence-test.js` | Differential proof that `deriveVersion` matches the `main@692d122` heredocs it was lifted from, across 864 input pairs. Those heredocs are read from `test/fixtures/npm-publish-692d122.yml`, a frozen copy of the pre-lift workflow pinned by blob SHA -- **do not refresh it**, it is the text the equivalence is measured against |
 | `test/injection-test.js` | That no consumer-controlled string reaches program text or a shell string in `npm-publish.yml` or `cascade.yml`. Executes the real `run:` bodies against a stubbed `npm`/`pnpm`/`git` and the real `cascade.yml` `script:` body against a stubbed `github` client; pins the npm-name and semver grammars and their duplicated copies; **runs the raw `${{ }}` guarantee** over every file in `.github/workflows/`; and runs the diagnostic sweeps below over the same files, asserting each reports nothing |
 | `test/sweep-bypass-test.js` | That the **diagnostic** sweep can go red, and that the reader underneath it reports rather than guesses. Runs each mutation that used to defeat it -- a duplicated step name, a folded `run: >`, a `format('{0}', ...)` expression, an exemption outliving its sink, and the bypass-6 shapes (an unnamed step, a key nested in an earlier block scalar, a quoted key) -- against deliberately broken workflow text. Also pins the AC4 fixture to its blob SHA, calibrates the `run:`/`script:` key-line pin in both directions, and carries the `#34` re-arming case |
-| `test/raw-sweep-test.js` | That the guarantee holds and can go **red**. Re-runs every bypass family raised across the PR #38 reviews -- unnamed steps, a `run:` nested in a block scalar, a quoted `"run":`, four multi-line flow/plain scalar shapes, a single-line flow mapping under `with:`, a whole `.yaml` file, an explicit `? run` key, an escaped key, a next-line alias, a duplicate step name, `run: >`, `format('{0}', ...)`, `eval "..."`, a dead entry -- and asserts the raw scan reports each. Also keeps **one** check on the scanner's independence -- a whitelist over every occurrence of the token `import` in its source -- calibrated against the four spellings that defeated its predecessors, and with the disclosed gap (a load site written without the token `import`) committed as its own calibration |
-| `test/helpers/raw-expression-scan.js` | **The guarantee.** A raw byte scan for `${{` over every file in `.github/workflows/`, enumerated with no extension filter. Understands no YAML: `indexOf`, `slice`, `split`, `trim`, and not one regex. An occurrence with no allowlist entry reds, an entry matching no occurrence reds, an opener that does not close on its own line reds, a malformed entry reds, and a `\x`/`\u`/`\U`/end-of-line backslash reds -- those four escapes are the complete set a YAML double-quoted scalar can use to build an opener out of bytes that do not contain one, so the scan reports them rather than guessing which scalar style a line is in. `structuralContexts` derives the CHAIN of keys a line is written under -- `jobs > dispatch > steps > with` -- from indentation and the first colon, marking any link that already carries a value as `(scalar)`, so an exemption cannot follow its line from `with:` into `run:` and a payload written inside a body cannot spell its own context. The one style that still forges it is disclosed below |
+| `test/raw-sweep-test.js` | That the guarantee holds and can go **red**. Re-runs every bypass family raised across the PR #38 reviews -- unnamed steps, a `run:` nested in a block scalar, a quoted `"run":`, four multi-line flow/plain scalar shapes, a single-line flow mapping under `with:`, a whole `.yaml` file, an explicit `? run` key, an escaped key, a next-line alias, a duplicate step name, `run: >`, `format('{0}', ...)`, `eval "..."`, a dead entry -- and asserts the raw scan reports each. Includes the **eight dedented context forgeries** that were green before round 6, each moving the org-level `CASCADE_PAT` into a shell body, with a decoy `}` as the kill mutation; a **brand-new** credential with a fresh, well-formed entry and nothing deleted; and the discriminator's own false-positive figure and monotonicity. Also keeps **one** check on the scanner's independence -- a whitelist over every occurrence of the token `import` in its source -- calibrated against the four spellings that defeated its predecessors, and with the disclosed gap (a load site written without the token `import`) committed as its own calibration |
+| `test/helpers/raw-expression-scan.js` | **The guarantee.** A raw byte scan for `${{` over every file in `.github/workflows/`, enumerated with no extension filter. Understands no YAML: `indexOf`, `slice`, `split`, `trim`, and not one regex. An occurrence with no allowlist entry reds, an entry matching no occurrence reds, an opener that does not close on its own line reds, a malformed entry reds, and a `\x`/`\u`/`\U`/end-of-line backslash reds -- those four escapes are the complete set a YAML double-quoted scalar can use to build an opener out of bytes that do not contain one, so the scan reports them rather than guessing which scalar style a line is in. `structuralContexts` derives the CHAIN of keys a line is written under -- `jobs > dispatch > steps > with` -- from indentation and the first colon, marking any link that already carries a value as `(scalar)`, so an exemption cannot follow its line from `with:` into `run:` and a payload written inside a body cannot spell its own context. The three styles that could still forge it -- multi-line double-quoted, single-quoted and flow -- are closed by `walk`, whose quote and flow-depth state persists across the line break, so a line that began inside an open scalar cannot open a mapping. What the key still does not model is **who receives the value**; that one is disclosed below |
 | `test/helpers/expression-allowlist.js` | The named exceptions the guarantee reads: one entry per `(context, line, expression)` triple, each pinning the exact source line, the key that line is written under, the expression, an occurrence count and a reason. The counts are derived from the files rather than snapshotted, so an entry added with its expression does not require bumping a literal. An entry whose `why` is shorter than 60 characters, or which names none of its own expression's references, is refused -- a reason that could be pasted onto any entry is not a reason |
 | `test/helpers/interpolation-sweep.js` | The **diagnostic** `${{ }}` sweep as a pure function of `(file, text)`, plus the step-scoped `ALLOWLIST` and `NON_BODY_KEY_LINES`. Names which step and which sink an expression sits in, and pins the `run:`/`script:` body population so the executed tests cannot go vacuous. Returns problem strings rather than asserting, **which is the point**: `injection-test.js` asserts the array is empty for the real workflows and `sweep-bypass-test.js` asserts it is non-empty for broken ones. Same code, both directions |
 | `test/helpers/workflow-yaml.js` | **Diagnostics only** -- no guarantee depends on it. Minimal reader for the workflow YAML shapes the tests assert on: a step's `run:` body, `env:` mapping and `with: script:` body, a workflow's trigger keys, `${{ }}` expression extraction, and the raw-text `run:`/`script:` key-line count. Every step list item is a step, named or not; the name-taking wrappers **throw** on an ambiguous name rather than returning the first match; a list item in a shape it cannot resolve **throws, never skips**; and a step with no such key raises a typed `MissingStepKeyError` (`code === 'MISSING_STEP_KEY'`) so callers can tell "has none" from "could not read the one it has" without matching on message text |
@@ -461,7 +461,7 @@ their own and no live sink, so round 5 removed them. What is left is calibrated
 against the four spellings that defeated its predecessors, and it fails on each
 of them: measured on this tree, a static import of the extractor, an indented
 one, a dynamic `import()` of a relative specifier and one of an absolute
-`file://` URL are each **293 pass / 1 fail**, as is removing every static import
+`file://` URL are each **304 pass / 1 fail**, as is removing every static import
 so the non-vacuity guard has nothing to see. Fewer moving parts, each able to
 fail.
 
@@ -500,7 +500,7 @@ the value** -- a `uses:`, or the `run:` line that reads the `env:` var the entry
 approves -- is a human obligation here. Measured on this tree, and it lands on
 `#34`'s own prescribed remediation: `AUDIT_LEVEL: ${{ inputs.audit-level }}` in
 a step `env:`, both old entries deleted, a correct new entry written, and the
-body reading `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` is **294 pass
+body reading `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` is **305 pass
 / 0 fail** -- the same figure as the safe landing state, which is the point: the
 suite cannot tell them apart. The entry's reason -- *"an `env:` value is data the
 runner sets, not source that bash parses"* -- is then false about the file it
@@ -513,19 +513,24 @@ no `eval` in any `run:` body, green today and non-vacuous the moment one
 appears -- and is deliberately not added here, because it is a rule about shell
 rather than about `${{ }}` and belongs with `#34`.
 
-**The structural context is forgeable by one YAML shape, and that direction is
-fail-open.** The allowlist key carries the chain of keys a line is written
-under, derived from indentation and the first colon. Which lines can
-*legitimately* establish a context turns on a single property, measured against
-Psych/libyaml 5.3.1: can a scalar's content sit at an indentation less than or
-equal to its own key line's? For a literal block `|`, a folded block `>` and a
-plain multi-line scalar the answer is **no** -- content at or left of the key is
-a sibling key or a parse error -- so the owning key is unavoidably an ancestor
-and appears in the chain as a `(scalar)` link that no entry can match. For a
-**multi-line double-quoted or single-quoted scalar, or a flow mapping or
-sequence spanning lines, the answer is yes**: a continuation may sit at exactly
-the indentation a legitimate key would occupy, so a payload can reproduce a
-legitimate ladder link for link. Measured on `ci.yml`:
+**The structural context was forgeable by three YAML shapes. It is not any
+more, and this section used to say the fix needed a parser, which was false.**
+The allowlist key carries the chain of keys a line is written under. Which lines
+can *legitimately* establish a context turns on one property, measured against
+Psych 5.3.1 / libyaml 0.2.5: can a scalar's content sit at an indentation less
+than or equal to its own key line's? For a literal block `|`, a folded block `>`
+and a plain multi-line scalar the answer is **no** -- content at or left of the
+key is a sibling key or a parse error -- so the owning key is unavoidably an
+ancestor and appears in the chain as a `(scalar)` link that no entry can match.
+That is **three** styles, not the four this section and two other files claimed
+for a round. For a **multi-line double-quoted or single-quoted scalar, or a flow
+collection spanning lines, the answer is yes**: a continuation may sit at exactly
+the indentation a legitimate key would occupy.
+
+Indented under the opener that still reds, because the chain lengthens.
+**Dedented to the enclosing key's own content indent it did not**, because the
+forged frame pops before the payload line is read and the derived chain comes
+out byte-identical to the line it replaced:
 
 ```yaml
       - name: Forged context dedent
@@ -535,24 +540,51 @@ legitimate ladder link for link. Measured on `ci.yml`:
         "
 ```
 
-is valid YAML whose `run` resolves to a shell string carrying the expression,
-and the guarantee reports **nothing at all** -- not even a dead entry, because
-the pre-existing `with:` entry matches the forged line. No function of
-indentation and colons can tell those lines from real keys, because at the byte
-level they are what a real key looks like; closing it needs a parser, and the
-guarantee does not parse. `test/raw-sweep-test.js` carries this as a committed
-case that asserts the gap, so it cannot close or widen silently, and the whole
-mutated `ci.yml` above is **294 pass / 0 fail** on this tree -- green, which is
-what fail-open means and why it is written down here.
+valid YAML whose `run` resolves to a shell string carrying a live expression,
+with the guarantee reporting **nothing at all** -- not even a dead entry,
+because the pre-existing `with:` entry genuinely matched the forged line. On the
+previous tree that was **294 pass / 0 fail**, and so were the single-quoted and
+flow spellings of it; the same transform reached **34 of the 36** allowlist
+entries, including every credential in the repo and every consumer-supplied
+`inputs.*`. It did not require deleting anything either: a **brand-new**
+`secrets.CASCADE_PAT` in a forged body, with one fresh entry that passes every
+shape check, was also 294 / 0.
 
-The four shapes review measured -- an explicit `? run` key, a multi-line
-double-quoted `run:`, an ordinary `run: |`, and a `script:` body -- all red on
-the guarantee itself rather than on a diagnostic. Re-measured on this tree as
-live edits to the real files: the multi-line double-quoted forgery on `ci.yml`
-is 288 / 6, the same shape moving `secrets.CASCADE_PAT` into a shell body in
-`npm-publish.yml` is 290 / 4, and the ordinary `run: |` forgery is 286 / 8. The
-line between them and the payload above is one of indentation, and that is the
-honest width of the fix.
+**What closed it is not a parser.** The three forgeable styles are not defined
+by indentation or by colons -- each is defined by *an opener that has not closed
+yet*, which is a fact about bytes on the **previous** line, and the scanner was
+throwing that away at every newline. `structuralContexts` now carries quote and
+flow-collection state across the break, so a line that began inside an open
+scalar is data and may not open a mapping. One `while` loop, one character of
+lookahead, no regex and no YAML reader: the *understands no YAML* property the
+guarantee is sold on is intact. Re-measured on this tree, the same three
+dedented spellings on the real `ci.yml` are **299 pass / 6 fail** each, and all
+five real workflows still sweep clean with no new allowlist entry.
+`test/raw-sweep-test.js` carries **eight** spellings as committed cases --
+including a decoy `}`, which is ordinary content inside a double-quoted scalar
+and is the one that separates this from a plausible implementation.
+
+So the chain now closes **all five scalar styles and both flow collections**.
+Re-measured on this tree as live edits to the real files: the multi-line
+double-quoted forgery on `ci.yml` is 299 / 6, the same shape moving
+`secrets.CASCADE_PAT` into a shell body in `npm-publish.yml` is 299 / 6, the
+ordinary `run: |` forgery is 297 / 8, and the dedented forgery that used to be
+green is 299 / 6.
+
+**The gap that remains is not a YAML shape, and no parser closes it either.**
+The key is `(file, context, line, expression)` and it **does not model who
+receives the value**. Deleting
+`token: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}`
+from `actions/checkout`'s `with:` and re-adding it byte-identically under
+`uses: attacker/telemetry-action@v1` leaves file, chain, line and expression all
+unchanged -- **305 pass / 0 fail on this tree, and 294 / 0 on the previous one:
+the discriminator makes no difference to it, and a real YAML parser would make
+none either**, because parsing cannot fix a key that is asking the wrong
+question. This one is a human obligation on the diff, and it is a cheap one: the
+forgery above produced only first-party-looking lines, whereas this leaves
+`uses: attacker/telemetry-action@v1` sitting in the diff, which is the loudest
+line a workflow change can carry. **Read what consumes the value, not only the
+line the entry pins.**
 
 The sweeps in `test/helpers/interpolation-sweep.js` and the reader in
 `test/helpers/workflow-yaml.js` are **diagnostics only**. They say which step
@@ -599,11 +631,11 @@ patterns** is the rule the checks themselves are built to:
   the step's `name:` exactly as written -- and its `line` is the line **of the
   body**, with the `run: ` or `script: ` key prefix already removed. Writing
   `line: 'run: echo "${{ … }}"'` here, which is the value you have just typed
-  into the other file, is *worse* than leaving the entry out -- **290 / 4**
-  against 291 / 3, because the dead-entry check fires as well as the unpinned
+  into the other file, is *worse* than leaving the entry out -- **301 / 4**
+  against 302 / 3, because the dead-entry check fires as well as the unpinned
   one. Measured on this tree, adding a
-  `run:`-body expression to `ci.yml`: no entry anywhere **285 pass / 9 fail**;
-  with the first entry and nothing else **291 / 3**; with both **294 / 0**.
+  `run:`-body expression to `ci.yml`: no entry anywhere **296 pass / 9 fail**;
+  with the first entry and nothing else **302 / 3**; with both **305 / 0**.
 - **The occurrence total is derived, not pinned to a literal.** The three
   independent counts in `test/raw-sweep-test.js` -- the scanner's records, a
   raw `split('${{')`, and the allowlist's own `occurrences` sum -- have to
@@ -612,7 +644,7 @@ patterns** is the rule the checks themselves are built to:
   a snapshot of which keys the five current files happen to use -- so an
   ordinary construct written under a key none of them uses costs the entries
   above and nothing more. Measured: a job-level `if:` on `ci.yml`'s only job is
-  286 pass / 7 fail unallowlisted and **294 / 0 with one entry in one file**,
+  298 pass / 7 fail unallowlisted and **305 / 0 with one entry in one file**,
   wherever in that file's list the entry is written.
 - **An expression inside a shell `#` comment is a live sink.** The runner
   substitutes `${{ }}` into the run script textually before bash parses it, and
