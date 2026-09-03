@@ -1415,20 +1415,23 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     //
     // Asserted BOTH WAYS, because a hint appended unconditionally would pass a
     // one-sided check while telling every contributor the wrong thing.
+    // BOTH payloads carry a probe expression that no workflow uses, and both
+    // filters key on it. The subject here is the MESSAGE, not the file: an
+    // assertion counting `ci.yml`'s unpinned occurrences would red on any
+    // future expression added to that file, and -- measured -- on four of the
+    // README's own published scenarios, which is the churn-tripwire class this
+    // PR deleted twice. The forgery itself is pinned by D1-D8 above.
+    const PROBE = '${{ inputs.hint-probe }}';
     const forged = appendStep(ci, step(
       '      - name: Forged',
       '        run: "true',
       '        with:',
-      '          node-version: ${{ inputs.node-version }}',
+      `          node-version: ${PROBE}`,
       '        "',
     ));
-    // Filtered to THIS line rather than counted globally. An assertion that
-    // `ci.yml` has exactly one unpinned occurrence would red on any future
-    // expression added to that file, which is the churn-tripwire class this PR
-    // deleted twice; the subject here is the message, not the file's contents.
-    const forgedProblems = sweep('ci.yml', forged)
-      .filter((p) => UNPINNED.test(p) && p.includes('with (scalar)'));
+    const forgedProblems = sweep('ci.yml', forged).filter((p) => UNPINNED.test(p) && p.includes(PROBE));
     assert.equal(forgedProblems.length, 1, 'the forged line should be unpinned under a (scalar) link');
+    assert.ok(forgedProblems[0].includes('with (scalar)'), 'and its context must carry the (scalar) link');
     assert.match(
       forgedProblems[0],
       /began inside an open quoted scalar or flow collection/,
@@ -1438,9 +1441,6 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
 
     // An ordinary unpinned occurrence -- context with no `(scalar)` link -- must
     // NOT carry the hint, or it is noise on every red in the file.
-    // The probe expression is a name no workflow uses, so this filter cannot
-    // collide with whatever else happens to be unpinned in a mutated `ci.yml`.
-    const PROBE = '${{ inputs.hint-probe }}';
     const ordinary = ci.replace(
       "          cache: 'pnpm'",
       `          cache: 'pnpm'\n          registry-url: ${PROBE}`,
