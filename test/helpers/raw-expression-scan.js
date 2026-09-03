@@ -705,6 +705,28 @@ export function referencesIn(expression) {
  * A malformed entry is a silent exemption: an entry with no `line` would exempt
  * its expression everywhere, and an entry whose `why` says nothing is an
  * approval nobody made.
+ *
+ * THE `(scalar)` REFUSAL IS HERE, AND IT IS HERE BECAUSE THIS IS THE LAYER THAT
+ * CLAIMS IT. Round 6 shipped "no entry can name such a context" in the
+ * contributor-facing hint, in this module's header, in the allowlist header and
+ * in `README.md`, and enforced it in none of them: `entryShapeProblems` had
+ * seven refusals and not one looked at the link. Measured -- copy the `(scalar)`
+ * context the red prints, exactly as the allowlist header instructs, into an
+ * otherwise well-formed entry, and `rawSweepProblems` returned ZERO problems
+ * with an org-level PAT live in a `curl` command line (PR #38, Phase 1 round 6
+ * §1 and Phase 2 round 6 §4, found independently). The only thing refusing it
+ * was a global assertion over the five shipped files in `raw-sweep-test.js`,
+ * which no entry can clear -- so the contributor's edit and the attacker's edit
+ * were the same edit. `rawSweepProblems` calls this function for every entry, so
+ * the refusal now reds at the guarantee, where the sentence says it does.
+ *
+ * It is deliberately blanket rather than clever. Both causes of a `(scalar)`
+ * link -- a key that already carries a value, and a line that began inside an
+ * open scalar -- put the position outside the data model, and separating them
+ * would need the parser this file does not have. The price is stated rather
+ * than hidden: an expression INSIDE a block-scalar `run: |` body is not
+ * pinnable where it sits, and the remedy is to bind it through a step `env:`.
+ * `README.md`'s contributor rules carry that, measured.
  */
 export function entryShapeProblems(file, entry) {
   const problems = [];
@@ -717,6 +739,16 @@ export function entryShapeProblems(file, entry) {
     problems.push(
       `${where} has no context:. The context is the key the line sits under -- without it the entry approves `
       + 'the characters of a line rather than the position it occupies, so it follows its line into a sink.',
+    );
+  }
+  if (typeof entry.context === 'string' && entry.context.includes(SCALAR)) {
+    problems.push(
+      `${where} names a context containing a ${SCALAR} link, and no entry may name one. A key that already `
+      + 'carries a value, or a line that began inside an open quoted scalar or flow collection, is DATA: it '
+      + 'cannot open a mapping, so no position under it is one an entry can approve. If a payload printed this '
+      + 'context at you, it wrote its own position and the answer is not an exemption. If it is your own '
+      + 'block-scalar body, the expression is not pinnable where it sits -- bind it through a step `env:` and '
+      + 'reference the variable in the body instead.',
     );
   }
   if (typeof entry.expression !== 'string' || !entry.expression.startsWith(OPENER)) {

