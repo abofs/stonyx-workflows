@@ -746,6 +746,30 @@ export function entryShapeProblems(file, entry) {
 }
 
 /**
+ * The one sentence a contributor needs when a `(scalar)` link is the reason
+ * their entry did not match, and the reason it is a message rather than an
+ * allowlist.
+ *
+ * A `(scalar)` link means the position cannot legitimately open a mapping, and
+ * as of round 6 that has a second cause: the line BEGAN inside an open quoted
+ * scalar or flow collection, so it is data whatever it spells. Without this
+ * hint the red reads as an ordinary entry mismatch and sends the reader to copy
+ * a context they cannot use, since no entry may name a `(scalar)` link.
+ *
+ * Deliberately NOT an allowlist. The shape has never occurred in these five
+ * files, so there is nothing to exempt; and an exemption here would be an
+ * exemption for "trust this forged context", which is the whole thing being
+ * refused. The remedy is to rewrite the value as a block scalar.
+ */
+function scalarHint(context) {
+  if (!context.includes(SCALAR)) return '';
+  return ` A link reading "<key> ${SCALAR}" is a position that cannot open a mapping -- either the key already `
+    + 'carries a value, or this line began inside an open quoted scalar or flow collection and is therefore data. '
+    + 'No entry can name such a context, so copying it will not work: if the value really is a legitimate '
+    + 'multi-line quoted scalar, rewrite it as a block scalar (`|` or `>`), which this scanner reads correctly.';
+}
+
+/**
  * Every problem the guarantee can report for one file.
  *
  * Five ways to red, and they are the whole contract:
@@ -794,7 +818,8 @@ export function rawSweepProblems(file, text, allowlist, escapeAllowlist = {}) {
         `${file} carries ${expression} on line(s) ${at.join(', ')}, under ${JSON.stringify(context)}, on the `
         + `source line ${JSON.stringify(line)}. No allowlist entry in test/helpers/expression-allowlist.js pins `
         + 'that expression to that line in that context. Every GitHub Actions expression in this directory needs '
-        + 'an entry stating what it is and why it is safe -- adding one is the review.',
+        + 'an entry stating what it is and why it is safe -- adding one is the review.'
+        + scalarHint(context),
       );
       continue;
     }

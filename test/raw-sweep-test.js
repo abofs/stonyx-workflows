@@ -1405,6 +1405,47 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     }
   });
 
+  test('an unpinned line under a (scalar) link says WHY no entry can name it', () => {
+    // THE COST OF A RULE THAT POISONS LINKS, PAID IN THE MESSAGE. `(scalar)` now
+    // has a second cause -- the line began inside an open quoted scalar -- and
+    // without a hint the red reads as an ordinary entry mismatch, sending the
+    // reader to copy a context that no entry may legally name. There is
+    // deliberately no allowlist for it: an exemption here would be an exemption
+    // for "trust this forged context", which is the thing being refused.
+    //
+    // Asserted BOTH WAYS, because a hint appended unconditionally would pass a
+    // one-sided check while telling every contributor the wrong thing.
+    const forged = appendStep(ci, step(
+      '      - name: Forged',
+      '        run: "true',
+      '        with:',
+      '          node-version: ${{ inputs.node-version }}',
+      '        "',
+    ));
+    const forgedProblems = sweep('ci.yml', forged).filter((p) => UNPINNED.test(p));
+    assert.equal(forgedProblems.length, 1, 'exactly one occurrence should be unpinned here');
+    assert.match(
+      forgedProblems[0],
+      /began inside an open quoted scalar or flow collection/,
+      'a red on a (scalar) link must explain why copying the context will not work',
+    );
+    assert.match(forgedProblems[0], /rewrite it as a block scalar/, 'and must name the remedy');
+
+    // An ordinary unpinned occurrence -- context with no `(scalar)` link -- must
+    // NOT carry the hint, or it is noise on every red in the file.
+    const ordinary = ci.replace(
+      "          cache: 'pnpm'",
+      "          cache: 'pnpm'\n          registry-url: ${{ inputs.node-version }}",
+    );
+    assert.notEqual(ordinary, ci, 'the insertion must actually have applied');
+    const ordinaryProblems = sweep('ci.yml', ordinary).filter((p) => UNPINNED.test(p));
+    assert.equal(ordinaryProblems.length, 1, 'exactly one occurrence should be unpinned here too');
+    assert.ok(
+      !ordinaryProblems[0].includes('(scalar)'),
+      `a red on an ordinary key must not mention (scalar); got ${ordinaryProblems[0]}`,
+    );
+  });
+
   test('the discriminator is monotone: it can poison a link, never clean one', () => {
     // WHY THE OTHER 292 PINS DID NOT NEED RE-AUDITING. Dirty state can only
     // ever turn a bare link into a `(scalar)` link. It has no branch that
