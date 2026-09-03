@@ -121,10 +121,24 @@
 //    scalar may not open a mapping. It is not a parser and it needs no YAML
 //    understanding -- the previous claim here, that closing this "needs a
 //    parser", was false and is retracted. Re-measured on this tree, each of
-//    the three dedented spellings on the real `ci.yml`: 300 pass / 6 fail,
-//    from 294 / 0 green. All five scalar styles and both flow collections are
-//    closed against context forgery, and eight spellings of the forgery are
+//    the three dedented spellings on the real `ci.yml`: 303 pass / 6 fail,
+//    from
+//    294 / 0 green. All five scalar styles and both flow collections are
+//    closed against context forgery, and TEN spellings of the forgery are
 //    committed as cases in `test/raw-sweep-test.js`.
+//
+//    AND THE REFUSAL IS IN `entryShapeProblems`, NOT ONLY IN THE CHAIN. Round
+//    6 shipped the sentence "no entry can name such a context" in this header,
+//    in `scalarHint`, in the allowlist header and in `README.md`, and enforced
+//    it nowhere -- copy the `(scalar)` context the red prints into an
+//    otherwise well-formed entry and the guarantee returned ZERO problems with
+//    the org PAT live (PR #38, Phase 1 round 6 §1 and Phase 2 round 6 §4,
+//    found independently). `entryShapeProblems` now refuses any entry whose
+//    context names a `(scalar)` link, and `rawSweepProblems` calls it for
+//    every entry, so the sentence is true where it is written. The price is
+//    that an expression INSIDE a block-scalar `run: |` body is not pinnable
+//    where it sits; the remedy is to bind it through a step `env:`, and
+//    `README.md`'s contributor rules carry that, measured.
 //
 //    WHAT IS STILL NOT CLOSED, so this note does not repeat its own history:
 //    the key is `(file, chain, line, expression)` and it DOES NOT MODEL THE
@@ -393,8 +407,9 @@ function walk(line, state) {
  *
  * The `(scalar)` marking closes the same rows one step earlier and more
  * cheaply: `run: "true` and `run: |` both already carry a value, so neither can
- * open a mapping, so nothing nested under either can ever match an entry
- * written for one. Both measured payloads red on this alone.
+ * open a mapping, so nothing nested under either is a position an entry can
+ * approve -- `entryShapeProblems` refuses an entry that names one. Both
+ * measured payloads red on this alone.
  *
  * THE THREE YES ROWS, AND WHAT THE CHAIN ALONE COULD NOT DO ABOUT THEM. For
  * those three a continuation line may sit at exactly the indentation a
@@ -432,11 +447,14 @@ function walk(line, state) {
  * because a reader who believed it would not have looked for the cheap fix.
  *
  * Measured on this tree: the three dedented spellings on the real `ci.yml` go
- * from 294 / 0 GREEN to 300 pass / 6 fail, all five real workflows still sweep
- * clean with no new allowlist entry, and eight spellings are committed as
+ * from 294 / 0 GREEN to 303 pass / 6 fail, all five real workflows still sweep
+ * clean with no new allowlist entry, and ten spellings are committed as
  * cases -- including a decoy `}`, which is ordinary content inside a
  * double-quoted scalar and is the case that separates this from a plausible
- * implementation that resets quote state per line.
+ * implementation that resets quote state per line, and two that pin the
+ * flow-depth half. Measured on this tree with those two rows deleted, both of
+ * its widenings are 307 / 0 -- invisible to every other test -- and 308 / 1
+ * each with the rows present.
  *
  * STILL NOT CLOSED, AND NOT CLOSEABLE HERE. The key does not model WHO
  * RECEIVES the input. Re-adding an allowlisted line byte-identically under
@@ -786,19 +804,30 @@ export function entryShapeProblems(file, entry) {
  * as of round 6 that has a second cause: the line BEGAN inside an open quoted
  * scalar or flow collection, so it is data whatever it spells. Without this
  * hint the red reads as an ordinary entry mismatch and sends the reader to copy
- * a context they cannot use, since no entry may name a `(scalar)` link.
+ * a context that `entryShapeProblems` refuses.
  *
  * Deliberately NOT an allowlist. The shape has never occurred in these five
  * files, so there is nothing to exempt; and an exemption here would be an
  * exemption for "trust this forged context", which is the whole thing being
- * refused. The remedy is to rewrite the value as a block scalar.
+ * refused.
+ *
+ * THE REMEDY THIS USED TO NAME WAS WRONG, and it was wrong in the direction
+ * that does not converge. It said "rewrite it as a block scalar (`|` or `>`),
+ * which this scanner reads correctly" -- but a line inside a `run: |` body
+ * derives `run (scalar)`, so that advice moves the reader from one `(scalar)`
+ * link to another and the entry is refused there too (PR #38, Phase 2 round 6
+ * §4, measured). There is no spelling of an entry that pins an expression
+ * under a `(scalar)` link. The remedy is a workflow edit, and it is the one
+ * `npm-publish.yml` already uses everywhere: bind the value through a step
+ * `env:` and reference the shell variable in the body.
  */
 function scalarHint(context) {
   if (!context.includes(SCALAR)) return '';
   return ` A link reading "<key> ${SCALAR}" is a position that cannot open a mapping -- either the key already `
     + 'carries a value, or this line began inside an open quoted scalar or flow collection and is therefore data. '
-    + 'No entry can name such a context, so copying it will not work: if the value really is a legitimate '
-    + 'multi-line quoted scalar, rewrite it as a block scalar (`|` or `>`), which this scanner reads correctly.';
+    + 'No entry can name such a context -- entryShapeProblems refuses one that does -- so copying it out of this '
+    + 'message will red rather than exempt. There is no entry that pins an expression here: bind the value '
+    + 'through a step `env:` and reference the shell variable in the body instead.';
 }
 
 /**

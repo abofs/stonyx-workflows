@@ -25,7 +25,9 @@
 //                text by `structuralContexts`. Copy it out of the failure
 //                message; the red prints it verbatim. A link rendered
 //                `<key> (scalar)` marks a position that cannot legitimately
-//                open a mapping, so nothing under one can ever match an entry.
+//                open a mapping, and `entryShapeProblems` REFUSES any entry
+//                whose context names one -- so a `(scalar)` context is the one
+//                thing in this message you must not copy.
 //                It has TWO causes, and the difference matters when you are
 //                staring at an unexpected red: either the key already carries
 //                a value, which in YAML cannot also carry children; or the
@@ -35,11 +37,20 @@
 //                legitimate multi-line double-quoted or single-quoted value in
 //                a workflow, every line after the opener is inside it, and an
 //                expression on one of those lines will red as an entry
-//                mismatch rather than saying "you are inside a scalar" --
-//                there is deliberately no allowlist for that, because the
-//                shape has never yet occurred in these five files. Rewrite it
-//                as a block scalar (`|` or `>`), which is idiomatic here and
-//                which the walk correctly ignores.
+//                mismatch rather than saying "you are inside a scalar" -- and
+//                the red now says exactly that, and names the remedy.
+//                There is deliberately no allowlist for it: an exemption here
+//                would be an exemption for "trust this forged context", which
+//                is the thing being refused, and the shape has never yet
+//                occurred in these five files.
+//                REWRITING IT AS A BLOCK SCALAR IS NOT THE REMEDY, and this
+//                note said it was for a round. A line inside a `run: |` body
+//                derives `run (scalar)` too, so that advice moves you from one
+//                refused link to another (PR #38, Phase 2 round 6 §4). An
+//                expression under a `(scalar)` link is not pinnable where it
+//                sits, in any spelling. Bind the value through a step `env:`
+//                and reference the shell variable in the body, which is what
+//                `npm-publish.yml` already does everywhere.
 //                The trimmed line carries no context of its own, so an entry
 //                keyed on it alone approves the characters rather than the
 //                position: relocating `version: ${{ inputs.pnpm-version }}`
@@ -71,9 +82,9 @@
 //                294 pass / 0 fail with the org PAT in a live shell command
 //                line, in all three styles, reaching 34 of the 36 entries in
 //                this file by a mechanical transform. Re-measured on this
-//                tree, each of the three is 300 pass / 6 fail.
+//                tree, each of the three is 303 pass / 6 fail.
 //                So: ALL FIVE scalar styles and both flow collections are
-//                closed against context forgery, and eight spellings of it are
+//                closed against context forgery, and TEN spellings of it are
 //                committed as cases in `test/raw-sweep-test.js`. What is still
 //                open is not a YAML shape at all -- the key does not model WHO
 //                RECEIVES the input, so an entry re-added byte-identically

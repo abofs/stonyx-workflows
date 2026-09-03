@@ -10,11 +10,21 @@ Shared GitHub Actions workflows for Stonyx framework packages.
 > free. It needs an **allowlist entry** saying why it is safe there, and if it
 > sits in a `run:` or `script:` body it needs a **second entry** in the
 > step-scoped allowlist as well. Nothing else: no count to bump anywhere.
-> Measured on this tree -- a `run:`-body expression in `ci.yml` is 297 pass /
-> 9 fail with no entry, 303 / 3 with the first, 306 / 0 with both; an
-> expression in a `with:`, `env:` or `concurrency:` position needs only the
-> first and is 300 / 6 without it, 306 / 0 with it. Both rules, and the
-> properties of the runner they are shaped around, are stated in full under
+> Measured on this tree -- a **one-line** `run:`-body expression in `ci.yml` is
+> 300 pass / 9 fail with no entry, 306 / 3 with the first, 309 / 0 with both;
+> an expression in a `with:` or `concurrency:` position needs only the first
+> and is 303 / 6 without it, 309 / 0 with it; an `env:` position is **302 / 7**
+> without it, not 6, because `env` introduces a chain no entry yet states and
+> the context calibration reds alongside the six -- and 309 / 0 with it at step
+> or job level. (A *workflow*-level `env:` with a correct entry is 308 / 1: one
+> top-level context name is snapshotted in a calibration, a separate open
+> finding this PR does not touch.) **An expression INSIDE a block-scalar
+> `run: |` body is a third case, and it is not pinnable at all** -- every line
+> in there sits under a `(scalar)` link and no entry may name one, so writing
+> both entries correctly is still 302 / 7. Bind the value through a step `env:`
+> and read the shell variable in the body: **309 / 0** with one entry. Both
+> rules, and the properties of the runner they are shaped around, are stated
+> in full under
 > [The guarantee, and everything that is not one](#the-guarantee-and-everything-that-is-not-one).
 
 ### `ci.yml`
@@ -461,7 +471,7 @@ their own and no live sink, so round 5 removed them. What is left is calibrated
 against the four spellings that defeated its predecessors, and it fails on each
 of them: measured on this tree, a static import of the extractor, an indented
 one, a dynamic `import()` of a relative specifier and one of an absolute
-`file://` URL are each **305 pass / 1 fail**, as is removing every static import
+`file://` URL are each **308 pass / 1 fail**, as is removing every static import
 so the non-vacuity guard has nothing to see. Fewer moving parts, each able to
 fail.
 
@@ -500,7 +510,7 @@ the value** -- a `uses:`, or the `run:` line that reads the `env:` var the entry
 approves -- is a human obligation here. Measured on this tree, and it lands on
 `#34`'s own prescribed remediation: `AUDIT_LEVEL: ${{ inputs.audit-level }}` in
 a step `env:`, both old entries deleted, a correct new entry written, and the
-body reading `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` is **306 pass
+body reading `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` is **309 pass
 / 0 fail** -- the same figure as the safe landing state, which is the point: the
 suite cannot tell them apart. The entry's reason -- *"an `env:` value is data the
 runner sets, not source that bash parses"* -- is then false about the file it
@@ -521,7 +531,8 @@ Psych 5.3.1 / libyaml 0.2.5: can a scalar's content sit at an indentation less
 than or equal to its own key line's? For a literal block `|`, a folded block `>`
 and a plain multi-line scalar the answer is **no** -- content at or left of the
 key is a sibling key or a parse error -- so the owning key is unavoidably an
-ancestor and appears in the chain as a `(scalar)` link that no entry can match.
+ancestor and appears in the chain as a `(scalar)` link, and `entryShapeProblems`
+refuses any entry whose `context` names one.
 That is **three** styles, not the four this section and two other files claimed
 for a round. For a **multi-line double-quoted or single-quoted scalar, or a flow
 collection spanning lines, the answer is yes**: a continuation may sit at exactly
@@ -558,18 +569,40 @@ flow-collection state across the break, so a line that began inside an open
 scalar is data and may not open a mapping. One `while` loop, one character of
 lookahead, no regex and no YAML reader: the *understands no YAML* property the
 guarantee is sold on is intact. Re-measured on this tree, the same three
-dedented spellings on the real `ci.yml` are **300 pass / 6 fail** each, and all
+dedented spellings on the real `ci.yml` are **303 pass / 6 fail** each, and all
 five real workflows still sweep clean with no new allowlist entry.
-`test/raw-sweep-test.js` carries **eight** spellings as committed cases --
+`test/raw-sweep-test.js` carries **ten** spellings as committed cases --
 including a decoy `}`, which is ordinary content inside a double-quoted scalar
-and is the one that separates this from a plausible implementation.
+and is the one that separates this from a plausible implementation, and two
+that pin the flow-depth half of the walk. Both of those widenings were
+invisible: measured on this tree with the two rows deleted, unclamping the flow
+depth is 307 / 0 and clearing it at a `#` is 307 / 0, and with the rows present
+each is 308 / 1 on its own row.
 
 So the chain now closes **all five scalar styles and both flow collections**.
 Re-measured on this tree as live edits to the real files: the multi-line
-double-quoted forgery on `ci.yml` is 300 / 6, the same shape moving
-`secrets.CASCADE_PAT` into a shell body in `npm-publish.yml` is 300 / 6, the
-ordinary `run: |` forgery is 298 / 8, and the dedented forgery that used to be
-green is 300 / 6.
+double-quoted forgery on `ci.yml` is 303 / 6, the same shape moving
+`secrets.CASCADE_PAT` into a shell body in `npm-publish.yml` is 303 / 6, the
+ordinary `run: |` forgery is 301 / 8, and the dedented forgery that used to be
+green is 303 / 6.
+
+**And the refusal lives in the entry, not only in the chain.** Round 6 shipped
+*"no entry can name such a context, so copying it will not work"* in the
+contributor-facing hint, in the scanner's header, in the allowlist's header and
+here, and enforced it **nowhere**: `entryShapeProblems` had seven refusals and
+not one looked at the link. Copy the `(scalar)` context the red prints -- which
+is exactly what the allowlist header tells you to do with the other four fields
+-- into an otherwise well-formed entry and the guarantee returned **zero
+problems** with an org-level PAT live in a `curl` command line. The only thing
+refusing it was one assertion over the five shipped files in
+`test/raw-sweep-test.js`, which no allowlist edit can clear, so the
+contributor's edit and the attacker's edit were the same edit.
+`entryShapeProblems` now refuses any entry whose `context` names a `(scalar)`
+link, and `rawSweepProblems` calls it for every entry, so the refusal reds at
+the guarantee where the sentence says it does. It costs the suite nothing --
+no live entry names one -- and the price it does carry is stated in the banner
+above and in the rules below: an expression inside a block-scalar body is not
+pinnable where it sits, in any spelling.
 
 **The gap that remains is not a YAML shape, and no parser closes it either.**
 The key is `(file, context, line, expression)` and it **does not model who
@@ -577,7 +610,7 @@ receives the value**. Deleting
 `token: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}`
 from `actions/checkout`'s `with:` and re-adding it byte-identically under
 `uses: attacker/telemetry-action@v1` leaves file, chain, line and expression all
-unchanged -- **306 pass / 0 fail on this tree, and 294 / 0 on the previous one:
+unchanged -- **309 pass / 0 fail on this tree, and 294 / 0 on the previous one:
 the discriminator makes no difference to it, and a real YAML parser would make
 none either**, because parsing cannot fix a key that is asking the wrong
 question. This one is a human obligation on the diff, and it is a cheap one: the
@@ -612,7 +645,9 @@ patterns** is the rule the checks themselves are built to:
   steps > with`, `on > workflow_call > outputs > package-name`, or just
   `concurrency` for a top-level key. It is never `run` -- a one-line `run:`
   body's own line sits under `steps`, and a line *inside* a body gets a
-  `(scalar)` link that no entry can match. **Copy all five fields out of the
+  `(scalar)` link, which `entryShapeProblems` **refuses**: an entry naming one
+  is reported rather than honoured, so a `(scalar)` context is the one thing in
+  the message you must not copy. **Copy the other four fields out of the
   failure message**, which prints the context, the trimmed line, the expression
   and the line numbers verbatim. The `why` has
   to say what the expression is and why it is safe *here*. Adding the entry
@@ -631,11 +666,31 @@ patterns** is the rule the checks themselves are built to:
   the step's `name:` exactly as written -- and its `line` is the line **of the
   body**, with the `run: ` or `script: ` key prefix already removed. Writing
   `line: 'run: echo "${{ … }}"'` here, which is the value you have just typed
-  into the other file, is *worse* than leaving the entry out -- **302 / 4**
-  against 303 / 3, because the dead-entry check fires as well as the unpinned
-  one. Measured on this tree, adding a
-  `run:`-body expression to `ci.yml`: no entry anywhere **297 pass / 9 fail**;
-  with the first entry and nothing else **303 / 3**; with both **306 / 0**.
+  into the other file, is *worse* than leaving the entry out -- **305 / 4**
+  against 306 / 3, because the dead-entry check fires as well as the unpinned
+  one. Measured on this tree, adding a **one-line**
+  `run:`-body expression to `ci.yml`: no entry anywhere **300 pass / 9 fail**;
+  with the first entry and nothing else **306 / 3**; with both **309 / 0**.
+  **Both entries together do not cover an expression written INSIDE a
+  block-scalar `run: |` body.** Every line in such a body derives a `run
+  (scalar)` link, the guarantee entry has to name it, and an entry that names a
+  `(scalar)` link is refused -- so there is no pair of entries that clears it,
+  and no third file to edit either: measured on this tree, the ordinary
+  multi-line step below is **302 / 7** with both entries written correctly, and
+  one of the seven is `the live entries are all well-formed` -- the guarantee
+  refusing the entry by name. It is not a shape this
+  repo needs. Bind the value through the step's `env:` and read the shell
+  variable in the body -- which is what `npm-publish.yml` does everywhere --
+  and the same step is **309 / 0** with one entry and no second file touched:
+
+  ```yaml
+  - name: Print the versions
+    env:
+      PNPM_VERSION: ${{ inputs.pnpm-version }}
+    run: |
+      echo "building with pnpm"
+      echo "$PNPM_VERSION"
+  ```
 - **The occurrence total is derived, not pinned to a literal.** The three
   independent counts in `test/raw-sweep-test.js` -- the scanner's records, a
   raw `split('${{')`, and the allowlist's own `occurrences` sum -- have to
@@ -644,7 +699,7 @@ patterns** is the rule the checks themselves are built to:
   a snapshot of which keys the five current files happen to use -- so an
   ordinary construct written under a key none of them uses costs the entries
   above and nothing more. Measured: a job-level `if:` on `ci.yml`'s only job is
-  299 pass / 7 fail unallowlisted and **306 / 0 with one entry in one file**,
+  302 pass / 7 fail unallowlisted and **309 / 0 with one entry in one file**,
   wherever in that file's list the entry is written.
 - **An expression inside a shell `#` comment is a live sink.** The runner
   substitutes `${{ }}` into the run script textually before bash parses it, and

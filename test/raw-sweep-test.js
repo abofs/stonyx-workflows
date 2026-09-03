@@ -1246,16 +1246,20 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
   //     the row could not fail for the mechanism in its own label. Deleting the
   //     branch was 305 / 1 and the red was N-W1, whose payload happens to carry
   //     an odd one. One character -- `\"x\"` to `\"x` -- and it discriminates:
-  //     deleting the branch is now 309 / 2, D3 and N-W1.
+  //     deleting the branch is now 309 / 2, D3 and N-W1, and with D3 itself
+  //     deleted it is 308 / 1, N-W1 alone -- so the row is the catcher, not
+  //     the passenger.
   //   * D9's bare `}` pays for the `{` that opens the forged frame. Unclamping
   //     `depth` -- `depth = depth > 0 ? depth - 1 : 0` to `depth -= 1`, which
-  //     reads as removing a redundant ternary -- was 306 / 0 across the whole
-  //     suite and restored the byte-identical legitimate chain to this forgery.
-  //     It is now 309 / 1, D9 alone.
+  //     reads as removing a redundant ternary -- restored the byte-identical
+  //     legitimate chain to this forgery and was caught by nothing. Measured
+  //     on this tree with D9 and D10 deleted it is 307 / 0; with them present
+  //     it is 309 / 1, D9 alone.
   //   * D10's `#` sits on the flow opener. Making the comment bail CLEAR
   //     `depth` as well as break -- `#` is only reached with `quote === null`,
-  //     but it can be reached with `depth > 0` -- was 306 / 0 and equally
-  //     fail-open. It is now 309 / 1, D10 alone.
+  //     but it can be reached with `depth > 0` -- is equally fail-open and was
+  //     caught by nothing: 307 / 0 with D9 and D10 deleted, 309 / 1 with them
+  //     present, D10 alone.
   //
   // WHAT CLOSED IT, and why it is not a parser. The three forgeable scalar
   // styles are not defined by indentation or by colons -- each is defined by an
@@ -1501,7 +1505,12 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
       /began inside an open quoted scalar or flow collection/,
       'a red on a (scalar) link must explain why copying the context will not work',
     );
-    assert.match(forgedProblems[0], /rewrite it as a block scalar/, 'and must name the remedy');
+    assert.match(
+      forgedProblems[0],
+      /bind the value through a step `env:`/,
+      'and must name a remedy that converges -- "rewrite it as a block scalar" did not, because a line inside a '
+      + '`run: |` body derives `run (scalar)` and is refused there too',
+    );
 
     // An ordinary unpinned occurrence -- context with no `(scalar)` link -- must
     // NOT carry the hint, or it is noise on every red in the file.
@@ -1669,7 +1678,7 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     // 0 fail on THE TREE BEFORE THIS CASE EXISTED, with nothing to stop them --
     // "on this tree" is what that used to say, and it stopped being true the
     // moment this case landed. Re-measured on this tree, each of the two is
-    // 305 pass / 1 fail and the one red is this case:
+    // 308 pass / 1 fail and the one red is this case:
     //
     //   * collapsing internal double spaces, so an entry written for
     //     `a:  ${{ x }}` also exempts `a: ${{ x }}` -- a WIDENING, which is the
