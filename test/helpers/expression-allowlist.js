@@ -24,9 +24,22 @@
 //                outputs > package-name`, `concurrency` -- derived from raw
 //                text by `structuralContexts`. Copy it out of the failure
 //                message; the red prints it verbatim. A link rendered
-//                `<key> (scalar)` is a key that already carries a value, which
-//                in YAML cannot also carry children, so nothing under one can
-//                ever match an entry.
+//                `<key> (scalar)` marks a position that cannot legitimately
+//                open a mapping, so nothing under one can ever match an entry.
+//                It has TWO causes, and the difference matters when you are
+//                staring at an unexpected red: either the key already carries
+//                a value, which in YAML cannot also carry children; or the
+//                line BEGAN inside an open quoted scalar or flow collection
+//                and is therefore data, whatever it spells. The second is the
+//                one that surprises people. If you have just written a
+//                legitimate multi-line double-quoted or single-quoted value in
+//                a workflow, every line after the opener is inside it, and an
+//                expression on one of those lines will red as an entry
+//                mismatch rather than saying "you are inside a scalar" --
+//                there is deliberately no allowlist for that, because the
+//                shape has never yet occurred in these five files. Rewrite it
+//                as a block scalar (`|` or `>`), which is idiomatic here and
+//                which the walk correctly ignores.
 //                The trimmed line carries no context of its own, so an entry
 //                keyed on it alone approves the characters rather than the
 //                position: relocating `version: ${{ inputs.pnpm-version }}`
@@ -40,9 +53,32 @@
 //                made the payload supply its own context, 282 pass / 0 fail
 //                with the org PAT in a shell body (#37, Phase 1 F7, Phase 3
 //                §4). A chain closes every scalar style whose content must be
-//                more indented than its own key line, which is four of the
-//                five, measured against libyaml. A multi-line FLOW scalar is
-//                not closed and is disclosed as fail-open in README.md.
+//                more indented than its own key line -- literal block `|`,
+//                folded block `>`, plain multi-line -- which is THREE of the
+//                five, measured against Psych 5.3.1 / libyaml 0.2.5. This note
+//                said "four of the five", and named the remainder as "a
+//                multi-line FLOW scalar"; both were wrong, and wrong in the
+//                direction that makes a fail-open gap read smaller than it was
+//                (#37/PR #38, Phase 5 round 5 N5-1). The two styles the chain
+//                alone cannot close are the QUOTED ones, and the flow
+//                collections alongside them.
+//                Those are closed too, as of round 6, by a different mechanism
+//                in the same file: `walk` carries quote and flow-depth state
+//                ACROSS the line break, so a line that began inside an open
+//                scalar is data and cannot open a mapping. Before it, a forged
+//                `with:` DEDENTED to the enclosing key's own content indent
+//                derived a chain byte-identical to the line it replaced --
+//                294 pass / 0 fail with the org PAT in a live shell command
+//                line, in all three styles, reaching 34 of the 36 entries in
+//                this file by a mechanical transform. Re-measured on this
+//                tree, each of the three is 299 pass / 6 fail.
+//                So: ALL FIVE scalar styles and both flow collections are
+//                closed against context forgery, and eight spellings of it are
+//                committed as cases in `test/raw-sweep-test.js`. What is still
+//                open is not a YAML shape at all -- the key does not model WHO
+//                RECEIVES the input, so an entry re-added byte-identically
+//                under a different `uses:` still matches. README.md's *Honest
+//                gaps* carries that one; no parser closes it either.
 //   expression   the expression itself, so a line rewritten around a different
 //                expression is not covered by the old entry.
 //   occurrences  how many times it appears on that line across the file, so a

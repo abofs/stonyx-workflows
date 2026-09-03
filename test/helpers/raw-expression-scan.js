@@ -96,14 +96,45 @@
 //    not a key name; that direction is fail-closed". That was measured FALSE:
 //    it gets whatever key name the payload supplies, and a `with:` line
 //    written inside a `run:` body was 282 pass / 0 fail with the org-level
-//    `CASCADE_PAT` in a shell body (#37, Phase 1 F7, Phase 3 §4). The chain
-//    and the `(scalar)` link close every scalar style whose content must be
-//    more indented than its own key line -- which is four of the five, and
-//    both reviewers' payloads. A MULTI-LINE FLOW SCALAR is not closed: its
-//    continuation lines may sit at exactly the indentation a legitimate key
-//    would occupy, so the chain is forgeable there, and that is fail-OPEN.
-//    See `structuralContexts` for the measurement and README.md for the
-//    disclosure.
+//    `CASCADE_PAT` in a shell body (#37, Phase 1 F7, Phase 3 §4).
+//
+//    TWO MECHANISMS CLOSE IT, and they close different halves. The chain and
+//    the `(scalar)` link close every scalar style whose content MUST be more
+//    indented than its own key line -- literal block `|`, folded block `>`,
+//    and plain multi-line, THREE of the five. Round 5 of PR #38 measured that
+//    this note previously said FOUR, and that the remaining styles were "a
+//    multi-line flow scalar": both wrong, and wrong in the direction that
+//    understates a fail-open gap. The styles the chain alone cannot close are
+//    the two QUOTED ones and the flow collections, because each is defined not
+//    by indentation but by AN OPENER THAT HAS NOT CLOSED YET -- so a
+//    continuation line may sit at exactly the indent a legitimate key would
+//    occupy. Dedented to the enclosing key's own content indent, the forged
+//    frame pops immediately and the derived chain came out BYTE-IDENTICAL to
+//    the line it replaced: measured on the real files at 294 pass / 0 fail,
+//    double-quoted AND single-quoted AND flow, with the org-level
+//    `CASCADE_PAT` substituted into a live shell command line, and reaching 34
+//    of the 36 allowlist entries by a mechanical transform (#37/PR #38,
+//    Phase 3 round 5 §4, Phase 2 round 5 N-W1, Phase 5 round 5 N5-1).
+//
+//    That half is now closed by `walk`, whose quote and flow-depth state
+//    PERSISTS ACROSS THE LINE BREAK, so a line that began inside an open
+//    scalar may not open a mapping. It is not a parser and it needs no YAML
+//    understanding -- the previous claim here, that closing this "needs a
+//    parser", was false and is retracted. Re-measured on this tree, each of
+//    the three dedented spellings on the real `ci.yml`: 299 pass / 6 fail,
+//    from 294 / 0 green. All five scalar styles and both flow collections are
+//    closed against context forgery, and eight spellings of the forgery are
+//    committed as cases in `test/raw-sweep-test.js`.
+//
+//    WHAT IS STILL NOT CLOSED, so this note does not repeat its own history:
+//    the key is `(file, chain, line, expression)` and it DOES NOT MODEL THE
+//    RECIPIENT. Re-adding an allowlisted line byte-identically under a
+//    different `uses:` -- `actions/checkout` to `attacker/telemetry-action@v1`
+//    -- keeps the chain identical and is green here, with the discriminator
+//    installed and with a real parser alike, because parsing cannot fix a key
+//    that asks the wrong question. That one is a human obligation on the diff,
+//    where `uses:` is the loudest line a workflow change can carry. See
+//    `structuralContexts` for the derivation and README.md for the disclosure.
 //
 // This module is deliberately dull. `indexOf`, `slice`, `split` and `trim`. If
 // it ever needs to become clever, that is the signal that a guarantee is
@@ -341,8 +372,8 @@ function walk(line, state) {
  * question is "which lines can legitimately establish context", and the answer
  * turns on one measurable property: can a scalar's CONTENT sit at an
  * indentation less than or equal to its own key line's content indent? Every
- * YAML scalar style and both flow collections were measured against Psych /
- * libyaml 5.3.1:
+ * YAML scalar style and both flow collections were measured against Psych
+ * 5.3.1 / libyaml 0.2.5, and re-derived against the same pair in round 6:
  *
  *   literal block `|`   NO   -- content at or left of the key is a sibling key
  *   folded block `>`    NO   -- same
@@ -352,9 +383,11 @@ function walk(line, state) {
  *   single-quoted       YES  -- same
  *   flow mapping/seq    YES  -- same
  *
- * For the four NO rows the owning key line is unavoidably an ancestor of the
- * payload, so a chain closes them: a payload can LENGTHEN a chain, never
- * shorten one. That is why this is a chain and not a nearest key, and it is
+ * THREE NO ROWS, THREE YES ROWS -- and the count is written out because this
+ * note said "four" for a round, in the direction that understates the gap
+ * (PR #38, Phase 5 round 5 N5-1). For the three NO rows the owning key line is
+ * unavoidably an ancestor of the payload, so a chain closes them: a payload can
+ * LENGTHEN a chain, never shorten one. That is why this is a chain and not a nearest key, and it is
  * why the fix is not "reject `with:` inside `run:`" -- it rejects every
  * position a scalar whose content must be deeper can reach.
  *
@@ -363,11 +396,12 @@ function walk(line, state) {
  * open a mapping, so nothing nested under either can ever match an entry
  * written for one. Both measured payloads red on this alone.
  *
- * WHAT IS NOT CLOSED, STATED IN THE RIGHT DIRECTION. For the three YES rows the
- * chain is FORGEABLE, and this is fail-OPEN, not fail-closed. A multi-line
- * double-quoted, single-quoted or flow-collection scalar may place its
- * continuation lines at exactly the indentation a legitimate key would occupy,
- * so a payload can reproduce a legitimate ladder link for link:
+ * THE THREE YES ROWS, AND WHAT THE CHAIN ALONE COULD NOT DO ABOUT THEM. For
+ * those three a continuation line may sit at exactly the indentation a
+ * legitimate key would occupy, so a payload can reproduce a legitimate ladder
+ * link for link. INDENTED under the opener the chain still lengthens and the
+ * entry stops matching, which is what the four committed relocation cases
+ * measure. DEDENTED to the enclosing key's own content indent it does not:
  *
  *     - name: Leak
  *       run: "true
@@ -375,14 +409,41 @@ function walk(line, state) {
  *         token: ${{ secrets.CASCADE_PAT }}
  *       "
  *
- * -- measured valid YAML, `run` resolving to the whole shell string. No
- * function of indentation and colons can tell those lines from real keys,
- * because at the byte level they ARE what a real key looks like. Closing it
- * needs a parser, and the guarantee does not parse. `README.md`'s *Honest gaps*
- * carries this, and the PR body's previous claim -- that a line under a shell
- * construct "gets a context that is not a key name; that direction is
- * fail-closed" -- was measured FALSE and has been corrected: it gets whatever
- * key name the payload supplies.
+ * -- valid YAML, `run` resolving to the whole shell string, the forged frame
+ * popping before the payload line is read, and the derived chain therefore
+ * BYTE-IDENTICAL to the `actions/checkout` input it replaced. The entry
+ * matched, the entry was not dead, and the guarantee returned `[]` at 294 pass
+ * / 0 fail with an org-level PAT in a shell command line -- in all three
+ * styles, not the one this note used to name, and against 34 of the 36
+ * allowlist entries by a mechanical transform (PR #38 round 5: Phase 3 §4,
+ * Phase 2 N-W1, Phase 5 N5-1).
+ *
+ * WHAT CLOSED IT, AND WHY IT IS NOT A PARSER. This note used to say "closing
+ * it needs a parser, and the guarantee does not parse". That was correct about
+ * the alphabet it named and wrong about which alphabet is available: the three
+ * YES styles are not defined by indentation or by colons, each is defined by
+ * AN OPENER THAT HAS NOT CLOSED YET, which is a fact about bytes on the
+ * PREVIOUS line -- the one thing a per-line reading discards. `walk` puts it
+ * back. A line that BEGAN inside an open quoted scalar or flow collection is
+ * DATA and may not open a mapping, so every link it would have contributed is
+ * marked `(scalar)` instead. That is one `while` loop and one character of
+ * lookahead; it reaches no YAML reader and the "understands no YAML" property
+ * is intact. The false impossibility claim is retracted rather than softened,
+ * because a reader who believed it would not have looked for the cheap fix.
+ *
+ * Measured on this tree: the three dedented spellings on the real `ci.yml` go
+ * from 294 / 0 GREEN to 299 pass / 6 fail, all five real workflows still sweep
+ * clean with no new allowlist entry, and eight spellings are committed as
+ * cases -- including a decoy `}`, which is ordinary content inside a
+ * double-quoted scalar and is the case that separates this from a plausible
+ * implementation that resets quote state per line.
+ *
+ * STILL NOT CLOSED, AND NOT CLOSEABLE HERE. The key does not model WHO
+ * RECEIVES the input. Re-adding an allowlisted line byte-identically under
+ * `uses: attacker/telemetry-action@v1` leaves file, chain, line and expression
+ * all unchanged, and is green with this discriminator and with a real parser
+ * alike. That is a human obligation on the diff, and `README.md`'s *Honest
+ * gaps* carries it.
  *
  * Derived from raw text -- indentation and the first colon -- never from the
  * extractor. It is not a YAML path and does not claim to be one.
