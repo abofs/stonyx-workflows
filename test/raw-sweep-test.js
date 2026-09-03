@@ -1422,8 +1422,13 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
       '          node-version: ${{ inputs.node-version }}',
       '        "',
     ));
-    const forgedProblems = sweep('ci.yml', forged).filter((p) => UNPINNED.test(p));
-    assert.equal(forgedProblems.length, 1, 'exactly one occurrence should be unpinned here');
+    // Filtered to THIS line rather than counted globally. An assertion that
+    // `ci.yml` has exactly one unpinned occurrence would red on any future
+    // expression added to that file, which is the churn-tripwire class this PR
+    // deleted twice; the subject here is the message, not the file's contents.
+    const forgedProblems = sweep('ci.yml', forged)
+      .filter((p) => UNPINNED.test(p) && p.includes('with (scalar)'));
+    assert.equal(forgedProblems.length, 1, 'the forged line should be unpinned under a (scalar) link');
     assert.match(
       forgedProblems[0],
       /began inside an open quoted scalar or flow collection/,
@@ -1433,13 +1438,16 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
 
     // An ordinary unpinned occurrence -- context with no `(scalar)` link -- must
     // NOT carry the hint, or it is noise on every red in the file.
+    // The probe expression is a name no workflow uses, so this filter cannot
+    // collide with whatever else happens to be unpinned in a mutated `ci.yml`.
+    const PROBE = '${{ inputs.hint-probe }}';
     const ordinary = ci.replace(
       "          cache: 'pnpm'",
-      "          cache: 'pnpm'\n          registry-url: ${{ inputs.node-version }}",
+      `          cache: 'pnpm'\n          registry-url: ${PROBE}`,
     );
     assert.notEqual(ordinary, ci, 'the insertion must actually have applied');
-    const ordinaryProblems = sweep('ci.yml', ordinary).filter((p) => UNPINNED.test(p));
-    assert.equal(ordinaryProblems.length, 1, 'exactly one occurrence should be unpinned here too');
+    const ordinaryProblems = sweep('ci.yml', ordinary).filter((p) => UNPINNED.test(p) && p.includes(PROBE));
+    assert.equal(ordinaryProblems.length, 1, 'the inserted line should be the unpinned one');
     assert.ok(
       !ordinaryProblems[0].includes('(scalar)'),
       `a red on an ordinary key must not mention (scalar); got ${ordinaryProblems[0]}`,
