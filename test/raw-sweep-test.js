@@ -1210,12 +1210,33 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
   // BYTE-IDENTICAL to the legitimate line it replaced. The entry matches, the
   // entry is not dead, and the guarantee returns `[]`.
   //
-  // Measured on `1a98115`, all eight rows below: guarantee `[]`, suite
-  // 294 pass / 0 fail, with `(inputs.cascade-source != '' && secrets.CASCADE_PAT)
-  // || github.token` -- an org-level PAT with write across ten repos --
-  // substituted into a live shell string. Seven of the eight are valid YAML
-  // whose `run` Psych resolves to that string (PR #38, Phase 3 round 5
+  // Measured with `test/helpers/raw-expression-scan.js` reverted to `1a98115`,
+  // ALL TEN rows below: the guarantee returns `[]` for every one of them and
+  // the suite is 309 tests, 294 pass / 15 fail -- the fifteen reds being these
+  // ten plus the mechanism, monotonicity, hint, N-W1 and N-W2 cases. The
+  // payload is `(inputs.cascade-source != '' && secrets.CASCADE_PAT) ||
+  // github.token` -- an org-level PAT with write across ten repos --
+  // substituted into a live shell string. Seven of the first eight are valid
+  // YAML whose `run` Psych resolves to that string (PR #38, Phase 3 round 5
   // §4a/§4c/§4e). The same transform reached 34 of the 36 allowlist entries.
+  //
+  // ROWS 3, 9 AND 10 ARE PINS ON `walk`'s OWN BRANCHES, and each of the three
+  // was measured before it was written (PR #38, Phase 4 round 6 §3b, N-1, N-2).
+  //   * D3 carried `\"x\"` for a round -- an EVEN number of escaped quotes,
+  //     which leaves the quote open with the `\` branch and open without it, so
+  //     the row could not fail for the mechanism in its own label. Deleting the
+  //     branch was 305 / 1 and the red was N-W1, whose payload happens to carry
+  //     an odd one. One character -- `\"x\"` to `\"x` -- and it discriminates:
+  //     deleting the branch is now 309 / 2, D3 and N-W1.
+  //   * D9's bare `}` pays for the `{` that opens the forged frame. Unclamping
+  //     `depth` -- `depth = depth > 0 ? depth - 1 : 0` to `depth -= 1`, which
+  //     reads as removing a redundant ternary -- was 306 / 0 across the whole
+  //     suite and restored the byte-identical legitimate chain to this forgery.
+  //     It is now 309 / 1, D9 alone.
+  //   * D10's `#` sits on the flow opener. Making the comment bail CLEAR
+  //     `depth` as well as break -- `#` is only reached with `quote === null`,
+  //     but it can be reached with `depth > 0` -- was 306 / 0 and equally
+  //     fail-open. It is now 309 / 1, D10 alone.
   //
   // WHAT CLOSED IT, and why it is not a parser. The three forgeable scalar
   // styles are not defined by indentation or by colons -- each is defined by an
@@ -1249,9 +1270,9 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
       PAT_LINE,
       '        "',
     )],
-    ['D3  decoy escaped quotes `\\"x\\"` on the opening line', step(
+    ['D3  decoy escaped quote `\\"x` -- ODD, because an even run cannot discriminate', step(
       '      - name: Forged',
-      '        run: "true \\"x\\"',
+      '        run: "true \\"x',
       '        with:',
       PAT_LINE,
       '        "',
@@ -1291,6 +1312,23 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
       '        with:',
       PAT_LINE,
       '        "',
+    )],
+    ['D9  a bare `}` one line ABOVE the flow opener, to pay for it', step(
+      '      - name: Forged',
+      '        run: echo }',
+      '        env: {',
+      '        with:',
+      PAT_LINE,
+      '        }',
+      '        run2: echo hi',
+    )],
+    ['D10 a `#` on the flow opener, so the walk bails with the frame still open', step(
+      '      - name: Forged',
+      '        env: { # x',
+      '        with:',
+      PAT_LINE,
+      '        }',
+      '        run: echo hi',
     )],
   ];
 
