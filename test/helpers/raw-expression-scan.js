@@ -121,7 +121,7 @@
 //    scalar may not open a mapping. It is not a parser and it needs no YAML
 //    understanding -- the previous claim here, that closing this "needs a
 //    parser", was false and is retracted. Re-measured on this tree, each of
-//    the three dedented spellings on the real `ci.yml`: 299 pass / 6 fail,
+//    the three dedented spellings on the real `ci.yml`: 300 pass / 6 fail,
 //    from 294 / 0 green. All five scalar styles and both flow collections are
 //    closed against context forgery, and eight spellings of the forgery are
 //    committed as cases in `test/raw-sweep-test.js`.
@@ -432,7 +432,7 @@ function walk(line, state) {
  * because a reader who believed it would not have looked for the cheap fix.
  *
  * Measured on this tree: the three dedented spellings on the real `ci.yml` go
- * from 294 / 0 GREEN to 299 pass / 6 fail, all five real workflows still sweep
+ * from 294 / 0 GREEN to 300 pass / 6 fail, all five real workflows still sweep
  * clean with no new allowlist entry, and eight spellings are committed as
  * cases -- including a decoy `}`, which is ordinary content inside a
  * double-quoted scalar and is the case that separates this from a plausible

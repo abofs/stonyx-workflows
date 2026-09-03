@@ -1544,7 +1544,10 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     // PR body and nowhere in the repo -- `grep -rin "double space\|collaps"
     // test/ README.md docs/` was empty (#37, Phase 5 N-N1). Both normalisations
     // an engineer tidying this key would reach for were measured at 293 pass /
-    // 0 fail on this tree with nothing to stop them:
+    // 0 fail on THE TREE BEFORE THIS CASE EXISTED, with nothing to stop them --
+    // "on this tree" is what that used to say, and it stopped being true the
+    // moment this case landed. Re-measured on this tree, each of the two is
+    // 305 pass / 1 fail and the one red is this case:
     //
     //   * collapsing internal double spaces, so an entry written for
     //     `a:  ${{ x }}` also exempts `a: ${{ x }}` -- a WIDENING, which is the

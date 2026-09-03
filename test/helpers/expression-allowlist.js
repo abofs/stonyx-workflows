@@ -71,7 +71,7 @@
 //                294 pass / 0 fail with the org PAT in a live shell command
 //                line, in all three styles, reaching 34 of the 36 entries in
 //                this file by a mechanical transform. Re-measured on this
-//                tree, each of the three is 299 pass / 6 fail.
+//                tree, each of the three is 300 pass / 6 fail.
 //                So: ALL FIVE scalar styles and both flow collections are
 //                closed against context forgery, and eight spellings of it are
 //                committed as cases in `test/raw-sweep-test.js`. What is still

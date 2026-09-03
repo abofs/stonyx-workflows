@@ -10,10 +10,10 @@ Shared GitHub Actions workflows for Stonyx framework packages.
 > free. It needs an **allowlist entry** saying why it is safe there, and if it
 > sits in a `run:` or `script:` body it needs a **second entry** in the
 > step-scoped allowlist as well. Nothing else: no count to bump anywhere.
-> Measured on this tree -- a `run:`-body expression in `ci.yml` is 296 pass /
-> 9 fail with no entry, 302 / 3 with the first, 305 / 0 with both; an
+> Measured on this tree -- a `run:`-body expression in `ci.yml` is 297 pass /
+> 9 fail with no entry, 303 / 3 with the first, 306 / 0 with both; an
 > expression in a `with:`, `env:` or `concurrency:` position needs only the
-> first and is 299 / 6 without it, 305 / 0 with it. Both rules, and the
+> first and is 300 / 6 without it, 306 / 0 with it. Both rules, and the
 > properties of the runner they are shaped around, are stated in full under
 > [The guarantee, and everything that is not one](#the-guarantee-and-everything-that-is-not-one).
 
@@ -461,7 +461,7 @@ their own and no live sink, so round 5 removed them. What is left is calibrated
 against the four spellings that defeated its predecessors, and it fails on each
 of them: measured on this tree, a static import of the extractor, an indented
 one, a dynamic `import()` of a relative specifier and one of an absolute
-`file://` URL are each **304 pass / 1 fail**, as is removing every static import
+`file://` URL are each **305 pass / 1 fail**, as is removing every static import
 so the non-vacuity guard has nothing to see. Fewer moving parts, each able to
 fail.
 
@@ -500,7 +500,7 @@ the value** -- a `uses:`, or the `run:` line that reads the `env:` var the entry
 approves -- is a human obligation here. Measured on this tree, and it lands on
 `#34`'s own prescribed remediation: `AUDIT_LEVEL: ${{ inputs.audit-level }}` in
 a step `env:`, both old entries deleted, a correct new entry written, and the
-body reading `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` is **305 pass
+body reading `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` is **306 pass
 / 0 fail** -- the same figure as the safe landing state, which is the point: the
 suite cannot tell them apart. The entry's reason -- *"an `env:` value is data the
 runner sets, not source that bash parses"* -- is then false about the file it
@@ -558,7 +558,7 @@ flow-collection state across the break, so a line that began inside an open
 scalar is data and may not open a mapping. One `while` loop, one character of
 lookahead, no regex and no YAML reader: the *understands no YAML* property the
 guarantee is sold on is intact. Re-measured on this tree, the same three
-dedented spellings on the real `ci.yml` are **299 pass / 6 fail** each, and all
+dedented spellings on the real `ci.yml` are **300 pass / 6 fail** each, and all
 five real workflows still sweep clean with no new allowlist entry.
 `test/raw-sweep-test.js` carries **eight** spellings as committed cases --
 including a decoy `}`, which is ordinary content inside a double-quoted scalar
@@ -566,10 +566,10 @@ and is the one that separates this from a plausible implementation.
 
 So the chain now closes **all five scalar styles and both flow collections**.
 Re-measured on this tree as live edits to the real files: the multi-line
-double-quoted forgery on `ci.yml` is 299 / 6, the same shape moving
-`secrets.CASCADE_PAT` into a shell body in `npm-publish.yml` is 299 / 6, the
-ordinary `run: |` forgery is 297 / 8, and the dedented forgery that used to be
-green is 299 / 6.
+double-quoted forgery on `ci.yml` is 300 / 6, the same shape moving
+`secrets.CASCADE_PAT` into a shell body in `npm-publish.yml` is 300 / 6, the
+ordinary `run: |` forgery is 298 / 8, and the dedented forgery that used to be
+green is 300 / 6.
 
 **The gap that remains is not a YAML shape, and no parser closes it either.**
 The key is `(file, context, line, expression)` and it **does not model who
@@ -577,7 +577,7 @@ receives the value**. Deleting
 `token: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}`
 from `actions/checkout`'s `with:` and re-adding it byte-identically under
 `uses: attacker/telemetry-action@v1` leaves file, chain, line and expression all
-unchanged -- **305 pass / 0 fail on this tree, and 294 / 0 on the previous one:
+unchanged -- **306 pass / 0 fail on this tree, and 294 / 0 on the previous one:
 the discriminator makes no difference to it, and a real YAML parser would make
 none either**, because parsing cannot fix a key that is asking the wrong
 question. This one is a human obligation on the diff, and it is a cheap one: the
@@ -631,11 +631,11 @@ patterns** is the rule the checks themselves are built to:
   the step's `name:` exactly as written -- and its `line` is the line **of the
   body**, with the `run: ` or `script: ` key prefix already removed. Writing
   `line: 'run: echo "${{ … }}"'` here, which is the value you have just typed
-  into the other file, is *worse* than leaving the entry out -- **301 / 4**
-  against 302 / 3, because the dead-entry check fires as well as the unpinned
+  into the other file, is *worse* than leaving the entry out -- **302 / 4**
+  against 303 / 3, because the dead-entry check fires as well as the unpinned
   one. Measured on this tree, adding a
-  `run:`-body expression to `ci.yml`: no entry anywhere **296 pass / 9 fail**;
-  with the first entry and nothing else **302 / 3**; with both **305 / 0**.
+  `run:`-body expression to `ci.yml`: no entry anywhere **297 pass / 9 fail**;
+  with the first entry and nothing else **303 / 3**; with both **306 / 0**.
 - **The occurrence total is derived, not pinned to a literal.** The three
   independent counts in `test/raw-sweep-test.js` -- the scanner's records, a
   raw `split('${{')`, and the allowlist's own `occurrences` sum -- have to
@@ -644,7 +644,7 @@ patterns** is the rule the checks themselves are built to:
   a snapshot of which keys the five current files happen to use -- so an
   ordinary construct written under a key none of them uses costs the entries
   above and nothing more. Measured: a job-level `if:` on `ci.yml`'s only job is
-  298 pass / 7 fail unallowlisted and **305 / 0 with one entry in one file**,
+  299 pass / 7 fail unallowlisted and **306 / 0 with one entry in one file**,
   wherever in that file's list the entry is written.
 - **An expression inside a shell `#` comment is a live sink.** The runner
   substitutes `${{ }}` into the run script textually before bash parses it, and
