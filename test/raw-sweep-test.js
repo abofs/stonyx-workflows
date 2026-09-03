@@ -1244,8 +1244,8 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
   //   * D3 carried `\"x\"` for a round -- an EVEN number of escaped quotes,
   //     which leaves the quote open with the `\` branch and open without it, so
   //     the row could not fail for the mechanism in its own label. Deleting the
-  //     branch was 305 / 1 and the red was N-W1, whose payload happens to carry
-  //     an odd one. One character -- `\"x\"` to `\"x` -- and it discriminates:
+  //     branch was 305 / 1 ON THE ROUND-6 TREE (306 tests) and the red was
+  //     N-W1, whose payload happens to carry an odd one. One character -- `\"x\"` to `\"x` -- and it discriminates:
   //     deleting the branch is now 307 pass / 2 fail, D3 and N-W1, and with D3
   //     itself deleted it is 307 / 1, N-W1 alone -- so the row is the catcher,
   //     not the passenger.

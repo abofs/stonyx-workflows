@@ -818,8 +818,9 @@ export function entryShapeProblems(file, entry) {
  * link to another and the entry is refused there too (PR #38, Phase 2 round 6
  * §4, measured). There is no spelling of an entry that pins an expression
  * under a `(scalar)` link. The remedy is a workflow edit, and it is the one
- * `npm-publish.yml` already uses everywhere: bind the value through a step
- * `env:` and reference the shell variable in the body.
+ * `npm-publish.yml` already uses for eleven of its twenty-five expressions,
+ * against one that sits in a `run:` line: bind the value through a step `env:`
+ * and reference the shell variable in the body.
  */
 function scalarHint(context) {
   if (!context.includes(SCALAR)) return '';

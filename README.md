@@ -680,7 +680,8 @@ patterns** is the rule the checks themselves are built to:
   one of the seven is `the live entries are all well-formed` -- the guarantee
   refusing the entry by name. It is not a shape this
   repo needs. Bind the value through the step's `env:` and read the shell
-  variable in the body -- which is what `npm-publish.yml` does everywhere --
+  variable in the body -- which is what `npm-publish.yml` already does for
+  eleven of its twenty-five expressions, against one in a `run:` line --
   and the same step is **309 / 0** with one entry and no second file touched:
 
   ```yaml

@@ -50,7 +50,8 @@
 //                expression under a `(scalar)` link is not pinnable where it
 //                sits, in any spelling. Bind the value through a step `env:`
 //                and reference the shell variable in the body, which is what
-//                `npm-publish.yml` already does everywhere.
+//                `npm-publish.yml` already does for eleven of its twenty-five
+//                expressions, against one that sits in a `run:` line.
 //                The trimmed line carries no context of its own, so an entry
 //                keyed on it alone approves the characters rather than the
 //                position: relocating `version: ${{ inputs.pnpm-version }}`
