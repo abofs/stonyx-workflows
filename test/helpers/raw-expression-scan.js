@@ -244,6 +244,84 @@ function valueOf(raw) {
 }
 
 /**
+ * Whether a key's value OPENS A BLOCK SCALAR (`|`, `>`, and their chomping and
+ * indentation variants), inside which no quote and no bracket is special.
+ *
+ * Measured, Psych / libyaml 5.3.1 / 0.2.5: `k: |` then `  "unclosed` then
+ * `  still: body` loads as the string `"unclosed\nstill: body\n"` -- the
+ * unbalanced `"` is ordinary content and does not open anything. So the walk
+ * below has to be SUSPENDED in here, or one apostrophe of shell text would
+ * poison every line after it.
+ */
+function blockScalarValue(value) {
+  return value.startsWith('|') || value.startsWith('>');
+}
+
+/**
+ * One continuous character walk whose quote and flow-collection state PERSISTS
+ * ACROSS LINE BREAKS, because that is exactly what a multi-line quoted scalar
+ * is: a quote state that survives a `\n`.
+ *
+ * WHY THIS EXISTS. `structuralContexts` used to discard all state at every
+ * `\n` and then correctly prove that what remained -- indentation and the
+ * first colon -- cannot tell a forged key from a real one. It cannot; the
+ * discarded state can. A line that BEGAN inside an open quoted scalar or an
+ * open flow collection is DATA, whatever it looks like, and data may not open
+ * a mapping. That fact is about bytes on the PREVIOUS line, which is why no
+ * function of one line in isolation could ever have closed this.
+ *
+ * THE RULES, DERIVED AGAINST libyaml RATHER THAN ASSUMED -- the same way the
+ * escape alphabet was derived. Psych 5.3.1 / libyaml 0.2.5, probing whether an
+ * open scalar still swallows a following dedented `with:` line:
+ *
+ *   double-quoted   `\` escapes the next character; ONLY a bare `"` closes.
+ *                   `}`, `]`, `'`, `#` and `:` are ordinary content -- all
+ *                   measured still-open.
+ *   single-quoted   `''` is an escaped quote; ONLY a bare `'` closes. `\` is
+ *                   NOT special: `k: 'a\'' b'` loads as `a\' b`, so a
+ *                   backslash branch here would be wrong.
+ *   flow            `{` `[` open, `}` `]` close. A flow collection left open
+ *                   across a break is a `Psych::SyntaxError` -- it cannot
+ *                   carry a payload, but it must still not go green, and
+ *                   poisoning the link is how it fails closed.
+ *   `#`             starts a comment only at line start or after a space
+ *                   (`k: a#b` is the string `a#b`), and never inside a quote.
+ *
+ * MONOTONE FAIL-CLOSED, which is the property that makes it safe to add
+ * without re-auditing every other pin. Dirty state can only ever mark a link
+ * `(scalar)`, which can only ever make an occurrence lose its entry and that
+ * entry go dead -- MORE problems. It cannot silence a problem that already
+ * reds.
+ *
+ * ONE CHARACTER OF LOOKAHEAD, no regex, no dependency, no YAML understanding.
+ */
+function walk(line, state) {
+  let i = 0;
+  let { quote, depth } = state;
+
+  while (i < line.length) {
+    const ch = line[i];
+    if (quote === '"') {
+      if (ch === '\\') { i += 2; continue; }
+      if (ch === '"') quote = null;
+      i += 1; continue;
+    }
+    if (quote === "'") {
+      if (ch === "'" && line[i + 1] === "'") { i += 2; continue; }
+      if (ch === "'") quote = null;
+      i += 1; continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; i += 1; continue; }
+    if (ch === '{' || ch === '[') { depth += 1; i += 1; continue; }
+    if (ch === '}' || ch === ']') { depth = depth > 0 ? depth - 1 : 0; i += 1; continue; }
+    if (ch === '#' && (i === 0 || line[i - 1] === ' ')) break;
+    i += 1;
+  }
+
+  return { quote, depth };
+}
+
+/**
  * For every line of `text`, the CHAIN of enclosing keys it is written under --
  * `jobs > dispatch > steps > with` -- with any link that cannot legitimately
  * open a mapping rendered as `<key> (scalar)`.
@@ -312,6 +390,7 @@ function valueOf(raw) {
 export function structuralContexts(text) {
   const contexts = [];
   const open = [];
+  let state = { quote: null, depth: 0 };
   const chain = () => (open.length === 0 ? TOP_LEVEL : open.map((frame) => frame.link).join(CHAIN_SEPARATOR));
 
   for (const raw of text.split('\n')) {
@@ -324,11 +403,23 @@ export function structuralContexts(text) {
     contexts.push(chain());
 
     const key = keyOf(raw);
+    const value = valueOf(raw);
+    // Inside a block scalar no quote and no bracket is special, so the walk is
+    // suspended there -- see `blockScalarValue`.
+    const inBlock = open.some((frame) => frame.block);
+    // Read BEFORE walking this line: the question is what state this line
+    // BEGAN in, not what it ends in.
+    const dirtyAtLineStart = state.quote !== null || state.depth > 0;
+    if (!inBlock) state = walk(raw.slice(indent), state);
+
     // A key that already carries a value has no room for children, so it can
     // never be a legitimate ancestor. A line with no colon at all -- `*alias`,
     // `? run` -- opens no mapping either, and `valueOf` returns its whole body.
-    const link = valueOf(raw) === '' ? key : `${key} ${SCALAR}`.trim();
-    open.push({ indent, link });
+    // AND a line that began inside an open quoted scalar or flow collection is
+    // DATA whatever it spells, so it may not open a mapping either -- that is
+    // the one thing a per-line reading could not know.
+    const link = (value === '' && !dirtyAtLineStart) ? key : `${key} ${SCALAR}`.trim();
+    open.push({ indent, link, block: !inBlock && blockScalarValue(value) });
   }
 
   return contexts;
