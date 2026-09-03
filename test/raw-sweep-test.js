@@ -59,9 +59,9 @@ const step = (...lines) => lines.join('\n');
  * mutation the PAT occurrence is EXEMPT with a chain byte-identical to the
  * legitimate line, while two lines of downstream collateral still match both
  * patterns. Re-measured on this tree: `}`/`]` treated as closers inside a
- * double quote is 309 / 1 with the fixtures where they sit, 309 / 0 -- fully
- * green with the sink live -- with the fixtures relocated and the round-6
- * assertion, and 309 / 1 again with this one. Naming the payload makes the D
+ * double quote is 308 pass / 1 fail with the fixtures where they sit, 309 / 0
+ * -- fully green with the sink live -- with the fixtures relocated and the
+ * round-6 assertion, and 308 / 1 again with this one. Naming the payload makes the D
  * rows immune to placement and to collateral, and it costs nothing today.
  */
 function assertReports(problems, pattern, why, naming = null) {
@@ -1246,19 +1246,19 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
   //     the row could not fail for the mechanism in its own label. Deleting the
   //     branch was 305 / 1 and the red was N-W1, whose payload happens to carry
   //     an odd one. One character -- `\"x\"` to `\"x` -- and it discriminates:
-  //     deleting the branch is now 309 / 2, D3 and N-W1, and with D3 itself
-  //     deleted it is 308 / 1, N-W1 alone -- so the row is the catcher, not
-  //     the passenger.
+  //     deleting the branch is now 307 pass / 2 fail, D3 and N-W1, and with D3
+  //     itself deleted it is 307 / 1, N-W1 alone -- so the row is the catcher,
+  //     not the passenger.
   //   * D9's bare `}` pays for the `{` that opens the forged frame. Unclamping
   //     `depth` -- `depth = depth > 0 ? depth - 1 : 0` to `depth -= 1`, which
   //     reads as removing a redundant ternary -- restored the byte-identical
   //     legitimate chain to this forgery and was caught by nothing. Measured
   //     on this tree with D9 and D10 deleted it is 307 / 0; with them present
-  //     it is 309 / 1, D9 alone.
+  //     it is 308 / 1, D9 alone.
   //   * D10's `#` sits on the flow opener. Making the comment bail CLEAR
   //     `depth` as well as break -- `#` is only reached with `quote === null`,
   //     but it can be reached with `depth > 0` -- is equally fail-open and was
-  //     caught by nothing: 307 / 0 with D9 and D10 deleted, 309 / 1 with them
+  //     caught by nothing: 307 / 0 with D9 and D10 deleted, 308 / 1 with them
   //     present, D10 alone.
   //
   // WHAT CLOSED IT, and why it is not a parser. The three forgeable scalar
