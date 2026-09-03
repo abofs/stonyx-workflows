@@ -46,11 +46,30 @@ const appendStep = (text, stepYaml) => `${text.replace(/\n+$/, '\n')}\n${stepYam
 
 const step = (...lines) => lines.join('\n');
 
-/** Assert at least one problem matches, and print what was actually reported when none does. */
-function assertReports(problems, pattern, why) {
+/**
+ * Assert at least one problem matches, and print what was actually reported
+ * when none does.
+ *
+ * `naming` is the payload the problem has to be ABOUT, and it is not optional
+ * decoration. Measured on PR #38 by Phase 3 round 6 §3a: `some(pattern)` alone
+ * made D2's non-vacuity an accident of where its fixture sat. `appendStep` puts
+ * the forgery at end of file, so a broken walk produced zero problems and
+ * `some` was false; relocate the identical forgery mid-file -- a plausible,
+ * well-intentioned, security-neutral-looking edit -- and under the same
+ * mutation the PAT occurrence is EXEMPT with a chain byte-identical to the
+ * legitimate line, while two lines of downstream collateral still match both
+ * patterns. Re-measured on this tree: `}`/`]` treated as closers inside a
+ * double quote is 309 / 1 with the fixtures where they sit, 309 / 0 -- fully
+ * green with the sink live -- with the fixtures relocated and the round-6
+ * assertion, and 309 / 1 again with this one. Naming the payload makes the D
+ * rows immune to placement and to collateral, and it costs nothing today.
+ */
+function assertReports(problems, pattern, why, naming = null) {
+  const matched = problems.filter((p) => pattern.test(p) && (naming === null || p.includes(naming)));
   assert.ok(
-    problems.some((p) => pattern.test(p)),
-    `${why}\nexpected a problem matching ${pattern}\ngot:\n${problems.map((p) => `  - ${p}`).join('\n') || '  (none)'}`,
+    matched.length > 0,
+    `${why}\nexpected a problem matching ${pattern}${naming === null ? '' : ` and naming ${naming}`}`
+    + `\ngot:\n${problems.map((p) => `  - ${p}`).join('\n') || '  (none)'}`,
   );
 }
 
@@ -1336,8 +1355,15 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     test(`${label} -- the guarantee reds`, () => {
       assert.notEqual(DEPATTED, npmPublish, 'the PAT line must actually have been removed');
       const problems = sweep('npm-publish.yml', appendStep(DEPATTED, forgery));
-      assertReports(problems, UNPINNED, 'a line that began inside an open scalar is shell text, not an action input');
-      assertReports(problems, DEAD, 'and the entry it was written for now matches nothing');
+      // NAMED, not merely counted -- see `assertReports`. Every row carries the
+      // org PAT, so the problem that reds has to be the one about the PAT, or
+      // the row can pass on collateral from elsewhere in the file while the
+      // payload itself sits exempt. D2 is load-bearing for two distinct wrong
+      // models -- `}`-as-closer and per-line state reset -- and it is the sole
+      // catcher of both, so this is the assertion the round rests on.
+      assertReports(problems, UNPINNED, 'a line that began inside an open scalar is shell text, not an action input',
+        'secrets.CASCADE_PAT');
+      assertReports(problems, DEAD, 'and the entry it was written for now matches nothing', 'secrets.CASCADE_PAT');
     });
   }
 
