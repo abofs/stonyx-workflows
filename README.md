@@ -220,7 +220,7 @@ wired today. Read the whole list rather than the top of it:
 ```
 
 The release-artifact guard adds ten more. They are split here because the
-split is what an operator needs at the point of use: **one** of them means the
+split is what an operator needs at the point of use: **two** of them mean the
 tarball is poisoned and the consumer must change their `package.json`; the other
 **eight** mean the guard itself could not establish what it was looking at, and
 no consumer-side change will clear them. Ten repos publish through this step, so

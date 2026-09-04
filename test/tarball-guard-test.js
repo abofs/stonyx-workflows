@@ -1146,6 +1146,66 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     }
   });
 
+  test("README's split of those strings matches the two lists it splits them into", () => {
+    // The pin above says every string is indexed SOMEWHERE. It says nothing
+    // about the two groups the block sorts them into, and the split is exactly
+    // where README drifted: the prose read "one ... the other eight" over lists
+    // holding 2 and 7. The split is the part an operator uses -- one group
+    // means change your own package.json, the other means open a PR in this
+    // repo -- so a reader counting the first group and finding the prose
+    // disagrees has no way to tell which half is stale.
+    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    const start = readme.indexOf('The release-artifact guard adds');
+    assert.notEqual(start, -1, 'the guard section of the grepable-failure block is gone from README');
+    const section = readme.slice(start);
+
+    const declaredTotal = section.match(/guard adds (\w+) more/);
+    assert.ok(
+      declaredTotal && NUMBER_WORDS[declaredTotal[1]] !== undefined,
+      `README does not state a countable total; found ${JSON.stringify(declaredTotal && declaredTotal[1])}`,
+    );
+
+    // The two fenced blocks, and only the ::error:: lines in them.
+    const blocks = [...section.matchAll(/```\n([\s\S]*?)```/g)]
+      .slice(0, 2)
+      .map((m) => m[1].split('\n').filter((l) => l.startsWith('::error::')));
+    assert.equal(blocks.length, 2, 'the poisoned/broken-guard split must still be two fenced blocks');
+
+    // The bold counts, in prose order, taken from the sentence BEFORE the first
+    // fence so a bold word further down the README cannot be picked up instead.
+    const declaredSplit = [...section.slice(0, section.indexOf('```')).matchAll(/\*\*(\w+)\*\*/g)].map((m) => m[1]);
+    assert.equal(
+      declaredSplit.length,
+      2,
+      `expected two bolded counts in the split sentence, found ${JSON.stringify(declaredSplit)}`,
+    );
+
+    assert.equal(
+      NUMBER_WORDS[declaredSplit[0]],
+      blocks[0].length,
+      `README says **${declaredSplit[0]}** of the strings mean the tarball is poisoned, but that block lists `
+      + `${blocks[0].length}:\n${blocks[0].join('\n')}`,
+    );
+    assert.equal(
+      NUMBER_WORDS[declaredSplit[1]],
+      blocks[1].length,
+      `README says the other **${declaredSplit[1]}** mean the guard could not establish what it inspected, but `
+      + `that block lists ${blocks[1].length}:\n${blocks[1].join('\n')}`,
+    );
+    // And the total is the guard's, not the block's own arithmetic -- otherwise
+    // a message dropped from BOTH lists and from the total stays self-consistent.
+    assert.equal(
+      NUMBER_WORDS[declaredTotal[1]],
+      emittedGuardErrors().length,
+      `README says the guard adds ${declaredTotal[1]} strings; it emits ${emittedGuardErrors().length}`,
+    );
+    assert.equal(
+      blocks[0].length + blocks[1].length,
+      emittedGuardErrors().length,
+      'the two blocks together must account for every string the guard emits',
+    );
+  });
+
   test('the guard does not import anything from the .stonyx-workflows checkout', () => {
     const body = stepRunBody(npmPublish, GUARD_STEP);
     assert.doesNotMatch(
