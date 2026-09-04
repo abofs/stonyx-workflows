@@ -79,7 +79,7 @@ Any of them could read `.git/config`. The issue was originally filed naming only
 
 **It had already happened.** 21 published `@stonyx/cron` versions (`0.2.1-alpha.0`, `0.2.1-beta.0` through `beta.19`) shipped `package/.git/config` containing a real credential to the **public npm registry** -- four distinct tokens, all since revoked.
 
-Two sets get conflated here, so they are separated once and for all. From a sweep of all 1,389 published tarballs across the ten `@stonyx/*` packages:
+Two sets get conflated here, so they are separated once and for all. From a sweep of all 1,389 published tarballs across the ten published Stonyx packages -- nine `@stonyx/*` plus the unscoped core package `stonyx`:
 
 | set | count | which |
 | --- | --- | --- |
@@ -128,7 +128,7 @@ Closing it means not holding a long-lived org-wide PAT in the job at all, which 
 
 ### Runbook: the cascade push fails
 
-This change moves where a git credential failure surfaces, so it gets a runbook like the registry failures above. It applies to the **beta** and **stable** paths only -- the alpha path publishes and never commits, so it has no push step to fail.
+This change moves where a git credential failure surfaces, so it gets a runbook like the registry failures above. It applies to every release path except **alpha**, which publishes and never commits, so it has no push step to fail. Both commit steps gate on the computed version string rather than the release type, so `custom`, `patch`, `minor` and `major` all land on the stable one.
 
 **How to recognise it.** The job reds at `Commit version bump and create tag (beta)` or `Commit version bump and create tag (stable)`, on the `authed_git pull` or `authed_git push` line, typically with a `403`/`401` or `could not read Username`. Two things make this different from before:
 
@@ -165,7 +165,7 @@ So the failure mode is: **the registry moved and the repo did not.** `main` stil
 - **Stable.** A re-run reds at `Publish to NPM (stable)` instead. `Bump version (stable)` runs `pnpm version patch --no-git-tag-version` against the **local** `package.json`, which never moved because the push failed, so it recomputes the version that is already on the registry and npm refuses to publish it twice. Recover by landing the bump in the repo by hand: set `package.json` to the published version in a normal PR and tag it `v<version>`, matching the spelling the workflow uses. Do not create a tag the workflow will later try to create for itself.
 
 **Re-dispatch the cascade if the release mattered downstream.** Nothing dispatched, so dependents are still pinned to the previous version. They pick it up on their next cascade or publish; if that is too slow, the owner can dispatch `cascade-publish` to the dependents directly.
-- **Nothing needs to change in a consumer's `publish.yml`** in any of these cases.
+**Nothing needs to change in a consumer's `publish.yml`** in any of these cases.
 
 ### The guard
 
@@ -196,6 +196,6 @@ Nor can a change be rehearsed before it lands: `workflow_dispatch` on `abofs/sto
 Two consequences worth knowing:
 
 - **The ref you pin governs the script too.** The checkout is pinned to `${{ job.workflow_sha }}` -- the exact commit your `uses:` line resolved to. Pin the workflow to `@main` and you get `main`'s derivation logic; pin it to a tag or a SHA and you get that commit's. The workflow and the script are always one artifact, never two independently-resolved ones.
-- **`.stonyx-workflows/` exists transiently in your workspace** between the version bump and the cleanup step. It is removed before publishing, so it cannot reach your tarball, and every current `@stonyx/*` package also declares a `files` allowlist that does not list it. Treat the cleanup as the control anyway, not the allowlist: it is asserted to run before the first `pnpm publish` step in `test/workflows-test.js`, whereas an allowlist is a per-consumer setting that can change without anything here noticing. If you drop yours, the cleanup step is all that is left.
+- **`.stonyx-workflows/` exists transiently in your workspace** between the version bump and the cleanup step. It is removed before publishing, so it cannot reach your tarball, and every current Stonyx package also declares a `files` allowlist that does not list it. Treat the cleanup as the control anyway, not the allowlist: it is asserted to run before the first `pnpm publish` step in `test/workflows-test.js`, whereas an allowlist is a per-consumer setting that can change without anything here noticing. If you drop yours, the cleanup step is all that is left.
 
 This requires no change to any consumer's `publish.yml`.
