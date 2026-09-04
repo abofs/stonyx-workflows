@@ -974,9 +974,10 @@ describe('AC4 -- the guard fails when it inspected nothing (#39)', () => {
 
     // Stated rather than implied: this fixture does NOT isolate the tar status
     // check. tar rejects the header outright and lists nothing, so with the
-    // status check deleted the ENTRY_COUNT floor rejects it on `lists 0
-    // entries` and this case would stay green. The truncated case above is what
-    // pins the check; this one pins that the two shapes are reported
+    // status check deleted the ENTRY_COUNT floor still rejects it on `lists 0
+    // entries` -- caught, but on the floor rather than on the check under test.
+    // The truncated case above is the one that leaks under that mutation, so it
+    // is what pins the check; this one pins that the two shapes are reported
     // DIFFERENTLY, so an unreadable archive is not diagnosed as an empty
     // package and an operator is not sent to their own `files` field.
     assert.deepEqual(
