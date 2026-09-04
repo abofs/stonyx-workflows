@@ -617,8 +617,14 @@ jobs:
         # down. Provenance is unaffected: pnpm never publishes a directory, both
         # of its branches hand `npm publish <a .tgz>` to the npm CLI, and
         # libnpmpublish rebuilds the spec from the manifest rather than from the
-        # CLI argument. All ten @stonyx/* packages are tarball publishes today
-        # and all ten are attested.
+        # CLI argument. All ten @stonyx/* packages are tarball publishes today,
+        # so this changes WHICH tarball, not the mode.
+        #
+        # Not all ten are attested, and the difference matters to anyone reading
+        # this to decide whether a provenance change is safe: @stonyx/discord
+        # has never produced an attestation in 109 versions, published through
+        # this same workflow with a green job (abofs/stonyx-workflows#43). A
+        # green publish job is not evidence that provenance was produced.
         if: contains(steps.package-version.outputs.version, 'alpha')
         run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag alpha --access public --no-git-checks
 

@@ -300,10 +300,26 @@ function runGuard({ pkg, files = {}, packOverride = '', seed = () => {}, env: en
  * A hand-built tarball with the byte shape of the 23 real artifacts: a
  * `package/` prefix, a manifest, and a planted `package/.git/config`.
  *
- * Independent of any packer version. AC2 requires both this and the real-packer
- * construction because the historical leak mechanism no longer reproduces on
- * pnpm 9 or 10 -- the real-packer case proves fidelity to today's tool, this
- * one proves the guard reads the artifact rather than agreeing with the packer.
+ * Independent of any packer version, which is the only reason it is here. AC2
+ * requires both this and the real-packer construction: the real-packer case
+ * proves fidelity to today's tool, this one proves the guard reads the artifact
+ * rather than agreeing with the packer.
+ *
+ * This comment previously justified itself with "the historical leak mechanism
+ * no longer reproduces on pnpm 9 or 10". That was FALSE and it is corrected
+ * here rather than quietly dropped. Re-measured on 9.15.9 and 10.23.0, both
+ * identical: the mechanism is a BASENAME COLLISION in pnpm's packlist -- a
+ * top-level entry in `files` whose basename matches a file inside `.git` drags
+ * that file in. `files: ["*"]` with a `config/` directory ships exactly
+ * `package/.git/config`; a `description/` directory ships
+ * `package/.git/description`; `files: ["*"]` alone ships nothing. That is the
+ * incident: `@stonyx/cron@0.2.0` declared `config/environment.js` and its
+ * published tarball carries precisely one `.git` entry, `config`, with no
+ * `HEAD`, `refs` or `objects` -- verified by downloading it from the registry.
+ *
+ * So the real-packer arms of AC2 have live coverage of the realized incident's
+ * own configuration on the pinned packer, not merely of a hypothetical
+ * `.git/**` glob.
  */
 function buildPoisonedTarball(destPath, { extraGitEntries = 0 } = {}) {
   const staging = mkdtempSync(join(tmpdir(), 'wf39-handbuilt-'));
