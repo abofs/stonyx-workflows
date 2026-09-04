@@ -907,6 +907,47 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     }
   });
 
+  test('every ::error:: the guard can emit is indexed in README', () => {
+    // README carries a curated block introduced by its own sentence -- "so a
+    // red job can be grepped rather than guessed at". The guard adds nine
+    // strings to a step every consumer meets on every publish run, and seven of
+    // them describe a BROKEN GUARD rather than a poisoned tarball. Those are
+    // what an operator greps while ten repos cannot release, which is the
+    // reason the block exists.
+    //
+    // Pinned rather than merely added, because a curated list nobody checks is
+    // how README ended up with ten stale `319`s (abofs/stonyx-workflows#44).
+    // Adding a tenth ::error:: to the guard now reds until it is indexed.
+    const body = stepRunBody(npmPublish, GUARD_STEP);
+    const emitted = body
+      .split('\n')
+      .filter((l) => !/^\s*#/.test(l))
+      .map((l) => l.match(/::error::(.+?)"\s*>&2/))
+      .filter(Boolean)
+      .map((m) => m[1]);
+
+    // The population, established before it is quantified over. An extractor
+    // that silently matched nothing would make every assertion below vacuous --
+    // which is the defect this whole suite exists to answer for.
+    assert.ok(
+      emitted.length >= 8,
+      `expected the guard to emit at least 8 ::error:: strings, extracted ${emitted.length}. The extractor has `
+      + 'stopped matching the guard body, so the check below would pass over an empty list',
+    );
+
+    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    for (const message of emitted) {
+      // A stable leading slice: enough to identify the message uniquely,
+      // short enough that rewording the tail of a diagnostic does not red this.
+      const key = message.slice(0, 40);
+      assert.ok(
+        readme.includes(key),
+        `README's grepable-failure block does not index ${JSON.stringify(key)}. Ten repos publish through this `
+        + 'step; an operator meeting this string mid-incident has nowhere to look it up',
+      );
+    }
+  });
+
   test('the guard does not import anything from the .stonyx-workflows checkout', () => {
     const body = stepRunBody(npmPublish, GUARD_STEP);
     assert.doesNotMatch(

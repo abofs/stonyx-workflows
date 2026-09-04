@@ -219,6 +219,40 @@ wired today. Read the whole list rather than the top of it:
 ::error::npm view <package> versions --json returned unparseable output
 ```
 
+The release-artifact guard adds nine more. They are split here because the
+split is what an operator needs at the point of use: **one** of them means the
+tarball is poisoned and the consumer must change their `package.json`; the other
+**eight** mean the guard itself could not establish what it was looking at, and
+no consumer-side change will clear them. Ten repos publish through this step, so
+the second group is what gets grepped while none of them can release.
+
+*The tarball is poisoned* -- fix is in the consumer's `package.json`, see
+[`docs/release.md`](docs/release.md#if-your-publish-reds-here):
+
+```
+::error::$OFFENDER_COUNT denied path(s) in the release artifact:
+::error::refusing to release. A .git directory inside a tarball on the public registry is permanent -- npm cannot unpublish it after 72 hours. ...
+```
+
+*The guard could not establish what it inspected* -- fix is a PR in this repo,
+not in the consumer:
+
+```
+::error::RUNNER_TEMP is empty. Every path this guard writes, reads and publishes is derived from it, ...
+::error::the pack destination $PACK_DIR is not under $RUNNER_TEMP
+::error::expected exactly one tarball in $PACK_DIR, found $PACKED. Refusing to guess which one would be released.
+::error::$STRAY .tgz file(s) in the package root. They are absorbed by the next pack and they perturb the rebase in the tag steps below:
+::error::the release artifact lists $ENTRY_COUNT entries. A guard that inspected nothing must not report success.
+::error::the release artifact has no package/package.json, so it is not a packed npm package and a denylist over its entries would pass vacuously:
+::error::scanning the release artifact entry list failed with status $GREP_STATUS
+```
+
+A failing `prepublishOnly` reds this step too, with the consumer's own build
+output and **no** `::error::` line of its own -- the step exits with the build's
+status unaltered. If the step is red and none of the strings above appear, read
+the `prepublishOnly` output above the failure; the build is what failed, and the
+guard never got as far as packing.
+
 **Secrets:**
 
 | Secret | Required | Description |
