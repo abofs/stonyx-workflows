@@ -214,6 +214,36 @@ describe('#35 -- the guard can fail (non-vacuity)', () => {
     assert.deepEqual(persistedCredentialViolations(synthetic('          fetch-depth: 0'), 's.yml'), []);
   });
 
+  // NON-VACUITY FOR THE STRICTER PROPERTY, which nothing else in this suite
+  // supplies. `anyPersistingCheckouts` is the SOLE pin on four of the six
+  // `persist-credentials: false` lines -- deleting the line from `ci.yml`,
+  // `self-ci.yml`, `security-audit.yml` or npm-publish.yml's
+  // `.stonyx-workflows` checkout reds that one test and nothing else. Measured:
+  // stubbing the function to `return []` left the suite at 350/350, and
+  // composing that stub with deleting the line from `ci.yml` ALSO left it at
+  // 350/350 -- a real regression, invisible. The pair below is what makes an
+  // empty return red: the ambient-token case the AC2 guard deliberately ignores
+  // is exactly the case only this function can see.
+  test('an ambient-token checkout with no persist-credentials is reported by the stricter check', () => {
+    const text = synthetic('          fetch-depth: 0');
+
+    assert.deepEqual(
+      persistedCredentialViolations(text, 's.yml'),
+      [],
+      'AC2 is silent here by design -- so this case can only be pinned through anyPersistingCheckouts',
+    );
+    assert.deepEqual(anyPersistingCheckouts(text, 's.yml').map(describeViolation), [
+      's.yml:5 (Checkout code) token=null persist-credentials=<absent, defaults to true>',
+    ]);
+  });
+
+  test('control: the same ambient-token checkout WITH the setting is silent to the stricter check', () => {
+    assert.deepEqual(anyPersistingCheckouts(synthetic(
+      '          fetch-depth: 0',
+      '          persist-credentials: false',
+    ), 's.yml').map(describeViolation), [], 'so the report above is detection, not a function that always reports');
+  });
+
   test('control: `token: ${{ github.token }}` is the ambient token and is not reported by the guard', () => {
     assert.deepEqual(persistedCredentialViolations(synthetic('          token: ${{ github.token }}'), 's.yml'), []);
   });
