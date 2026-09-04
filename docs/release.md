@@ -159,11 +159,12 @@ So the failure mode is: **the registry moved and the repo did not.** `main` stil
 
 **How to recover.**
 
-- **Do not simply re-run the job.** The version is already published and npm will not accept it twice. A re-run re-derives from the registry -- `deriveVersion` takes the highest published prerelease and adds one -- so it publishes a *new* version, widening the gap between the registry and the repo rather than closing it.
-- **Fix the credential or the branch state first**, then decide between two closes:
-  - *Publish forward.* Once the push works, run the publish again. It bumps to the next version, publishes it, and pushes the commit and tag for **that** version. The stranded version stays on the registry as a version with no tag. This is the normal choice: it is one command and it leaves the repo and the registry consistent going forward.
-  - *Reconcile by hand.* If the stranded version must be tagged, bump `package.json` to it and tag it in a normal PR, from a workstation, with the same `v<version>` spelling the workflow uses. Do not push a tag the workflow will later try to create.
-- **Re-dispatch the cascade if the release mattered downstream.** Nothing dispatched, so dependents are still pinned to the previous version. They pick it up on their next cascade or publish; if that is too slow, the owner can dispatch `cascade-publish` to the dependents directly.
+**Fix the credential or the branch state first.** Nothing below works until the push does. Then the two paths recover differently, because they derive their versions differently:
+
+- **Beta.** Do not re-run expecting the same version. `Calculate next beta version` derives off the registry -- `deriveVersion` takes the highest published prerelease and adds one -- so a re-run publishes `beta.N+1` and pushes the commit and tag for **that**. `beta.N` stays on the registry as a version with no tag. That is the normal close: one re-run, and the repo and registry are consistent going forward.
+- **Stable.** A re-run reds at `Publish to NPM (stable)` instead. `Bump version (stable)` runs `pnpm version patch --no-git-tag-version` against the **local** `package.json`, which never moved because the push failed, so it recomputes the version that is already on the registry and npm refuses to publish it twice. Recover by landing the bump in the repo by hand: set `package.json` to the published version in a normal PR and tag it `v<version>`, matching the spelling the workflow uses. Do not create a tag the workflow will later try to create for itself.
+
+**Re-dispatch the cascade if the release mattered downstream.** Nothing dispatched, so dependents are still pinned to the previous version. They pick it up on their next cascade or publish; if that is too slow, the owner can dispatch `cascade-publish` to the dependents directly.
 - **Nothing needs to change in a consumer's `publish.yml`** in any of these cases.
 
 ### The guard
