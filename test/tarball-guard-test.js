@@ -202,7 +202,7 @@ function writeTree(root, files) {
  * test can assert POSITIVELY that the fixture contained what it claims to test
  * before asserting the guard's verdict on it.
  */
-function runGuard({ pkg, files = {}, packOverride = '', seed = () => {} }) {
+function runGuard({ pkg, files = {}, packOverride = '', seed = () => {}, env: envOverrides = {} }) {
   const body = dedent(stepRunBody(npmPublish, GUARD_STEP));
   const workspace = mkdtempSync(join(tmpdir(), 'wf39-guard-'));
   const runnerTemp = mkdtempSync(join(tmpdir(), 'wf39-runnertemp-'));
@@ -224,7 +224,7 @@ function runGuard({ pkg, files = {}, packOverride = '', seed = () => {} }) {
 
     const result = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', scriptPath], {
       cwd: workspace,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: runnerTemp },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: runnerTemp, ...envOverrides },
       encoding: 'utf8',
     });
 
@@ -746,6 +746,65 @@ describe('AC6 -- the guard leaves nothing packable behind (#39)', () => {
 
     assert.notEqual(run.status, 0, `a .tgz in the package root must stop the release; stdout:\n${run.stdout}`);
     assert.match(run.stderr, /leftover-0\.0\.1\.tgz/, `the message must name it; stderr:\n${run.stderr}`);
+  });
+
+  // The guard runs exactly one destructive command, `rm -rf "$PACK_DIR"`, and
+  // the `case` below it is the only thing constraining where PACK_DIR may
+  // point. The two assertions here are about that pairing, and neither is about
+  // the value PACK_DIR holds today -- with today's literal the invariant cannot
+  // fire at all, so this is a pin on the shape a future edit will meet.
+
+  test('the destination invariant runs before the recursive delete it constrains', () => {
+    // Order, not presence. Measured with PACK_DIR repointed at a populated
+    // directory outside $RUNNER_TEMP: the step printed
+    // `::error::the pack destination ... is not under ...` and exited 1, and
+    // the directory's contents had ALREADY been deleted. An invariant that
+    // objects after the delete is a post-mortem, not a guard -- and the edit it
+    // exists to catch is precisely the one where it runs too late.
+    const executable = stepRunBody(npmPublish, GUARD_STEP)
+      .split('\n')
+      .filter((l) => !/^\s*#/.test(l));
+
+    const invariantAt = executable.findIndex((l) => /^\s*case\s+"\$PACK_DIR"\s+in\s*$/.test(l));
+    const deleteAt = executable.findIndex((l) => /^\s*rm\s+-rf\s+"\$PACK_DIR"\s*$/.test(l));
+
+    assert.notEqual(invariantAt, -1, 'the guard must constrain where PACK_DIR points before it deletes it');
+    assert.notEqual(deleteAt, -1, 'the guard must clear a stale pack directory, or it inspects a prior run');
+    assert.ok(
+      invariantAt < deleteAt,
+      '`rm -rf "$PACK_DIR"` runs at executable line ' + deleteAt + ' but the `case` constraining PACK_DIR is at '
+      + invariantAt + '. On the future edit this invariant exists to catch, the recursive delete has already run '
+      + 'against the wrong path by the time the invariant objects to it',
+    );
+  });
+
+  test('an empty RUNNER_TEMP hard-fails on its own check rather than on the filesystem', () => {
+    // `set -u` catches UNSET. It does not catch EMPTY, and the two behave
+    // differently in a way that matters: with RUNNER_TEMP="" the pattern
+    // `"$RUNNER_TEMP"/*` in the destination invariant becomes `/*`, which
+    // matches every absolute path -- so the invariant PASSES rather than
+    // tripping, and PACK_DIR is `/stonyx-pack`.
+    //
+    // The step did exit non-zero before this check existed, but on
+    // `mkdir: /stonyx-pack: Read-only file system` -- the ambient filesystem
+    // refusing, not this guard checking. That is not a property of the guard
+    // and it does not hold where the root is writable. This asserts the reason,
+    // not just the exit code, which is the difference between the two.
+    const run = runGuard({ ...CLEAN_CONSUMER, env: { RUNNER_TEMP: '' } });
+
+    assert.notEqual(run.status, 0, `an empty RUNNER_TEMP must stop the release; stdout:\n${run.stdout}`);
+    assert.match(
+      run.stderr,
+      /::error::RUNNER_TEMP is empty/,
+      'the step must fail on its own RUNNER_TEMP check. Failing on a downstream mkdir instead means the guard '
+      + `is relying on the root being unwritable; stderr:\n${run.stderr}`,
+    );
+    assert.doesNotMatch(
+      run.stderr,
+      /Read-only file system|Permission denied/,
+      `the check must fire before anything touches the filesystem; stderr:\n${run.stderr}`,
+    );
+    assert.deepEqual(run.pnpmArgs.filter((a) => a.startsWith('publish')), []);
   });
 });
 

@@ -447,16 +447,24 @@ jobs:
         run: |
           set -euo pipefail
 
+          # `set -u` catches an UNSET RUNNER_TEMP. It does not catch an EMPTY
+          # one, and empty is the case that defeats the invariant below rather
+          # than tripping it: PACK_DIR becomes `/stonyx-pack`, and the pattern
+          # `"$RUNNER_TEMP"/*` becomes `/*`, which matches every absolute path.
+          # Measured -- the `case` reports PASSES on an empty RUNNER_TEMP. The
+          # step still exited non-zero, but only because `mkdir -p /stonyx-pack`
+          # hit a non-writable root; that is the ambient filesystem refusing,
+          # not this guard checking. Under a `container:` job running as root it
+          # would succeed and `rm -rf` would run against the container root.
+          if [ -z "${RUNNER_TEMP:-}" ]; then
+            echo "::error::RUNNER_TEMP is empty. Every path this guard writes, reads and publishes is derived from it, and an empty value silently relocates all of them to the filesystem root" >&2
+            exit 1
+          fi
+
           PACK_DIR="$RUNNER_TEMP/stonyx-pack"
           TARBALL="$RUNNER_TEMP/stonyx-release.tgz"
           ENTRIES="$RUNNER_TEMP/stonyx-release-entries.txt"
           OFFENDERS="$RUNNER_TEMP/stonyx-release-offenders.txt"
-
-          # A prior attempt in the same job must never be what gets inspected or
-          # uploaded. Everything this step reads later is created below.
-          rm -rf "$PACK_DIR"
-          rm -f "$TARBALL" "$ENTRIES" "$OFFENDERS"
-          mkdir -p "$PACK_DIR"
 
           # The destination is checked, not merely written down. A pack
           # directory inside the package root is absorbed by the next pack and
@@ -464,6 +472,15 @@ jobs:
           # the tag steps below, and neither of those shows up as a failure
           # here -- the guard would still pass, having quietly broken the two
           # steps that follow it.
+          #
+          # This runs BEFORE the `rm -rf` below, and the order is the point. The
+          # `case` exists to catch a future edit that points PACK_DIR somewhere
+          # it should not be -- but `rm -rf "$PACK_DIR"` running first means
+          # that on exactly that edit the delete happens and the invariant then
+          # objects to what it failed to prevent. Measured with PACK_DIR
+          # repointed at a populated directory: the step printed
+          # `is not under` and exited 1, and the directory's contents were
+          # already gone.
           case "$PACK_DIR" in
             "$RUNNER_TEMP"/*) ;;
             *)
@@ -471,6 +488,12 @@ jobs:
               exit 1
               ;;
           esac
+
+          # A prior attempt in the same job must never be what gets inspected or
+          # uploaded. Everything this step reads later is created below.
+          rm -rf "$PACK_DIR"
+          rm -f "$TARBALL" "$ENTRIES" "$OFFENDERS"
+          mkdir -p "$PACK_DIR"
 
           # `pnpm pack` runs prepack and prepare -- NOT prepublishOnly. Four of
           # the ten consumers build there (stonyx, stonyx-discord, stonyx-events,
