@@ -56,9 +56,50 @@ This is the part that gets re-derived wrongly, so it is written down here rather
 
 **The npm OIDC identity is repo-bound and package-bound.** Confirmed from the npm provenance attestations on `@stonyx/orm`, `@stonyx/cron` and `@stonyx/oauth`, each of which names one repo and one workflow. A compromised publish job in repo A can publish package A and nothing else. It **cannot** publish as an arbitrary `@stonyx/*` package; anyone who can land a commit in repo A could already publish package A by committing malicious source, so the npm capability is not widened by anything reachable from a job in that repo.
 
-**`CASCADE_PAT` is the credential with org-wide reach.** It is an org-level PAT with `repo` scope granted to every Stonyx repo, and `cascade.yml` runs `repos.createDispatchEvent()` under it. That is why `cascade.yml` validates both of its inputs and refuses to dispatch on a value that fails, and why its guards are held to a higher bar than the publish path's.
+**`CASCADE_PAT` is the credential with org-wide reach.** It is an org-level PAT with `repo` scope granted to every Stonyx repo, and `cascade.yml` runs `repos.createDispatchEvent()` under it. That is why `cascade.yml` validates both of its inputs and refuses to dispatch on a value that fails, and why its guards are held to a higher bar than the publish path's. It is also the credential that reaches the publish job's checkout in cascade mode -- see [Git credentials in the publish job](#git-credentials-in-the-publish-job).
 
 The npm identity is bound. The GitHub identity is not. Do not reason about one from the other.
+
+## Git credentials in the publish job
+
+**No `actions/checkout` in this repo persists its credential.** Every checkout sets `persist-credentials: false`, and the only two steps that reach a git remote are handed a token explicitly at their point of use.
+
+### What was wrong
+
+`actions/checkout@v4` defaults `persist-credentials: true`, which writes an `http.<host>/.extraheader` Authorization entry into `.git/config`. In cascade mode `npm-publish.yml` checked out with `CASCADE_PAT` -- the org-wide `repo`-scoped PAT -- and then ran **your** code in the same job, with the credential still on disk. Four kinds of step do that, at ten call sites in the current `npm-publish.yml`:
+
+| step | your hooks it runs | sites |
+| --- | --- | --- |
+| `pnpm install` | `preinstall`, `install`, `postinstall` | 1 |
+| `pnpm test` | your test code itself | 1 |
+| `pnpm version` | `preversion`, `version`, `postversion` | 5 |
+| `pnpm publish` | `prepublishOnly`, `prepack`, `prepare` | 3 |
+
+Any of them could read `.git/config`. The issue was originally filed naming only the first two; refinement widened it to the rest, and that is what rules out the "just split the job" fix -- `pnpm publish` **is** consumer code, so a split still stands the PAT next to lifecycle scripts. Push access to any one of the eleven `abofs/stonyx*` repos therefore yielded a credential reaching all of them, including repos the actor could not push to. No injection was required; that was the workflow operating exactly as designed ([stonyx-workflows#35](https://github.com/abofs/stonyx-workflows/issues/35)).
+
+**It had already happened.** 21 published `@stonyx/cron` versions (`0.2.1-alpha.0`, `0.2.1-beta.0` through `beta.19`) shipped `package/.git/config` containing a real credential to the **public npm registry** -- four distinct tokens, all since revoked. The only thing that stopped the other ten packages was that each declares a narrow `files` allowlist. That is the same thin margin the `.stonyx-workflows/` note below depends on, and it is not a control anyone chose.
+
+### What happens now
+
+- **The cascade checkout** (`npm-publish.yml`) and **the dependency-map checkout** (`cascade.yml`) both set `persist-credentials: false`. `cascade.yml`'s dispatch step already passed the PAT explicitly as `github-token:`, so nothing there read it from disk in the first place.
+- **The three ambient-token checkouts** (`ci.yml`, `self-ci.yml`, `security-audit.yml`) set it too. None of them reads git credentials, and each runs `pnpm install` lifecycle scripts, so a persisted `GITHUB_TOKEN` was a live credential sitting next to consumer code for no benefit.
+- **The two steps that push** -- `Commit version bump and create tag (beta)` and `(stable)` -- receive the token through a step `env:` as `GIT_REMOTE_TOKEN`, using the **same expression the checkout uses**, so the identity that pushes is unchanged. They hand it to git through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0`, set **per command** rather than exported. Nothing is written to disk, nothing outlives those two `git` processes, and the credential never appears in a process argv.
+
+`git add`, `git commit` and `git tag` in those same steps do **not** get it. That is deliberate: a consumer can point `core.hooksPath` at its own code, so a hook fired by any of the three would inherit the step's environment. This is asserted behaviourally -- `test/checkout-credentials-test.js` executes both real `run:` bodies against a `git` stub that records each invocation's argv *and* environment.
+
+### What this means for a consumer
+
+Nothing changes in your `publish.yml`, and nothing changes about which identity pushes your release commit or tag.
+
+If your repo has a build step that expects to run authenticated git commands out of the checked-out workspace -- a `postinstall` that fetches a private git dependency, say -- it will now fail, and it should: that step was reading a credential it was never meant to have. Declare the dependency through the registry instead.
+
+### Residual exposure, stated plainly
+
+The credential is still present in the *job* while a `git pull --rebase` or `git push` runs, so a consumer-supplied git hook fired by those two commands would still see it. That is a strictly smaller window than a file on disk readable by every step, and closing it entirely means not holding a long-lived org-wide PAT in the job at all. That is [stonyx-workflows#36](https://github.com/abofs/stonyx-workflows/issues/36) -- a GitHub App installation token scoped to the specific dependent repos, minted per run -- which is on hold pending an owner decision and is **not** implemented here.
+
+### The guard
+
+`test/checkout-credentials-test.js` fails if any `actions/checkout` taking a token other than the ambient `github.token` omits `persist-credentials: false`. It reads raw text rather than the diagnostics YAML reader, fails closed on any shape it does not understand, and treats an unrecognised token spelling as privileged. Note that the real cascade expression *contains* the literal `github.token`; a substring test for "just the ambient token" would exempt precisely the checkout this is about.
 
 ## Workflow consumption
 
