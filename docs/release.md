@@ -46,9 +46,38 @@ That fallback is gone. Measured old versus new against a registry stub returning
 
 The practical consequence: **a transient npm registry failure now reds publish jobs across every Stonyx repo at once**, rather than publishing a wrong version quietly. Re-run once the registry is reachable. A genuine `404` -- the first publish of a package -- still falls back to the local version, unchanged.
 
+## What gets published, and what stops it
+
+`npm-publish.yml` packs the release artifact once, to `$RUNNER_TEMP/stonyx-release.tgz`, inspects that file, and hands that same path to `pnpm publish`. The guarded bytes and the uploaded bytes are one object rather than two packs of the same tree ([stonyx-workflows#39](https://github.com/abofs/stonyx-workflows/issues/39)).
+
+The step **hard-fails** if the tarball contains anything under `package/.git/`. There is no bypass input and no warn mode, for two reasons. A `skip-` flag reachable through `workflow_call` from ten repos is the guard deleting itself. And warn was already tried by accident: `pnpm publish` printed the file list to the job log on all 23 affected runs, nobody read it for two months, and the leak was found by a consumer five months later. npm cannot unpublish past 72 hours, so a wrong tarball is permanent and public.
+
+### If your publish reds here
+
+The failure names every offending path and their count. It is telling you that your package would have shipped a `.git` directory to the public registry.
+
+- Narrow the `files` array in `package.json`. `files: ["*"]` and `files: [".git/**"]` both ship `package/.git/config` through today's packer, measured.
+- Add `.git` to `.npmignore` if you do not declare a `files` allowlist.
+
+**There is no per-repo opt-out**, so a false positive halts publishing across all ten consumers at once. If you believe the guard is wrong, that is a bug in this repo and the fix is a PR here, not a workaround in yours.
+
+### The build now runs in the workflow, not in `pnpm publish`
+
+`pnpm pack` runs `prepack` and `prepare` but **not** `prepublishOnly`, and publishing a tarball runs **no** lifecycle scripts at all. So the guard step invokes `pnpm run prepublishOnly` explicitly before it packs. Four consumers build there -- `stonyx`, `stonyx-discord`, `stonyx-events`, `stonyx-logs` -- and without the explicit invocation their `dist/` would be absent from both the inspected tarball and the published one.
+
+Net effect on your package: the same scripts run, once. `publish` and `postpublish` would no longer run, and no consumer declares either.
+
+### This is a regression bar, not a live hole
+
+All ten published `@stonyx/*` packages currently declare a narrow `files` allowlist -- measured against each repo's default branch, every one of them a `dist`-rooted list with no `*` and no `.git` -- so the configuration that produced the original leak exists in zero repos today. The guard exists so it cannot come back, and so that a mechanism nobody has characterised yet is caught by looking at the artifact rather than by predicting the mechanism.
+
+It is **not** an anti-exfiltration control. Deliberate exfiltration needs push access to a `stonyx*` repo, and from there `postinstall` reads `.git/config` directly with no publish involved. That is [#35](https://github.com/abofs/stonyx-workflows/issues/35). Denylist breadth beyond `.git/` is [#41](https://github.com/abofs/stonyx-workflows/issues/41); a maintainer running `npm publish` from a workstation bypasses this workflow entirely and is [#42](https://github.com/abofs/stonyx-workflows/issues/42).
+
 ## OIDC trusted publishing
 
 All npm publishes use GitHub OIDC provenance. No npm token is stored in repo secrets -- the publish workflow authenticates directly with npm via GitHub's identity provider.
+
+Publishing a pre-packed tarball rather than a directory does not affect this. `pnpm publish` **never** publishes from a directory: both of its branches hand `npm publish <a .tgz>` to the npm CLI, in 9.15.9 as well as 10.x, and `libnpmpublish` reconstructs the package spec from the manifest rather than from the CLI argument, so the provenance path never sees which form was used. Every `@stonyx/*` package has always been a tarball publish, and every one is attested.
 
 ### What the OIDC identity is bound to, and what it is not
 

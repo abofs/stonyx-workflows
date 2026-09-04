@@ -137,10 +137,10 @@ store one that way. The two consumer-supplied inputs *may* be, because they are
 tag-shaped values a caller may reasonably pass as `v1.2.3`. A test pins all
 eight copies of these regexes string-identical apart from that one `v?`.
 
-**Eight observable behaviour changes.** They are *not* ordered by how often you
-will meet them -- item 3 is the only one every publish run in every consumer
-meets, and items 2, 6 and 8 are unreachable for every consumer as wired today.
-Read the whole list rather than the top of it:
+**Nine observable behaviour changes.** They are *not* ordered by how often you
+will meet them -- items 3 and 9 are the ones every publish run in every
+consumer meets, and items 2, 6 and 8 are unreachable for every consumer as
+wired today. Read the whole list rather than the top of it:
 
 1. **A registry lookup that fails for any reason other than a genuine `404`
    fails the job** -- in the alpha derivation, the beta derivation, *and* the
@@ -191,6 +191,20 @@ Read the whole list rather than the top of it:
    version keyword`. Only single-token values (a semver, optionally
    `v`-prefixed, or one npm version keyword) are accepted now. Dispatch-only,
    and dispatch is frozen, so no consumer can currently reach it.
+9. **The release artifact is packed, inspected and published as one file, and
+   a `.git` directory inside it fails the job**
+   ([#39](https://github.com/abofs/stonyx-workflows/issues/39)). Every channel
+   now publishes `$RUNNER_TEMP/stonyx-release.tgz` by path instead of
+   publishing the directory, so the bytes asserted on are the bytes uploaded.
+   Two consequences reach every consumer on every run. `pnpm run
+   prepublishOnly` is invoked by the workflow, because `pnpm pack` runs only
+   `prepack`/`prepare` and a tarball publish runs no lifecycle scripts at all
+   -- the same scripts run, once, but `publish` and `postpublish` no longer
+   would (no consumer declares either). And a tarball carrying anything under
+   `package/.git/` reds the job, naming every offending path and their count,
+   with **no bypass input and no per-repo opt-out**. Provenance is unchanged:
+   `pnpm publish` never published a directory in the first place -- both of its
+   branches hand `npm publish <a .tgz>` to the npm CLI.
 
 *The failure text*, so a red job can be grepped rather than guessed at:
 
