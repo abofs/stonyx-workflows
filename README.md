@@ -590,21 +590,55 @@ ordinary-looking chain that an ordinary-looking entry could then name.
 
 The premise the rule was derived from was also wrong, and it is corrected
 above: the *"a continuation may sit at any indent GREATER THAN the enclosing
-block mapping's"* qualifier is not a rule libyaml enforces, and *"a payload can
-lengthen a chain, never shorten one"* is true only of the three block and plain
-styles. Re-derived here rather than re-asserted -- 63 documents, key at content
-indent 0..6, continuation at indent 0..8, `Psych.load` on each: **63 / 63** keep
-the payload inside the scalar, including every case where the continuation sits
-LEFT of its own key and every case at column 0.
+block mapping's"* qualifier is not a rule **libyaml** enforces, and *"a payload
+can lengthen a chain, never shorten one"* is true only of the three block and
+plain styles. Re-derived here rather than re-asserted -- 63 documents, key at
+content indent `m = 0..6` inside a nested mapping, continuation at indent
+`p = 0..8`, `Psych.load` on each: **63 / 63** keep the payload inside the
+scalar, including every case where the continuation sits LEFT of its own key
+and every case at column 0. There is no lower bound **in libyaml**.
+
+**That qualifier is not vacuous, though -- it is a real boundary in two other
+readers, and the sentence above is libyaml's answer rather than YAML's.** The
+same 63 documents, measured on this tree through two other widely used
+implementations: **js-yaml 5.4.1 is 35 / 63** (`deficient indentation`) and
+**eemeli/`yaml` 2.9.0 is 35 / 63** (`Missing closing "quote`) -- and the 35 are
+the *same* 35 in both, exactly the cells where `p > m`. Both enforce the
+qualifier libyaml drops: neither accepts a continuation at or left of its own
+key line, at any `m`. On the real file that boundary is a single column. The
+forged step appended to `npm-publish.yml` writes its `run:` key at column 8, so
+sweeping the payload across indents 0..12 gives **libyaml 13 / 13 live**, while
+js-yaml and `yaml` reject 0..8 outright and agree with libyaml only at 9..12.
+The shape is therefore live under **all three** readers at `p >= 9`, and under
+**libyaml alone** at `p <= 8`.
+
+The guard does not split that hair, deliberately: it refuses the payload at
+**every** indent, which is a superset of what any one reader accepts, so the
+over-coverage is **fail-closed**. An indent only libyaml would take is refused
+anyway, and no reader being stricter than libyaml reopens anything.
+
+**The disclosed limitation is the other direction: GitHub Actions' own YAML
+parser has never been tested here, in any round of this PR.** Every figure in
+this README and in `test/helpers/` that says "measured against Psych 5.3.1 /
+libyaml 0.2.5" uses libyaml as a **proxy for the runner**, and that proxy has
+never been validated against the runner. The 63-cell grid above is the reason
+that matters: implementations disagree by a whole boundary on precisely the
+property these rules turn on, so "libyaml accepts it" does not establish "the
+runner accepts it", in either direction. This does not weaken the guard, which
+refuses the whole range and is not derived from any parser -- it means the
+**motivation** attached to each row, *"this shape is live on the runner"*, rests
+on an equivalence nobody here has measured. Validating it needs the runner, not
+another library.
 
 The marking is now taken from the **line's own state** rather than from a frame
 the pop loop can reach, so it survives any indent. Measured on this tree, one
 forged step appended to the real `npm-publish.yml` with the payload swept across
 indents 0..12: all thirteen keep `${{ inputs.custom-version }}` live inside the
-`run:` string, thirteen of thirteen now derive a `(scalar)` link, and the entry
-written for the derived context is refused at all thirteen. The same twelve-line
-diff, with that entry, was **309 pass / 0 fail** at `2c7d7bd` and is **313 / 6**
-here.
+`run:` string **under libyaml** -- the four at indents 9..12 under all three
+readers named above -- thirteen of thirteen now derive a `(scalar)` link, and
+the entry written for the derived context is refused at all thirteen. The same
+twelve-line diff, with that entry, was **309 pass / 0 fail** at `2c7d7bd` and is
+**313 / 6** here.
 
 So the chain and the marking together close **all five scalar styles and both
 flow collections, at every indent** -- which is the claim this section should
