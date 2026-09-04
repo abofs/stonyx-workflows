@@ -479,7 +479,6 @@ export function structuralContexts(text) {
     }
     const indent = contentIndent(raw);
     while (open.length > 0 && open[open.length - 1].indent >= indent) open.pop();
-    contexts.push(chain());
 
     const key = keyOf(raw);
     const value = valueOf(raw);
@@ -489,6 +488,14 @@ export function structuralContexts(text) {
     // Read BEFORE walking this line: the question is what state this line
     // BEGAN in, not what it ends in.
     const dirtyAtLineStart = state.quote !== null || state.depth > 0;
+
+    // THE LINE'S OWN POSITION, MARKED FROM THE LINE'S OWN STATE -- not inferred
+    // from a frame that a dedent can pop. `dirtyAtLineStart` is a fact about
+    // the bytes before this line and nothing in the pop loop above can reach
+    // it, so a payload written at or left of its opener carries the marking
+    // just as one written under it does. See the round-8 note in the docstring.
+    contexts.push(dirtyAtLineStart ? `${chain()} ${SCALAR}`.trim() : chain());
+
     if (!inBlock) state = walk(raw.slice(indent), state);
 
     // A key that already carries a value has no room for children, so it can

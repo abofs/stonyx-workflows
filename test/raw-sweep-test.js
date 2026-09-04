@@ -1597,11 +1597,36 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     const clean = structuralContexts('a:\n  b:\n    c: ${{ x }}\n');
     const dirty = structuralContexts('a: "open\n  b:\n    c: ${{ x }}\n');
     assert.equal(clean[2], 'a > b', 'two legitimate mapping keys, neither carrying a value');
-    assert.equal(dirty[2], 'a (scalar) > b (scalar)', 'both links poisoned once the line began inside a quote');
+    // Round 8 moved one marking earlier, and this expectation is what it cost.
+    // The links are poisoned as before -- `a (scalar) > b (scalar)` -- and the
+    // TRAILING `(scalar)` is the new one: it marks the position of THIS LINE
+    // rather than of a frame under it, which is the fact a dedent past the
+    // opener used to erase. It is an addition, so monotonicity is intact; the
+    // snapshot below is updated rather than loosened, because a `.includes`
+    // here would stop the case seeing a marking move.
+    assert.equal(
+      dirty[2],
+      'a (scalar) > b (scalar) (scalar)',
+      'both links poisoned once the line began inside a quote, AND the line\'s own position marked',
+    );
     assert.ok(
       dirty.every((c, i) => c.length >= clean[i].length),
       'no line may derive a SHORTER context under the discriminator than without it',
     );
+
+    // The same property at the column the pop loop actually crosses: `b:` sits
+    // at `k:`'s own indent, so `k`'s frame -- the only frame guaranteed
+    // `(scalar)` -- is gone by the time `b:`'s context is recorded. Before
+    // round 8 this read `a`, byte-identical to a legitimate key under `a`.
+    const dedented = structuralContexts('a:\n  k: "open\n  b: ${{ x }}\n');
+    assert.equal(dedented[1], 'a', 'the opener is an ordinary key line under `a`');
+    assert.equal(dedented[2], 'a (scalar)', 'and the line that dedents past it is still marked as data');
+
+    // And left of every key in the file, where there is no chain left to poison
+    // at all. `(top level)` is exactly what an entry for a workflow-level key
+    // would name, so the marking has to survive an empty chain.
+    const toTop = structuralContexts('a:\n  k: "open\nb: ${{ x }}\n');
+    assert.equal(toTop[2], '(top level) (scalar)', 'an empty chain is marked too, or column 0 is a free pass');
   });
 
 
