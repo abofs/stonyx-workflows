@@ -1893,6 +1893,34 @@ describe('G1 -- a payload dedented PAST its own opener cannot erase the (scalar)
     );
   });
 
+  test('the (scalar) hint reaches the DEDENTED shape, which is the case it exists for', () => {
+    // ROUND 8 §3's FIFTH COST, AND THE REASON IT IS PINNED HERE. `scalarHint`
+    // fires off the `(scalar)` link in the derived context. For a payload
+    // dedented past its opener there was no such link, so the red a contributor
+    // saw was the ordinary "no allowlist entry pins that expression" -- whose
+    // stated remedy is "adding one is the review", and adding one WORKED. The
+    // one message written to stop this shape was silent in exactly the case it
+    // exists for, and the sweep above is what made it audible.
+    const PROBE = '${{ inputs.dedent-hint-probe }}';
+    const forged = appendStep(npmPublish, step(
+      '      - name: Leak',
+      '        run: "echo',
+      `     ${PROBE}"`,
+    ));
+    const found = sweep('npm-publish.yml', forged).filter((p) => UNPINNED.test(p) && p.includes(PROBE));
+    assert.equal(found.length, 1, 'the dedented payload should be the one unpinned occurrence');
+    assert.match(
+      found[0],
+      /began inside an open quoted scalar or flow collection/,
+      'the red on a dedented payload must say why copying its context will not work',
+    );
+    assert.match(
+      found[0],
+      /bind the value through a step `env:`/,
+      'and must name the remedy that converges, the same one the indented shape gets',
+    );
+  });
+
   test('control: the INDENTED spelling of the same payload was already refused', () => {
     // The four columns the round-7 rule did reach. This is not a killing case
     // -- it is green before the fix and after it -- and it is here so that a
