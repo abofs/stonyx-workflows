@@ -63,11 +63,12 @@ jobs:
           # actions/checkout defaults `persist-credentials: true` -- which
           # writes it into .git/config as an `http.<host>/.extraheader`
           # Authorization entry. THE CONSUMER'S OWN CODE then runs in this same
-          # job, in five windows: `pnpm install` (lifecycle scripts), `pnpm
-          # test`, `pnpm version` (preversion/version/postversion) and `pnpm
-          # publish` (prepublishOnly/prepack/prepare). Any of them can read that
-          # file, and push access to any one of the eleven abofs/stonyx* repos
-          # would then yield a credential reaching all of them.
+          # job: `pnpm install` (preinstall/install/postinstall), `pnpm test`,
+          # `pnpm version` (preversion/version/postversion, five sites) and
+          # `pnpm publish` (prepublishOnly/prepack/prepare, three sites). Any of
+          # them can read that file, and push access to any one of the eleven
+          # abofs/stonyx* repos would then yield a credential reaching all of
+          # them.
           #
           # Not hypothetical: 21 published @stonyx/cron versions shipped
           # `package/.git/config` carrying a live credential to the public npm
