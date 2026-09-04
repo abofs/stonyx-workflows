@@ -1731,3 +1731,171 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     );
   });
 });
+
+describe('G1 -- a payload dedented PAST its own opener cannot erase the (scalar) link (#37)', () => {
+  // PR #38, Phase 3 round 8 §1 -- BLOCKER, and residue that predates this PR
+  // rather than a round-7 regression: the reviewer re-applied the payload below
+  // to `f6cfe34`, the tree Phase 3 approved, and measured 306 pass / 0 fail
+  // there too.
+  //
+  // WHAT THE ROUND-7 RULE ACTUALLY KEYS ON. `structuralContexts` marks a link
+  // `(scalar)` when the line that PUSHED it began inside an open quoted scalar.
+  // That is a fact about a frame, and a frame is only reachable from a line
+  // that is INDENTED under it. The recorded context of a line is `chain()`
+  // taken AFTER the pop loop and BEFORE any dirtiness of that line is
+  // considered, so a payload written at or left of its own opener pops the
+  // opener's frame -- the one frame guaranteed `(scalar)`, because
+  // `valueOf('run: "echo')` is non-empty -- together with every dirty frame
+  // above it, and what is left is the clean pre-quote ladder.
+  //
+  // The D1-D10 rows above never reached this because every one of them dedents
+  // the FORGED KEY to the opener's column and then writes the payload one level
+  // deeper, so a dirty `with (scalar)` frame is always still on the stack when
+  // the payload line is read. None of them dedents the payload line itself past
+  // the opener. That is the whole gap, and the shape below is the narrowest
+  // statement of it: no forged key at all, just a column number.
+  //
+  // MEASURED ON THIS TREE, by sweeping the payload's indent 0..12 against the
+  // real `npm-publish.yml` (Psych 5.3.1 / libyaml 0.2.5, `Psych.load` on each
+  // of the thirteen):
+  //
+  //   indent  Psych                    derived context                          (scalar)
+  //   0       live in `run`            (top level)                              no
+  //   1-2     live in `run`            jobs                                     no
+  //   3-4     live in `run`            jobs > publish                           no
+  //   5-8     live in `run`            jobs > publish > steps                   no
+  //   9-12    live in `run`            jobs > publish > steps > run (scalar)    yes
+  //
+  // Thirteen of thirteen keep `${{ inputs.custom-version }}` inside the `run:`
+  // string -- the runner substitutes it before bash parses -- and NINE OF THE
+  // THIRTEEN derive a context with no `(scalar)` link anywhere, which an
+  // ordinary-looking entry can then name. With that entry written, the
+  // guarantee returned `[]` and the suite was 309 pass / 0 fail.
+  //
+  // AND THE PREMISE THE RULE WAS DERIVED FROM IS FALSE. `raw-expression-scan.js`
+  // used to say a double-quoted continuation may sit at "ANY indent greater than
+  // the enclosing block mapping's", and that a payload "can LENGTHEN a chain,
+  // never shorten one". Re-derived here rather than assumed: 63 documents, key
+  // at content indent m = 0..6 in a nested mapping, continuation at indent
+  // p = 0..8, `Psych.load` on each -- 63 / 63 keep the payload inside the
+  // scalar, INCLUDING every cell where p < m and every cell where p = 0.
+  // libyaml imposes no lower bound at all on a quoted continuation, so the
+  // chain does shorten and the docstring is corrected with this commit's
+  // sibling.
+  //
+  // ONE ROW PER DISTINCT DERIVED CONTEXT, plus the two controls, because a
+  // single column would pass on any rule that happened to fire at that depth.
+  // The entry is the reviewer's, verbatim, and it is well-formed on purpose:
+  // this is not a malformed-entry test.
+  const LEAK_EXPRESSION = '${{ inputs.custom-version }}';
+  const leakStep = (indent, quote = '"') => step(
+    '      - name: Leak',
+    `        run: ${quote}echo`,
+    `${' '.repeat(indent)}${LEAK_EXPRESSION}${quote}`,
+  );
+
+  const leakEntry = (context) => ({
+    context,
+    line: `${LEAK_EXPRESSION}"`,
+    occurrences: 1,
+    expression: LEAK_EXPRESSION,
+    why: 'inputs.custom-version is a workflow_call input echoed for diagnostics only; it is not program text at '
+      + 'this position and the step does nothing else with it.',
+  });
+
+  // Column, and the context the scanner derived for it BEFORE this fix. The
+  // second field is what the attacker copies into the entry; it is written out
+  // rather than read back from the function so that a change to the derivation
+  // reds here instead of silently re-pointing the case at itself.
+  const DEDENTS = [
+    ['P0  payload at column 0 -- left of every key in the file', 0, '(top level)'],
+    ['P1  payload at column 1 -- inside the top-level ladder', 1, 'jobs'],
+    ['P3  payload at column 3 -- the job frame', 3, 'jobs > publish'],
+    ['P5  payload at column 5 -- the steps frame, one left of the list marker', 5, 'jobs > publish > steps'],
+    ['P8  payload at column 8 -- the opener\'s OWN column, the boundary case', 8, 'jobs > publish > steps'],
+  ];
+
+  for (const [label, indent, preFixContext] of DEDENTS) {
+    test(`${label} -- the guarantee reds on a payload no entry may name`, () => {
+      const forged = appendStep(npmPublish, leakStep(indent));
+      const openersAdded = (forged.match(/\$\{\{/g) || []).length - (npmPublish.match(/\$\{\{/g) || []).length;
+      assert.equal(openersAdded, 1, 'the payload introduces exactly one NEW occurrence, and deletes none');
+
+      const entry = leakEntry(preFixContext);
+      const withFresh = {
+        ...EXPRESSION_ALLOWLIST,
+        'npm-publish.yml': [...EXPRESSION_ALLOWLIST['npm-publish.yml'], entry],
+      };
+      const problems = sweep('npm-publish.yml', forged, withFresh);
+      assert.ok(
+        problems.some((p) => p.includes(LEAK_EXPRESSION)),
+        'a consumer-controlled input dedented into a live shell command line must red SOMEWHERE, and the problem '
+        + `has to be about the payload rather than collateral;\ngot:\n${
+          problems.map((x) => `  - ${x}`).join('\n') || '  (none)'}`,
+      );
+    });
+  }
+
+  test('P5q  the single-quoted spelling of the same column reds too', () => {
+    // Not double-quote-specific: the single-quoted opener derives the identical
+    // `jobs > publish > steps`, so a rule that keyed on `"` alone would leave
+    // half the family live.
+    const forged = appendStep(npmPublish, leakStep(5, "'"));
+    const entry = { ...leakEntry('jobs > publish > steps'), line: `${LEAK_EXPRESSION}'` };
+    const withFresh = {
+      ...EXPRESSION_ALLOWLIST,
+      'npm-publish.yml': [...EXPRESSION_ALLOWLIST['npm-publish.yml'], entry],
+    };
+    const problems = sweep('npm-publish.yml', forged, withFresh);
+    assert.ok(
+      problems.some((p) => p.includes(LEAK_EXPRESSION)),
+      `the single-quoted dedent must red as well;\ngot:\n${
+        problems.map((x) => `  - ${x}`).join('\n') || '  (none)'}`,
+    );
+  });
+
+  test('the mechanism: a line that BEGAN dirty carries (scalar) on its OWN context, not only on frames under it', () => {
+    // ASSERTED DIRECTLY, so the six cases above cannot all pass for an
+    // unrelated reason, and stated at the boundary the pop loop actually
+    // crosses. `b:` sits at the opener's own column, so the opener's frame is
+    // popped before `b:`'s context is recorded -- and `b:` is still data.
+    const contexts = structuralContexts('a:\n  k: "open\n  b: ${{ x }}\n');
+    assert.equal(contexts[1], 'a', 'the opener itself is a legitimate key line under `a`');
+    assert.ok(
+      contexts[2].includes('(scalar)'),
+      `a line that began inside an open quoted scalar must carry a (scalar) link on its own context even when it `
+      + `dedents past its opener; got ${contexts[2]}`,
+    );
+  });
+
+  test('control: the INDENTED spelling of the same payload was already refused', () => {
+    // The four columns the round-7 rule did reach. This is not a killing case
+    // -- it is green before the fix and after it -- and it is here so that a
+    // future reader can see which half of the family was already closed.
+    const forged = appendStep(npmPublish, leakStep(10));
+    const entry = leakEntry('jobs > publish > steps > run (scalar)');
+    assert.equal(
+      entryShapeProblems('npm-publish.yml', entry).length,
+      1,
+      'an entry naming a (scalar) context is refused at the shape floor',
+    );
+    const withFresh = {
+      ...EXPRESSION_ALLOWLIST,
+      'npm-publish.yml': [...EXPRESSION_ALLOWLIST['npm-publish.yml'], entry],
+    };
+    assert.ok(sweep('npm-publish.yml', forged, withFresh).some((p) => p.includes(LEAK_EXPRESSION)));
+  });
+
+  test('control: the same forged step carrying NO expression is clean, so the reds above are detection', () => {
+    // The shape penalty is not the detection. A quoted multi-line `run:` with
+    // an ordinary word where the expression sat must sweep clean, or the six
+    // cases above could be passing on the SHAPE of the step rather than on the
+    // payload in it.
+    const benign = appendStep(npmPublish, step(
+      '      - name: Leak',
+      '        run: "echo',
+      '     benign"',
+    ));
+    assert.deepEqual(sweep('npm-publish.yml', benign), [], 'a dedented quoted run: with no expression is not a red');
+  });
+});
