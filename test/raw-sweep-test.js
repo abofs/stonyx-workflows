@@ -1389,9 +1389,15 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
       PAT_LINE,
       '        "',
     ));
+    // Keyed on the WHOLE checkout `token:` line, not on the substring
+    // `secrets.CASCADE_PAT`. abofs/stonyx-workflows#35 bound the same
+    // expression into the `env:` of the two commit/push steps -- the credential
+    // is no longer persisted into .git/config, so the steps that push are
+    // handed it explicitly -- and a substring filter then found three lines and
+    // red here on arithmetic rather than on the mechanism this case tests.
     const contextOf = (text) => {
-      const found = rawExpressions(text).filter((e) => e.line.includes('secrets.CASCADE_PAT'));
-      assert.equal(found.length, 1, 'the PAT expression must occur exactly once in this text');
+      const found = rawExpressions(text).filter((e) => e.line === PAT_LINE.trim());
+      assert.equal(found.length, 1, 'the checkout token: line must occur exactly once in this text');
       return found[0].context;
     };
     const legit = contextOf(npmPublish);

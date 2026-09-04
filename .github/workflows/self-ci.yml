@@ -30,6 +30,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # This job runs this repo's own `pnpm install` and `pnpm test`.
+          # actions/checkout would otherwise leave the job's GITHUB_TOKEN in
+          # .git/config, and no step in this workflow reads git credentials
+          # (abofs/stonyx-workflows#35).
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

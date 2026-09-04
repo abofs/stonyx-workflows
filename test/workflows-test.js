@@ -2,7 +2,9 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 
-import { onKeys, parseSteps, readWorkflow, stepRunBody, workflowPath } from './helpers/workflow-yaml.js';
+import {
+  MissingStepKeyError, onKeys, parseSteps, readWorkflow, runBodyOf, stepRunBody, workflowPath,
+} from './helpers/workflow-yaml.js';
 
 // Workflow-source assertions for abofs/stonyx-workflows#22 (story A).
 //
@@ -89,20 +91,38 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
     // the only thing standing between the checkout and a published tarball.
     const cleanup = steps.find((s) => s.body.includes('rm -rf .stonyx-workflows'));
     assert.ok(cleanup, 'a step should remove the .stonyx-workflows checkout before publish');
-    // Not `.includes('pnpm publish')`. That token misses `npm publish` and
-    // `pnpm -r publish`, both of which publish this package to the same
-    // registry -- so a publish step added in either shape would make
-    // `findIndex` return -1 and this assertion pass vacuously, the cleanup
-    // "preceding" a step the reader cannot see. Comment lines are stripped
-    // first because this file's own prose discusses `npm publish <a .tgz>`.
-    const publishAt = steps.findIndex((s) => (
-      /\b(?:p?npm|yarn)\b[^\n]*\bpublish\b/.test(
-        s.body.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n'),
-      )
-    ));
-    assert.notEqual(publishAt, -1, 'npm-publish.yml must contain a publish step for this ordering to mean anything');
+    // The publish steps are located by their EXECUTED `run:` body with comment
+    // lines removed, not by a substring of the whole step body. The whole-body
+    // form found the first step whose YAML happened to contain the characters
+    // `pnpm publish` -- which, once abofs/stonyx-workflows#35 added a comment to
+    // the checkout step naming the lifecycle hooks that run consumer code, was
+    // step 0, and this assertion red on a documentation comment. A step's
+    // comments are not things it does.
+    //
+    // The token within that body is also not `.includes('pnpm publish')`. That
+    // form misses `npm publish`, `pnpm -r publish` and `yarn publish`, all of
+    // which publish this package to the same registry -- so a publish step
+    // added in any of those shapes would make `findIndex` return -1 and this
+    // assertion pass vacuously, the cleanup "preceding" a step the reader
+    // cannot see. Both halves are load-bearing: the run-body restriction stops
+    // a comment from matching, the widened token stops a real publish from
+    // hiding.
+    const PUBLISH_COMMAND = /\b(?:p?npm|yarn)\b[^\n]*\bpublish\b/;
+    const runsPublish = (step) => {
+      let body;
+      try {
+        body = runBodyOf(step);
+      } catch (err) {
+        if (err.code === MissingStepKeyError.CODE) return false;
+        throw err;
+      }
+      return body.split('\n').some((line) => !line.trim().startsWith('#') && PUBLISH_COMMAND.test(line));
+    };
+
+    const firstPublish = steps.findIndex(runsPublish);
+    assert.notEqual(firstPublish, -1, 'npm-publish.yml must contain a publish step for this ordering to mean anything');
     assert.ok(
-      steps.indexOf(cleanup) < publishAt,
+      steps.indexOf(cleanup) < firstPublish,
       'cleanup must run before the first publish step',
     );
   });
