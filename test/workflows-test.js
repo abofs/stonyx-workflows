@@ -2,7 +2,9 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 
-import { onKeys, parseSteps, readWorkflow, stepRunBody, workflowPath } from './helpers/workflow-yaml.js';
+import {
+  MissingStepKeyError, onKeys, parseSteps, readWorkflow, runBodyOf, stepRunBody, workflowPath,
+} from './helpers/workflow-yaml.js';
 
 // Workflow-source assertions for abofs/stonyx-workflows#22 (story A).
 //
@@ -89,8 +91,29 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
     // the only thing standing between the checkout and a published tarball.
     const cleanup = steps.find((s) => s.body.includes('rm -rf .stonyx-workflows'));
     assert.ok(cleanup, 'a step should remove the .stonyx-workflows checkout before publish');
+
+    // The publish steps are located by their EXECUTED `run:` body with comment
+    // lines removed, not by a substring of the whole step body. The whole-body
+    // form found the first step whose YAML happened to contain the characters
+    // `pnpm publish` -- which, once abofs/stonyx-workflows#35 added a comment to
+    // the checkout step naming the lifecycle hooks that run consumer code, was
+    // step 0, and this assertion red on a documentation comment. A step's
+    // comments are not things it does.
+    const runsPublish = (step) => {
+      let body;
+      try {
+        body = runBodyOf(step);
+      } catch (err) {
+        if (err.code === MissingStepKeyError.CODE) return false;
+        throw err;
+      }
+      return body.split('\n').some((line) => !line.trim().startsWith('#') && line.includes('pnpm publish'));
+    };
+
+    const firstPublish = steps.findIndex(runsPublish);
+    assert.notEqual(firstPublish, -1, 'a step should run pnpm publish');
     assert.ok(
-      steps.indexOf(cleanup) < steps.findIndex((s) => s.body.includes('pnpm publish')),
+      steps.indexOf(cleanup) < firstPublish,
       'cleanup must run before the first publish step',
     );
   });
