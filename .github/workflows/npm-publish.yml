@@ -548,16 +548,25 @@ jobs:
           echo "release artifact $TARBALL passed the content guard: $ENTRY_COUNT entries, 0 denied"
 
       - name: Publish to NPM (alpha)
+        # The tarball the guard step above asserted on, by path, rather than
+        # this directory. A directory publish re-packs the tree, so the bytes
+        # inspected and the bytes uploaded would be two different objects built
+        # from the same source -- which is abofs/stonyx-workflows#39 one level
+        # down. Provenance is unaffected: pnpm never publishes a directory, both
+        # of its branches hand `npm publish <a .tgz>` to the npm CLI, and
+        # libnpmpublish rebuilds the spec from the manifest rather than from the
+        # CLI argument. All ten @stonyx/* packages are tarball publishes today
+        # and all ten are attested.
         if: contains(steps.package-version.outputs.version, 'alpha')
-        run: pnpm publish --tag alpha --access public --no-git-checks
+        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag alpha --access public --no-git-checks
 
       - name: Publish to NPM (beta)
         if: contains(steps.package-version.outputs.version, 'beta')
-        run: pnpm publish --tag beta --access public --no-git-checks
+        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta --access public --no-git-checks
 
       - name: Publish to NPM (stable)
         if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
-        run: pnpm publish --access public --no-git-checks
+        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --access public --no-git-checks
 
       - name: Commit version bump and create tag (beta)
         if: contains(steps.package-version.outputs.version, 'beta')
