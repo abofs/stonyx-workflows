@@ -59,9 +59,13 @@ const step = (...lines) => lines.join('\n');
  * mutation the PAT occurrence is EXEMPT with a chain byte-identical to the
  * legitimate line, while two lines of downstream collateral still match both
  * patterns. Re-measured on this tree: `}`/`]` treated as closers inside a
- * double quote is 308 pass / 1 fail with the fixtures where they sit, 309 / 0
- * -- fully green with the sink live -- with the fixtures relocated and the
- * round-6 assertion, and 308 / 1 again with this one. Naming the payload makes the D
+ * double quote is 318 pass / 1 fail with the fixtures where they sit; with the
+ * fixtures relocated and the round-6 assertion it is 318 / 1 -- and the D rows
+ * are all GREEN in that row, with the sink live, exactly as they were at
+ * 309 / 0 on the round-8 tree; the single red is the round-9 `control: the same
+ * forged step carrying NO expression is clean`, which relocates with them and
+ * leaves its own quote open over the rest of the file. With the payload named,
+ * it is 317 / 2. Naming the payload makes the D
  * rows immune to placement and to collateral, and it costs nothing today.
  */
 function assertReports(problems, pattern, why, naming = null) {
@@ -1231,8 +1235,9 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
   //
   // Measured with `test/helpers/raw-expression-scan.js` reverted to `1a98115`,
   // ALL TEN rows below: the guarantee returns `[]` for every one of them and
-  // the suite is 309 tests, 294 pass / 15 fail -- the fifteen reds being these
-  // ten plus the mechanism, monotonicity, hint, N-W1 and N-W2 cases. The
+  // the suite is 319 tests, 295 pass / 24 fail -- these ten plus the
+  // mechanism, monotonicity, hint, N-W1 and N-W2 cases, plus the nine round-9
+  // rows below, which the same revert also reopens. The
   // payload is `(inputs.cascade-source != '' && secrets.CASCADE_PAT) ||
   // github.token` -- an org-level PAT with write across ten repos --
   // substituted into a live shell string. Seven of the first eight are valid
@@ -1246,20 +1251,20 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
   //     the row could not fail for the mechanism in its own label. Deleting the
   //     branch was 305 / 1 ON THE ROUND-6 TREE (306 tests) and the red was
   //     N-W1, whose payload happens to carry an odd one. One character -- `\"x\"` to `\"x` -- and it discriminates:
-  //     deleting the branch is now 307 pass / 2 fail, D3 and N-W1, and with D3
-  //     itself deleted it is 307 / 1, N-W1 alone -- so the row is the catcher,
+  //     deleting the branch is now 317 pass / 2 fail, D3 and N-W1, and with D3
+  //     itself deleted it is 317 / 1, N-W1 alone -- so the row is the catcher,
   //     not the passenger.
   //   * D9's bare `}` pays for the `{` that opens the forged frame. Unclamping
   //     `depth` -- `depth = depth > 0 ? depth - 1 : 0` to `depth -= 1`, which
   //     reads as removing a redundant ternary -- restored the byte-identical
   //     legitimate chain to this forgery and was caught by nothing. Measured
-  //     on this tree with D9 and D10 deleted it is 307 / 0; with them present
-  //     it is 308 / 1, D9 alone.
+  //     on this tree with D9 and D10 deleted it is 317 / 0 (of 317); with them
+  //     present it is 318 / 1, D9 alone.
   //   * D10's `#` sits on the flow opener. Making the comment bail CLEAR
   //     `depth` as well as break -- `#` is only reached with `quote === null`,
   //     but it can be reached with `depth > 0` -- is equally fail-open and was
-  //     caught by nothing: 307 / 0 with D9 and D10 deleted, 308 / 1 with them
-  //     present, D10 alone.
+  //     caught by nothing: 317 / 0 (of 317) with D9 and D10 deleted, 318 / 1
+  //     with them present, D10 alone.
   //
   // WHAT CLOSED IT, and why it is not a parser. The three forgeable scalar
   // styles are not defined by indentation or by colons -- each is defined by an
@@ -1703,7 +1708,7 @@ describe('G1 -- an exemption cannot follow its line into a different sink (#37)'
     // 0 fail on THE TREE BEFORE THIS CASE EXISTED, with nothing to stop them --
     // "on this tree" is what that used to say, and it stopped being true the
     // moment this case landed. Re-measured on this tree, each of the two is
-    // 308 pass / 1 fail and the one red is this case:
+    // 318 pass / 1 fail and the one red is this case:
     //
     //   * collapsing internal double spaces, so an entry written for
     //     `a:  ${{ x }}` also exempts `a: ${{ x }}` -- a WIDENING, which is the
@@ -1795,7 +1800,8 @@ describe('G1 -- a payload dedented PAST its own opener cannot erase the (scalar)
   // string -- the runner substitutes it before bash parses -- and NINE OF THE
   // THIRTEEN derive a context with no `(scalar)` link anywhere, which an
   // ordinary-looking entry can then name. With that entry written, the
-  // guarantee returned `[]` and the suite was 309 pass / 0 fail.
+  // guarantee returned `[]` and the suite was 309 pass / 0 fail AT `2c7d7bd`.
+  // The same twelve-line diff on this tree is 313 / 6.
   //
   // AND THE PREMISE THE RULE WAS DERIVED FROM IS FALSE. `raw-expression-scan.js`
   // used to say a double-quoted continuation may sit at "ANY indent greater than

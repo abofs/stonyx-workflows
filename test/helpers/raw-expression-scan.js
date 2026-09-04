@@ -121,11 +121,19 @@
 //    scalar may not open a mapping. It is not a parser and it needs no YAML
 //    understanding -- the previous claim here, that closing this "needs a
 //    parser", was false and is retracted. Re-measured on this tree, each of
-//    the three dedented spellings on the real `ci.yml`: 303 pass / 6 fail,
+//    the three dedented spellings on the real `ci.yml`: 313 pass / 6 fail,
 //    from
-//    294 / 0 green. All five scalar styles and both flow collections are
-//    closed against context forgery, and TEN spellings of the forgery are
-//    committed as cases in `test/raw-sweep-test.js`.
+//    294 / 0 green at `1a98115`. TEN spellings of the forgery are committed as
+//    cases in `test/raw-sweep-test.js`.
+//
+//    AND THAT WAS STILL NOT ALL FIVE STYLES. This note said "all five scalar
+//    styles and both flow collections are closed" while the marking was only
+//    reachable for a payload INDENTED under its opener; a payload dedented back
+//    out derived no `(scalar)` link at all, at nine of thirteen indent columns
+//    against the real `npm-publish.yml`, and was 309 pass / 0 fail at `2c7d7bd`
+//    with an ordinary-looking entry. Round 9 moved the marking onto the LINE's
+//    own state, which no dedent can pop: thirteen of thirteen columns now
+//    derive a link, and the same diff is 313 / 6 here.
 //
 //    AND THE REFUSAL IS IN `entryShapeProblems`, NOT ONLY IN THE CHAIN. Round
 //    6 shipped the sentence "no entry can name such a context" in this header,
@@ -392,18 +400,39 @@ function walk(line, state) {
  *   literal block `|`   NO   -- content at or left of the key is a sibling key
  *   folded block `>`    NO   -- same
  *   plain multi-line    NO   -- must be more indented than the key
- *   double-quoted       YES  -- a continuation may sit at ANY indent greater
- *                              than the enclosing block mapping's
+ *   double-quoted       YES  -- a continuation may sit at ANY INDENT AT ALL,
+ *                              including column 0 and including columns left
+ *                              of its own key line
  *   single-quoted       YES  -- same
  *   flow mapping/seq    YES  -- same
+ *
+ * THE TWO QUOTED ROWS SAID "any indent GREATER THAN the enclosing block
+ * mapping's" for three rounds, and that qualifier is not a rule libyaml
+ * enforces. Re-derived rather than re-asserted (PR #38, Phase 3 round 8 §1a,
+ * reproduced here): 63 documents, key at content indent m = 0..6 inside a
+ * nested mapping, continuation at indent p = 0..8, `Psych.load` on each --
+ * 63 / 63 keep the payload inside the scalar, INCLUDING every cell where p < m
+ * and every cell where p = 0. `m=6, p=0` loads as
+ * `{"a"=>{"b"=>{"c"=>{"k"=>"true PAYLOAD "}}}}`. There is no lower bound.
  *
  * THREE NO ROWS, THREE YES ROWS -- and the count is written out because this
  * note said "four" for a round, in the direction that understates the gap
  * (PR #38, Phase 5 round 5 N5-1). For the three NO rows the owning key line is
- * unavoidably an ancestor of the payload, so a chain closes them: a payload can
- * LENGTHEN a chain, never shorten one. That is why this is a chain and not a nearest key, and it is
- * why the fix is not "reject `with:` inside `run:`" -- it rejects every
- * position a scalar whose content must be deeper can reach.
+ * unavoidably an ancestor of the payload, so a chain closes them: FOR THOSE
+ * THREE a payload can lengthen a chain and never shorten one. That is why this
+ * is a chain and not a nearest key, and it is why the fix is not "reject
+ * `with:` inside `run:`" -- it rejects every position a scalar whose content
+ * must be deeper can reach.
+ *
+ * IT IS NOT TRUE OF THE THREE YES ROWS, AND THIS NOTE ASSERTED IT WITHOUT THE
+ * QUALIFIER FOR THREE ROUNDS. A quoted continuation at or left of its own
+ * opener SHORTENS the chain: the pop loop below drops the opener's frame -- the
+ * one frame guaranteed `(scalar)` -- and every dirty frame above it. Measured
+ * on this tree, one forged step appended to the real `npm-publish.yml` with the
+ * payload swept across indents 0..12: all thirteen keep the expression live
+ * inside the `run:` string, and nine of the thirteen used to derive a context
+ * with no `(scalar)` link anywhere. That is why the marking below is taken from
+ * the LINE's state and not from a frame -- see `structuralContexts`.
  *
  * The `(scalar)` marking closes the same rows one step earlier and more
  * cheaply: `run: "true` and `run: |` both already carry a value, so neither can
@@ -447,14 +476,24 @@ function walk(line, state) {
  * because a reader who believed it would not have looked for the cheap fix.
  *
  * Measured on this tree: the three dedented spellings on the real `ci.yml` go
- * from 294 / 0 GREEN to 303 pass / 6 fail, all five real workflows still sweep
+ * from 294 / 0 GREEN at `1a98115` to 313 pass / 6 fail, all five real workflows still sweep
  * clean with no new allowlist entry, and ten spellings are committed as
  * cases -- including a decoy `}`, which is ordinary content inside a
  * double-quoted scalar and is the case that separates this from a plausible
  * implementation that resets quote state per line, and two that pin the
  * flow-depth half. Measured on this tree with those two rows deleted, both of
- * its widenings are 307 / 0 -- invisible to every other test -- and 308 / 1
- * each with the rows present.
+ * its widenings are 317 / 0 of 317 -- invisible to every other test -- and
+ * 318 / 1 each with the rows present.
+ *
+ * AND ONE MORE THING THE FRAME MARKING COULD NOT SEE, closed in round 9: the
+ * link above is contributed by the dirty line, and a contributed link is only
+ * reachable from a line INDENTED under it. A payload written at or left of its
+ * own opener popped the opener's frame before its own position was recorded.
+ * The recorded context is now marked from `dirtyAtLineStart` directly, which
+ * the pop loop cannot reach. Measured on this tree, payload indent swept 0..12
+ * against the real `npm-publish.yml`: 13/13 live in the `run:` string, 13/13
+ * now carry a `(scalar)` link (9 of 13 carried none), and the twelve-line diff
+ * that was 309 pass / 0 fail at `2c7d7bd` is 313 / 6 here.
  *
  * STILL NOT CLOSED, AND NOT CLOSEABLE HERE. The key does not model WHO
  * RECEIVES the input. Re-adding an allowlisted line byte-identically under
@@ -770,7 +809,8 @@ export function entryShapeProblems(file, entry) {
     problems.push(
       `${where} names a context containing a ${SCALAR} link, and no entry may name one. A key that already `
       + 'carries a value, or a line that began inside an open quoted scalar or flow collection, is DATA: it '
-      + 'cannot open a mapping, so no position under it is one an entry can approve. If a payload printed this '
+      + 'cannot open a mapping, so neither its own position nor any position under it is one an entry can '
+      + 'approve. If a payload printed this '
       + 'context at you, it wrote its own position and the answer is not an exemption. If it is your own '
       + 'block-scalar body, the expression is not pinnable where it sits -- bind it through a step `env:` and '
       + 'reference the variable in the body instead.',

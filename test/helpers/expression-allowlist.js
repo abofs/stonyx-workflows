@@ -83,10 +83,16 @@
 //                294 pass / 0 fail with the org PAT in a live shell command
 //                line, in all three styles, reaching 34 of the 36 entries in
 //                this file by a mechanical transform. Re-measured on this
-//                tree, each of the three is 303 pass / 6 fail.
+//                tree, each of the three is 313 pass / 6 fail.
+//                Round 9 closed the other half of the same family: the marking
+//                used to be reachable only for a payload INDENTED under its
+//                opener, so one DEDENTED past it derived no link at all and was
+//                309 pass / 0 fail at `2c7d7bd` with an entry naming the
+//                context it derived. It is now taken from the line's own state.
 //                So: ALL FIVE scalar styles and both flow collections are
-//                closed against context forgery, and TEN spellings of it are
-//                committed as cases in `test/raw-sweep-test.js`. What is still
+//                closed against context forgery AT EVERY INDENT, and TEN
+//                spellings of it are committed as cases in
+//                `test/raw-sweep-test.js`, with nine more for the dedent. What is still
 //                open is not a YAML shape at all -- the key does not model WHO
 //                RECEIVES the input, so an entry re-added byte-identically
 //                under a different `uses:` still matches. README.md's *Honest
