@@ -424,6 +424,129 @@ jobs:
           ')
           echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Pack and guard the release artifact
+        # abofs/stonyx-workflows#39. Twenty-three published @stonyx/* tarballs
+        # carried a checked-out .git/config to the public registry, and nothing in
+        # this pipeline looked at what it was uploading. npm has no unpublish past
+        # 72 hours, so a wrong tarball is permanent and public.
+        #
+        # The property this step buys is narrower than "the tarball is safe": it
+        # is that THE BYTES ASSERTED ON ARE THE BYTES UPLOADED. It packs once, to
+        # a deterministic path outside the package root, reads that file, and the
+        # three publish steps below take that same path as their argument. Two
+        # packs of the same tree would not have this property, which is the
+        # original defect one level down.
+        #
+        # Self-contained on purpose. The .stonyx-workflows checkout is
+        # alpha/beta-only and has already been removed above, so a guard importing
+        # from scripts/ would silently not exist on the stable channel -- the one
+        # where a leak sits under `latest` indefinitely.
+        #
+        # No bypass input. A skip flag reachable through workflow_call from ten
+        # consumer repos is the guard deleting itself.
+        run: |
+          set -euo pipefail
+
+          PACK_DIR="$RUNNER_TEMP/stonyx-pack"
+          TARBALL="$RUNNER_TEMP/stonyx-release.tgz"
+          ENTRIES="$RUNNER_TEMP/stonyx-release-entries.txt"
+          OFFENDERS="$RUNNER_TEMP/stonyx-release-offenders.txt"
+
+          # A prior attempt in the same job must never be what gets inspected or
+          # uploaded. Everything this step reads later is created below.
+          rm -rf "$PACK_DIR"
+          rm -f "$TARBALL" "$ENTRIES" "$OFFENDERS"
+          mkdir -p "$PACK_DIR"
+
+          # `pnpm pack` runs prepack and prepare -- NOT prepublishOnly. Four of
+          # the ten consumers build there (stonyx, stonyx-discord, stonyx-events,
+          # stonyx-logs, measured), and stonyx-events and stonyx-logs declare
+          # files: ["dist","README.md"], so packing without it would inspect a
+          # near-empty tarball and pass vacuously while the real upload came
+          # from a post-build tree.
+          #
+          # Publishing a tarball runs zero lifecycle scripts, so this invocation
+          # is the only thing that runs it. It is not optional and it is not
+          # swallowed: set -e fails the step if the build fails.
+          PREPUBLISH_DECLARED=$(pnpm pkg get scripts.prepublishOnly)
+          PREPUBLISH_STATE=unresolved
+          if [ "$PREPUBLISH_DECLARED" = "{}" ]; then
+            PREPUBLISH_STATE=absent
+            echo "package.json declares no prepublishOnly script"
+          else
+            pnpm run prepublishOnly
+            PREPUBLISH_STATE=ran
+          fi
+          if [ "$PREPUBLISH_STATE" = "unresolved" ]; then
+            echo "::error::prepublishOnly was neither run nor established as absent" >&2
+            exit 1
+          fi
+          echo "prepublishOnly: $PREPUBLISH_STATE"
+
+          # --pack-destination rather than --out: pnpm 9.15.9, the version this
+          # workflow pins by default, rejects --out with `Unknown option: out`.
+          # The destination is a directory outside the package root, so no .tgz
+          # ever lands where the next pack would absorb it or where it would
+          # perturb the `git pull --rebase --autostash` in the tag steps below.
+          pnpm pack --pack-destination "$PACK_DIR"
+
+          # The filename pnpm chooses is name-and-version derived, so the file
+          # is resolved by counting a directory this step created empty rather
+          # than by globbing. A glob is how a guard ends up reading a stale
+          # tarball, or handing `tar` two paths and silently listing only the
+          # first while the second is read as a member name.
+          PACKED=$(find "$PACK_DIR" -maxdepth 1 -type f -name "*.tgz" | wc -l | tr -d " ")
+          if [ "$PACKED" != "1" ]; then
+            echo "::error::expected exactly one tarball in $PACK_DIR, found $PACKED. Refusing to guess which one would be released." >&2
+            find "$PACK_DIR" -maxdepth 1 >&2
+            exit 1
+          fi
+          mv "$(find "$PACK_DIR" -maxdepth 1 -type f -name "*.tgz")" "$TARBALL"
+
+          STRAY=$(find . -maxdepth 1 -type f -name "*.tgz" | wc -l | tr -d " ")
+          if [ "$STRAY" != "0" ]; then
+            echo "::error::$STRAY .tgz file(s) in the package root. They are absorbed by the next pack and they perturb the rebase in the tag steps below:" >&2
+            find . -maxdepth 1 -type f -name "*.tgz" >&2
+            exit 1
+          fi
+
+          # Read the artifact, not the report the packer prints. No pipeline here:
+          # $? after `tar ... | grep` is the status of grep, which is how a tar error
+          # becomes a green step.
+          tar -tzf "$TARBALL" > "$ENTRIES"
+
+          ENTRY_COUNT=$(wc -l < "$ENTRIES" | tr -d " ")
+          if [ "$ENTRY_COUNT" -lt 2 ]; then
+            echo "::error::the release artifact lists $ENTRY_COUNT entries. A guard that inspected nothing must not report success." >&2
+            exit 1
+          fi
+          if ! grep -q "^package/package\.json$" "$ENTRIES"; then
+            echo "::error::the release artifact has no package/package.json, so it is not a packed npm package and a denylist over its entries would pass vacuously:" >&2
+            cat "$ENTRIES" >&2
+            exit 1
+          fi
+
+          # grep exits 1 on no-match and >1 on error, and the difference is the
+          # whole guarantee. `|| true` would erase it.
+          set +e
+          grep -E "^package/\.git(/|$)" "$ENTRIES" > "$OFFENDERS"
+          GREP_STATUS=$?
+          set -e
+          if [ "$GREP_STATUS" -gt 1 ]; then
+            echo "::error::scanning the release artifact entry list failed with status $GREP_STATUS" >&2
+            exit 1
+          fi
+
+          OFFENDER_COUNT=$(wc -l < "$OFFENDERS" | tr -d " ")
+          if [ "$OFFENDER_COUNT" != "0" ]; then
+            echo "::error::$OFFENDER_COUNT denied path(s) in the release artifact:" >&2
+            cat "$OFFENDERS" >&2
+            echo "::error::refusing to release. A .git directory inside a tarball on the public registry is permanent -- npm cannot unpublish it after 72 hours. Remove it from the files field in package.json, or add .git to .npmignore." >&2
+            exit 1
+          fi
+
+          echo "release artifact $TARBALL passed the content guard: $ENTRY_COUNT entries, 0 denied"
+
       - name: Publish to NPM (alpha)
         if: contains(steps.package-version.outputs.version, 'alpha')
         run: pnpm publish --tag alpha --access public --no-git-checks
