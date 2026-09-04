@@ -1363,3 +1363,29 @@ describe('Beyond AC1-AC7 -- same-shape sinks found while sweeping the file (#32)
     ]);
   });
 });
+
+// #34 -- `security-audit.yml` interpolates the `workflow_call` input
+// `audit-level` into a shell `run:` body.
+//
+// SCAFFOLD. Every case below is a TODO stub; the assertions land in the
+// commits that follow. Committed first, deliberately, so the shape of the
+// evidence is reviewable before any of it is written.
+describe('#34 AC1 -- a hostile audit-level does not execute', () => {
+  test.todo('TODO: P1-P4 leave $CANARY_DIR empty against the live security-audit.yml');
+  test.todo('TODO: P1-P4 exit non-zero and name audit-level and the allowed set');
+  test.todo('TODO: P1-P4 never reach pnpm audit at all');
+  test.todo('TODO: audit-level "high" still produces `audit --audit-level high`');
+  test.todo('TODO: POSITIVE CONTROL -- P1-P4 against the frozen e07e185 blob write PWNED_AUDIT');
+});
+
+describe('#34 AC2 -- the exemption dies with the sink, in both allowlists', () => {
+  test.todo('TODO: expression-allowlist.js no longer carries the KNOWN OPEN SINK entry');
+  test.todo('TODO: interpolation-sweep.js ALLOWLIST no longer carries its counterpart');
+  test.todo('TODO: the new env: line carries its own pinned entry');
+});
+
+describe('#34 AC3 -- a rejected audit-level is not swallowed', () => {
+  test.todo('TODO: validation is its own step and carries no continue-on-error');
+  test.todo('TODO: the validation step exits non-zero for P1-P4');
+  test.todo('TODO: the audit step still carries continue-on-error: true');
+});
