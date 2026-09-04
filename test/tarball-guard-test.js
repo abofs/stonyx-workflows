@@ -376,10 +376,42 @@ describe('AC1 -- the inspected artifact is the published artifact (#39)', () => 
         files: ['dist'],
         scripts: { prepublishOnly: 'node -e "process.exit(3)"' },
       },
+      // The `dist/` payload is what makes this test test its own name. Without
+      // it the tree packs to a single `package/package.json`, so a `|| true` on
+      // the prepublishOnly invocation still reds -- on the ENTRY-COUNT floor,
+      // several checks downstream, with the build failure swallowed exactly as
+      // the assertion message warns about. `notEqual(status, 0)` accepted that,
+      // and the mutation this case is named for survived it 344/344 green.
+      //
+      // With a payload present the fixture is out of sample in the direction
+      // that matters, and it is not an exotic one: it is every incremental
+      // checkout, and every one of the four consumers that build in
+      // prepublishOnly. Measured with `|| true` applied -- exit 0, a stale
+      // build shipped, guard reports `passed the content guard: 3 entries`.
+      files: {
+        'dist/a.js': 'export const a = 1;\n',
+        'dist/b.js': 'export const b = 2;\n',
+      },
     });
 
-    assert.notEqual(run.status, 0, 'a failing prepublishOnly must fail the step: a `|| true` here would guard a '
-      + 'tarball built from a tree whose build did not complete');
+    // The exact status, not merely non-zero. 3 is prepublishOnly's own exit
+    // code arriving at the step boundary unaltered, which is the property; any
+    // other non-zero value means something downstream failed instead and the
+    // build's verdict was discarded on the way.
+    assert.equal(run.status, 3, 'a failing prepublishOnly must fail the step WITH ITS OWN STATUS: a `|| true` here '
+      + 'would guard a tarball built from a tree whose build did not complete; '
+      + `stdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+
+    // The wrong-reason pass this case previously took, pinned away directly. If
+    // the step ever reaches the entry-count floor on this fixture, the build
+    // failure was swallowed and the guard is only failing by luck.
+    assert.doesNotMatch(
+      run.stderr,
+      /lists \d+ entries/,
+      'the step reached the entry-count check, which means it packed -- so the failing prepublishOnly did not '
+      + `stop it and this case is passing for a reason that has nothing to do with the build; stderr:\n${run.stderr}`,
+    );
+    assert.equal(run.tarballExists, false, 'no artifact may exist at the published path after a failed build');
     assert.deepEqual(
       run.pnpmArgs.filter((a) => a.startsWith('publish')),
       [],
