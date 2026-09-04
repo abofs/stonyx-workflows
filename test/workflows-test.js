@@ -89,8 +89,20 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
     // the only thing standing between the checkout and a published tarball.
     const cleanup = steps.find((s) => s.body.includes('rm -rf .stonyx-workflows'));
     assert.ok(cleanup, 'a step should remove the .stonyx-workflows checkout before publish');
+    // Not `.includes('pnpm publish')`. That token misses `npm publish` and
+    // `pnpm -r publish`, both of which publish this package to the same
+    // registry -- so a publish step added in either shape would make
+    // `findIndex` return -1 and this assertion pass vacuously, the cleanup
+    // "preceding" a step the reader cannot see. Comment lines are stripped
+    // first because this file's own prose discusses `npm publish <a .tgz>`.
+    const publishAt = steps.findIndex((s) => (
+      /\b(?:p?npm|yarn)\b[^\n]*\bpublish\b/.test(
+        s.body.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n'),
+      )
+    ));
+    assert.notEqual(publishAt, -1, 'npm-publish.yml must contain a publish step for this ordering to mean anything');
     assert.ok(
-      steps.indexOf(cleanup) < steps.findIndex((s) => s.body.includes('pnpm publish')),
+      steps.indexOf(cleanup) < publishAt,
       'cleanup must run before the first publish step',
     );
   });

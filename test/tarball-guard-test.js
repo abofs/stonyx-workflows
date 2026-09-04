@@ -93,7 +93,41 @@ function stepKeys(step) {
   return keys;
 }
 
-/** Every step in `text` whose `run:` body invokes `pnpm publish`, in file order. */
+/**
+ * A registry publish, in any of the shapes that reach the same registry.
+ *
+ * Deliberately NOT `/\bpnpm\s+publish\b/`. That token was shared by the step
+ * reader and the population pin below, so the two agreed with each other about
+ * a universe neither could see out of. Measured, injecting a fourth publish
+ * step immediately BEFORE the guard:
+ *
+ *   run: pnpm publish --access public      -> 2 tests red, detector works
+ *   run: npm publish --access public       -> 344 pass, INVISIBLE
+ *   run: pnpm -r publish --access public   -> 344 pass, INVISIBLE
+ *
+ * Both invisible forms publish this package to the same registry from the same
+ * job, ahead of the guard. `pnpm -r publish` is the likelier of the two here --
+ * it is what a workspace migration reaches for -- and `npm publish` is what
+ * anyone writes who does not know pnpm is the pinned tool.
+ *
+ * `[^\n]*` keeps it to a single line so a flag-laden invocation still matches
+ * while two unrelated lines cannot be joined into a phantom one.
+ */
+const PUBLISH_INVOCATION = /\b(?:p?npm|yarn)\b[^\n]*\bpublish\b/;
+
+/**
+ * Shell/YAML comment lines removed.
+ *
+ * Prose is not an invocation, and this file's own comments discuss
+ * `npm publish <a .tgz>` at length -- npm-publish.yml:618 does exactly that.
+ * Under the widened token those sentences would be counted as publishes,
+ * redding a correct file. Applied identically on both sides below so the two
+ * populations are comparable; it does not re-introduce the gap it defends
+ * against, because a real invocation is never on a comment line.
+ */
+const withoutComments = (text) => text.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+
+/** Every step in `text` whose `run:` body invokes a registry publish, in file order. */
 function publishSteps(text) {
   const found = [];
   for (const step of parseSteps(text)) {
@@ -107,7 +141,7 @@ function publishSteps(text) {
       if (err.code === MissingStepKeyError.CODE) continue;
       throw err;
     }
-    if (/\bpnpm\s+publish\b/.test(body)) found.push({ ...step, runBody: body });
+    if (PUBLISH_INVOCATION.test(withoutComments(body))) found.push({ ...step, runBody: body });
   }
   return found;
 }
@@ -121,7 +155,9 @@ function publishSteps(text) {
  * reader that stopped seeing a step would agree with its own omission unless
  * the expected count comes from somewhere the reader cannot influence.
  */
-const rawPublishInvocations = (text) => text.match(/\bpnpm\s+publish\b/g) ?? [];
+const rawPublishInvocations = (text) => (
+  withoutComments(text).match(new RegExp(PUBLISH_INVOCATION.source, 'g')) ?? []
+);
 
 const dedent = (body) => body.split('\n').map((l) => l.replace(/^ {10}/, '')).join('\n') + '\n';
 
@@ -751,7 +787,7 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
   // may relocate or re-shape the publish steps in this same file, and an
   // assertion keyed to line numbers would either red on a correct move or, once
   // "fixed" by renumbering, stop noticing a publish that escaped the guard.
-  test('the step sweep finds every pnpm publish in the file', () => {
+  test('the step sweep finds every registry publish in the file, in any invocation shape', () => {
     const matched = publishSteps(npmPublish);
     assert.equal(
       matched.length,
