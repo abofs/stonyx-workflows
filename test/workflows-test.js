@@ -91,7 +91,6 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
     // the only thing standing between the checkout and a published tarball.
     const cleanup = steps.find((s) => s.body.includes('rm -rf .stonyx-workflows'));
     assert.ok(cleanup, 'a step should remove the .stonyx-workflows checkout before publish');
-
     // The publish steps are located by their EXECUTED `run:` body with comment
     // lines removed, not by a substring of the whole step body. The whole-body
     // form found the first step whose YAML happened to contain the characters
@@ -99,6 +98,16 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
     // the checkout step naming the lifecycle hooks that run consumer code, was
     // step 0, and this assertion red on a documentation comment. A step's
     // comments are not things it does.
+    //
+    // The token within that body is also not `.includes('pnpm publish')`. That
+    // form misses `npm publish`, `pnpm -r publish` and `yarn publish`, all of
+    // which publish this package to the same registry -- so a publish step
+    // added in any of those shapes would make `findIndex` return -1 and this
+    // assertion pass vacuously, the cleanup "preceding" a step the reader
+    // cannot see. Both halves are load-bearing: the run-body restriction stops
+    // a comment from matching, the widened token stops a real publish from
+    // hiding.
+    const PUBLISH_COMMAND = /\b(?:p?npm|yarn)\b[^\n]*\bpublish\b/;
     const runsPublish = (step) => {
       let body;
       try {
@@ -107,11 +116,11 @@ describe('npm-publish.yml invokes the derivation script (#22 AC2)', () => {
         if (err.code === MissingStepKeyError.CODE) return false;
         throw err;
       }
-      return body.split('\n').some((line) => !line.trim().startsWith('#') && line.includes('pnpm publish'));
+      return body.split('\n').some((line) => !line.trim().startsWith('#') && PUBLISH_COMMAND.test(line));
     };
 
     const firstPublish = steps.findIndex(runsPublish);
-    assert.notEqual(firstPublish, -1, 'a step should run pnpm publish');
+    assert.notEqual(firstPublish, -1, 'npm-publish.yml must contain a publish step for this ordering to mean anything');
     assert.ok(
       steps.indexOf(cleanup) < firstPublish,
       'cleanup must run before the first publish step',

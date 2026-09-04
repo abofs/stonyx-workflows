@@ -137,10 +137,10 @@ store one that way. The two consumer-supplied inputs *may* be, because they are
 tag-shaped values a caller may reasonably pass as `v1.2.3`. A test pins all
 eight copies of these regexes string-identical apart from that one `v?`.
 
-**Eight observable behaviour changes.** They are *not* ordered by how often you
-will meet them -- item 3 is the only one every publish run in every consumer
-meets, and items 2, 6 and 8 are unreachable for every consumer as wired today.
-Read the whole list rather than the top of it:
+**Nine observable behaviour changes.** They are *not* ordered by how often you
+will meet them -- items 3 and 9 are the ones every publish run in every
+consumer meets, and items 2, 6 and 8 are unreachable for every consumer as
+wired today. Read the whole list rather than the top of it:
 
 1. **A registry lookup that fails for any reason other than a genuine `404`
    fails the job** -- in the alpha derivation, the beta derivation, *and* the
@@ -191,6 +191,20 @@ Read the whole list rather than the top of it:
    version keyword`. Only single-token values (a semver, optionally
    `v`-prefixed, or one npm version keyword) are accepted now. Dispatch-only,
    and dispatch is frozen, so no consumer can currently reach it.
+9. **The release artifact is packed, inspected and published as one file, and
+   a `.git` directory inside it fails the job**
+   ([#39](https://github.com/abofs/stonyx-workflows/issues/39)). Every channel
+   now publishes `$RUNNER_TEMP/stonyx-release.tgz` by path instead of
+   publishing the directory, so the bytes asserted on are the bytes uploaded.
+   Two consequences reach every consumer on every run. `pnpm run
+   prepublishOnly` is invoked by the workflow, because `pnpm pack` runs only
+   `prepack`/`prepare` and a tarball publish runs no lifecycle scripts at all
+   -- the same scripts run, once, but `publish` and `postpublish` no longer
+   would (no consumer declares either). And a tarball carrying anything under
+   `package/.git/` reds the job, naming every offending path and their count,
+   with **no bypass input and no per-repo opt-out**. Provenance is unchanged:
+   `pnpm publish` never published a directory in the first place -- both of its
+   branches hand `npm publish <a .tgz>` to the npm CLI.
 
 *The failure text*, so a red job can be grepped rather than guessed at:
 
@@ -204,6 +218,41 @@ Read the whole list rather than the top of it:
 ::error::npm view <package> <field> failed: ...
 ::error::npm view <package> versions --json returned unparseable output
 ```
+
+The release-artifact guard adds ten more. They are split here because the
+split is what an operator needs at the point of use: **two** of them mean the
+tarball is poisoned and the consumer must change their `package.json`; the other
+**eight** mean the guard itself could not establish what it was looking at, and
+no consumer-side change will clear them. Ten repos publish through this step, so
+the second group is what gets grepped while none of them can release.
+
+*The tarball is poisoned* -- fix is in the consumer's `package.json`, see
+[`docs/release.md`](docs/release.md#if-your-publish-reds-here):
+
+```
+::error::$OFFENDER_COUNT denied path(s) in the release artifact:
+::error::refusing to release. A .git directory inside a tarball on the public registry is permanent -- npm cannot unpublish it after 72 hours. ...
+```
+
+*The guard could not establish what it inspected* -- fix is a PR in this repo,
+not in the consumer:
+
+```
+::error::RUNNER_TEMP is empty. Every path this guard writes, reads and publishes is derived from it, ...
+::error::the pack destination $PACK_DIR is not under $RUNNER_TEMP
+::error::expected exactly one tarball in $PACK_DIR, found $PACKED. Refusing to guess which one would be released.
+::error::$STRAY .tgz file(s) in the package root. They are absorbed by the next pack and they perturb the rebase in the tag steps below:
+::error::reading the release artifact's entry list failed with status $TAR_STATUS. A tar that stops partway still writes the entries it got to, ...
+::error::the release artifact lists $ENTRY_COUNT entries. A guard that inspected nothing must not report success.
+::error::the release artifact has no package/package.json, so it is not a packed npm package and a denylist over its entries would pass vacuously:
+::error::scanning the release artifact entry list failed with status $GREP_STATUS
+```
+
+A failing `prepublishOnly` reds this step too, with the consumer's own build
+output and **no** `::error::` line of its own -- the step exits with the build's
+status unaltered. If the step is red and none of the strings above appear, read
+the `prepublishOnly` output above the failure; the build is what failed, and the
+guard never got as far as packing.
 
 **Secrets:**
 

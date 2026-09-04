@@ -452,17 +452,251 @@ jobs:
           ')
           echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Pack and guard the release artifact
+        # abofs/stonyx-workflows#39. Twenty-three published @stonyx/* tarballs
+        # carried a checked-out .git/config to the public registry, and nothing in
+        # this pipeline looked at what it was uploading. npm has no unpublish past
+        # 72 hours, so a wrong tarball is permanent and public.
+        #
+        # The property this step buys is narrower than "the tarball is safe": it
+        # is that THE BYTES ASSERTED ON ARE THE BYTES UPLOADED. It packs once, to
+        # a deterministic path outside the package root, reads that file, and the
+        # three publish steps below take that same path as their argument. Two
+        # packs of the same tree would not have this property, which is the
+        # original defect one level down.
+        #
+        # Self-contained on purpose. The .stonyx-workflows checkout is
+        # alpha/beta-only and has already been removed above, so a guard importing
+        # from scripts/ would silently not exist on the stable channel -- the one
+        # where a leak sits under `latest` indefinitely.
+        #
+        # No bypass input. A skip flag reachable through workflow_call from ten
+        # consumer repos is the guard deleting itself.
+        run: |
+          set -euo pipefail
+
+          # `set -u` catches an UNSET RUNNER_TEMP. It does not catch an EMPTY
+          # one, and empty is the case that defeats the invariant below rather
+          # than tripping it: PACK_DIR becomes `/stonyx-pack`, and the pattern
+          # `"$RUNNER_TEMP"/*` becomes `/*`, which matches every absolute path.
+          # Measured -- the `case` reports PASSES on an empty RUNNER_TEMP. The
+          # step still exited non-zero, but only because `mkdir -p /stonyx-pack`
+          # hit a non-writable root; that is the ambient filesystem refusing,
+          # not this guard checking. Under a `container:` job running as root it
+          # would succeed and `rm -rf` would run against the container root.
+          if [ -z "${RUNNER_TEMP:-}" ]; then
+            echo "::error::RUNNER_TEMP is empty. Every path this guard writes, reads and publishes is derived from it, and an empty value silently relocates all of them to the filesystem root" >&2
+            exit 1
+          fi
+
+          PACK_DIR="$RUNNER_TEMP/stonyx-pack"
+          TARBALL="$RUNNER_TEMP/stonyx-release.tgz"
+          ENTRIES="$RUNNER_TEMP/stonyx-release-entries.txt"
+          OFFENDERS="$RUNNER_TEMP/stonyx-release-offenders.txt"
+
+          # The destination is checked, not merely written down. A pack
+          # directory inside the package root is absorbed by the next pack and
+          # leaves the worktree dirty for the `git pull --rebase --autostash` in
+          # the tag steps below, and neither of those shows up as a failure
+          # here -- the guard would still pass, having quietly broken the two
+          # steps that follow it.
+          #
+          # This runs BEFORE the `rm -rf` below, and the order is the point. The
+          # `case` exists to catch a future edit that points PACK_DIR somewhere
+          # it should not be -- but `rm -rf "$PACK_DIR"` running first means
+          # that on exactly that edit the delete happens and the invariant then
+          # objects to what it failed to prevent. Measured with PACK_DIR
+          # repointed at a populated directory: the step printed
+          # `is not under` and exited 1, and the directory's contents were
+          # already gone.
+          case "$PACK_DIR" in
+            "$RUNNER_TEMP"/*) ;;
+            *)
+              echo "::error::the pack destination $PACK_DIR is not under $RUNNER_TEMP" >&2
+              exit 1
+              ;;
+          esac
+
+          # A prior attempt in the same job must never be what gets inspected or
+          # uploaded. Everything this step reads later is created below.
+          rm -rf "$PACK_DIR"
+          rm -f "$TARBALL" "$ENTRIES" "$OFFENDERS"
+          mkdir -p "$PACK_DIR"
+
+          # `pnpm pack` runs prepack and prepare -- NOT prepublishOnly. Four of
+          # the ten consumers build there (stonyx, stonyx-discord, stonyx-events,
+          # stonyx-logs, measured), and stonyx-events and stonyx-logs declare
+          # files: ["dist","README.md"], so packing without it would inspect a
+          # near-empty tarball and pass vacuously while the real upload came
+          # from a post-build tree.
+          #
+          # Publishing a tarball runs zero lifecycle scripts, so this invocation
+          # is the only thing that runs it. It is not optional and it is not
+          # swallowed: set -e fails the step if the build fails.
+          # No `unresolved` sentinel. Both branches assign before the value is
+          # read, so a check for it could never fire -- a check that cannot fail,
+          # inside the step whose entire thesis is that such checks are how a
+          # guard reports success without having inspected anything. Removed
+          # rather than kept as belt and braces: the belt was painted on.
+          PREPUBLISH_DECLARED=$(pnpm pkg get scripts.prepublishOnly)
+          if [ "$PREPUBLISH_DECLARED" = "{}" ]; then
+            PREPUBLISH_STATE=absent
+            echo "package.json declares no prepublishOnly script"
+          else
+            pnpm run prepublishOnly
+            PREPUBLISH_STATE=ran
+          fi
+          echo "prepublishOnly: $PREPUBLISH_STATE"
+
+          # --pack-destination rather than --out: pnpm 9.15.9, the version this
+          # workflow pins by default, rejects --out with `Unknown option: out`.
+          # The destination is a directory outside the package root, so no .tgz
+          # ever lands where the next pack would absorb it or where it would
+          # perturb the `git pull --rebase --autostash` in the tag steps below.
+          pnpm pack --pack-destination "$PACK_DIR"
+
+          # The filename pnpm chooses is name-and-version derived, so the file
+          # is resolved by counting a directory this step created empty rather
+          # than by globbing. A glob is how a guard ends up reading a stale
+          # tarball, or handing `tar` two paths and silently listing only the
+          # first while the second is read as a member name.
+          PACKED=$(find "$PACK_DIR" -maxdepth 1 -type f -name "*.tgz" | wc -l | tr -d " ")
+          if [ "$PACKED" != "1" ]; then
+            echo "::error::expected exactly one tarball in $PACK_DIR, found $PACKED. Refusing to guess which one would be released." >&2
+            find "$PACK_DIR" -maxdepth 1 >&2
+            exit 1
+          fi
+          mv "$(find "$PACK_DIR" -maxdepth 1 -type f -name "*.tgz")" "$TARBALL"
+          rm -rf "$PACK_DIR"
+
+          STRAY=$(find . -maxdepth 1 -type f -name "*.tgz" | wc -l | tr -d " ")
+          if [ "$STRAY" != "0" ]; then
+            echo "::error::$STRAY .tgz file(s) in the package root. They are absorbed by the next pack and they perturb the rebase in the tag steps below:" >&2
+            find . -maxdepth 1 -type f -name "*.tgz" >&2
+            exit 1
+          fi
+
+          # Read the artifact, not the report the packer prints. No pipeline here:
+          # $? after `tar ... | grep` is the status of grep, which is how a tar error
+          # becomes a green step.
+          #
+          # The status is read explicitly rather than left to `set -e`, because the
+          # interesting failure is not the one `set -e` reports usefully. A tar that
+          # dies PARTWAY -- a truncated artifact, which is what an interrupted
+          # upload, a half-written cache entry or a full disk produces -- exits
+          # non-zero AFTER having already written every entry it managed to read.
+          # Measured on GNU tar 1.35 (ubuntu-latest's tar) and on bsdtar, same
+          # result: a 32-entry archive truncated to half its bytes exits non-zero
+          # and still lists ~15 entries, `package/package.json` among them.
+          #
+          # A partial listing therefore clears both anti-vacuity checks below on
+          # its own merits, while every entry past the truncation point is simply
+          # absent from what the denylist scans -- and `.git` sorts late in a real
+          # pack. Measured with `|| true` appended to the tar line: the step printed
+          # `passed the content guard: 16 entries, 0 denied` for an artifact
+          # carrying `package/.git/config`. That is this guard's own defect,
+          # reported as a clean pass, so the status gets its own ::error:: rather
+          # than surfacing as a bare tar message: it is the one failure here that
+          # means the guard's INPUT was incomplete rather than wrong.
+          set +e
+          tar -tzf "$TARBALL" > "$ENTRIES"
+          TAR_STATUS=$?
+          set -e
+          if [ "$TAR_STATUS" != "0" ]; then
+            echo "::error::reading the release artifact's entry list failed with status $TAR_STATUS. A tar that stops partway still writes the entries it got to, so every check below would scan a PARTIAL listing and a denied path past the truncation point would be invisible to it." >&2
+            exit 1
+          fi
+
+          ENTRY_COUNT=$(wc -l < "$ENTRIES" | tr -d " ")
+          if [ "$ENTRY_COUNT" -lt 2 ]; then
+            echo "::error::the release artifact lists $ENTRY_COUNT entries. A guard that inspected nothing must not report success." >&2
+            exit 1
+          fi
+          if ! grep -q '^package/package\.json$' "$ENTRIES"; then
+            echo "::error::the release artifact has no package/package.json, so it is not a packed npm package and a denylist over its entries would pass vacuously:" >&2
+            cat "$ENTRIES" >&2
+            exit 1
+          fi
+
+          # Single-quoted patterns. `$)` inside a double-quoted string survives
+          # only because bash leaves a `$` that cannot open an expansion alone,
+          # which is an accident of the character that follows the anchor rather
+          # than something to rely on.
+          #
+          # Three parts, each load-bearing:
+          #
+          #   ^package/     the tarball prefix, so this reads entries of a packed
+          #                 artifact rather than arbitrary paths. The manifest
+          #                 check above establishes the prefix is really there.
+          #   (.*/)?        ANY depth, not just the package root. Anchored at the
+          #                 root only, `files: ["vendor/**"]` with a
+          #                 `vendor/lib/.git/config` carrying a credential
+          #                 shipped and this step exited 0 -- measured. It is the
+          #                 same file the guard is named for, one directory down.
+          #   \.git(/|$)    both branches. `/` is a checked-out .git DIRECTORY;
+          #                 `$` is a git worktree or submodule gitlink, where
+          #                 .git is a FILE holding a `gitdir:` pointer and lists
+          #                 with no trailing slash.
+          #
+          # The `(/|$)` is also what keeps this off `.gitignore`,
+          # `.gitattributes`, `.gitkeep` and `.github/` at every depth, not just
+          # at the root -- abofs/stonyx-workflows#41's false-positive shapes.
+          #
+          # grep exits 1 on no-match and >1 on error, and the difference is the
+          # whole guarantee. `|| true` would erase it.
+          set +e
+          grep -E '^package/(.*/)?\.git(/|$)' "$ENTRIES" > "$OFFENDERS"
+          GREP_STATUS=$?
+          set -e
+          # This branch is deliberately NOT covered by a test, and that is a
+          # disclosed gap rather than an oversight. Reaching it means making grep
+          # exit >1 on a readable regular file, which no fixture can arrange --
+          # only a grep stub can. A stub on PATH also intercepts the `grep -q`
+          # manifest check eight lines up, so it would change which check rejects
+          # the fixture; a stub that discriminates on argv to avoid that is a test
+          # of the stub's argv matcher, not of this branch. The tar status above is
+          # the analogous check that a fixture CAN reach, and it is pinned.
+          if [ "$GREP_STATUS" -gt 1 ]; then
+            echo "::error::scanning the release artifact entry list failed with status $GREP_STATUS" >&2
+            exit 1
+          fi
+
+          OFFENDER_COUNT=$(wc -l < "$OFFENDERS" | tr -d " ")
+          if [ "$OFFENDER_COUNT" != "0" ]; then
+            echo "::error::$OFFENDER_COUNT denied path(s) in the release artifact:" >&2
+            cat "$OFFENDERS" >&2
+            echo "::error::refusing to release. A .git directory inside a tarball on the public registry is permanent -- npm cannot unpublish it after 72 hours. Remove it from the files field in package.json, or add .git to .npmignore." >&2
+            exit 1
+          fi
+
+          echo "release artifact $TARBALL passed the content guard: $ENTRY_COUNT entries, 0 denied"
+
       - name: Publish to NPM (alpha)
+        # The tarball the guard step above asserted on, by path, rather than
+        # this directory. A directory publish re-packs the tree, so the bytes
+        # inspected and the bytes uploaded would be two different objects built
+        # from the same source -- which is abofs/stonyx-workflows#39 one level
+        # down. Provenance is unaffected: pnpm never publishes a directory, both
+        # of its branches hand `npm publish <a .tgz>` to the npm CLI, and
+        # libnpmpublish rebuilds the spec from the manifest rather than from the
+        # CLI argument. All ten @stonyx/* packages are tarball publishes today,
+        # so this changes WHICH tarball, not the mode.
+        #
+        # Not all ten are attested, and the difference matters to anyone reading
+        # this to decide whether a provenance change is safe: @stonyx/discord
+        # has never produced an attestation in 109 versions, published through
+        # this same workflow with a green job (abofs/stonyx-workflows#43). A
+        # green publish job is not evidence that provenance was produced.
         if: contains(steps.package-version.outputs.version, 'alpha')
-        run: pnpm publish --tag alpha --access public --no-git-checks
+        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag alpha --access public --no-git-checks
 
       - name: Publish to NPM (beta)
         if: contains(steps.package-version.outputs.version, 'beta')
-        run: pnpm publish --tag beta --access public --no-git-checks
+        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta --access public --no-git-checks
 
       - name: Publish to NPM (stable)
         if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
-        run: pnpm publish --access public --no-git-checks
+        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --access public --no-git-checks
 
       - name: Commit version bump and create tag (beta)
         if: contains(steps.package-version.outputs.version, 'beta')

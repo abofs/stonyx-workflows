@@ -330,9 +330,12 @@ describe('#35 -- the cascade path still receives its credential explicitly', () 
   // AC3, ENUMERATED RATHER THAN ASSUMED. Every git invocation in every workflow
   // that could reach a remote is listed here. `\bgit` does not match
   // `authed_git`, so a bare `git push` anywhere reds this and has to be
-  // accounted for. The two survivors are `#` comment lines, which bash does not
-  // execute -- pinned verbatim rather than filtered out, so a new one cannot
-  // arrive unnoticed.
+  // accounted for. The three survivors are `#` comment lines, which bash does
+  // not execute -- pinned verbatim rather than filtered out, so a new one
+  // cannot arrive unnoticed. Two of them are abofs/stonyx-workflows#39's prose
+  // about the pack destination, which cites the tag steps' `git pull` by name
+  // to explain what a dirty worktree would break; they arrived here as a merge
+  // conflict this inventory caught, which is the mechanism working.
   test('no bare git command in any workflow reaches a remote', () => {
     const REMOTE_VERBS = /\bgit\s+(?:push|pull|fetch|clone|ls-remote|submodule)\b/;
     const found = FILES.flatMap((f) => read(f).split('\n')
@@ -340,6 +343,8 @@ describe('#35 -- the cascade path still receives its credential explicitly', () 
       .filter(({ line }) => REMOTE_VERBS.test(line)));
 
     assert.deepEqual(found.map(({ file, line }) => `${file}: ${line}`), [
+      'npm-publish.yml: # leaves the worktree dirty for the `git pull --rebase --autostash` in',
+      'npm-publish.yml: # perturb the `git pull --rebase --autostash` in the tag steps below.',
       'npm-publish.yml: # does not), and `git push origin "--force" --tags` consumes it as a',
     ], 'every remote-reaching git command must go through authed_git');
     assert.ok(found.every(({ line }) => line.startsWith('#')), 'and the survivor is a comment, not a command');
