@@ -287,6 +287,27 @@ function buildPoisonedTarball(destPath, { extraGitEntries = 0 } = {}) {
   }
 }
 
+/**
+ * A hand-built tarball with exactly the entries given, `package/`-prefixed by
+ * the caller.
+ *
+ * For shapes the packer will not produce on demand -- specifically a `.git`
+ * GITLINK, which is a regular file and only exists in a worktree or submodule
+ * checkout. Packer-independent by construction, which is the point: the guard
+ * reads a tar listing, and a listing is all this needs to be.
+ */
+function buildTarballFrom(destPath, files) {
+  const staging = mkdtempSync(join(tmpdir(), 'wf39-shape-'));
+  try {
+    writeTree(staging, files);
+    mkdirSync(dirname(destPath), { recursive: true });
+    const packed = spawnSync('tar', ['-czf', destPath, '-C', staging, ...Object.keys(files)], { encoding: 'utf8' });
+    assert.equal(packed.status, 0, `hand-building the fixture tarball failed: ${packed.stderr}`);
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
+}
+
 const CLEAN_CONSUMER = {
   pkg: {
     name: '@stonyx/example',
@@ -1004,7 +1025,7 @@ describe('AC7 -- the failure names the offending paths and their count (#39)', (
     // correctly -- and "fixing" it by hard-coding 6 would then red the day the
     // packer stops emitting directory entries. Deriving it means the assertion
     // is that the guard counted what is in the tarball.
-    const expected = run.entries.filter((e) => /^package\/\.git(\/|$)/.test(e));
+    const expected = run.entries.filter((e) => /^package\/(.*\/)?\.git(\/|$)/.test(e));
     assert.ok(expected.length >= 3, `the fixture must carry several .git entries; it carried ${expected.length}`);
     assert.match(
       run.stderr,
@@ -1035,5 +1056,143 @@ describe('AC7 -- the failure names the offending paths and their count (#39)', (
       'a false positive here halts publishing in all ten consumers simultaneously with no per-repo opt-out. '
       + `.gitignore is not .git/. stderr:\n${run.stderr}`,
     );
+  });
+
+  test('a nested .gitignore or .github is not mistaken for a .git directory either', () => {
+    // The denylist matches `.git` at ANY depth, so every false-positive shape
+    // #41 records has to be re-cleared at depth as well as at the root. It is
+    // the `(/|$)` that keeps `.gitignore` and `.github/` out, and that is
+    // independent of the depth prefix -- but "independent" is the reasoning,
+    // and this is the measurement.
+    const run = runGuard({
+      pkg: {
+        name: '@stonyx/nestedlookalike',
+        version: '0.1.0',
+        files: ['src', 'config'],
+        scripts: { prepublishOnly: 'node -e "process.exit(0)"' },
+      },
+      files: {
+        'src/.gitignore': 'dist\n',
+        'src/nested/.gitattributes': '* text=auto\n',
+        'src/.github/dependabot.yml': 'version: 2\n',
+        'config/.gitkeep': '',
+        'config/environment.js': 'export default {};\n',
+        'src/index.js': 'export const x = 1;\n',
+      },
+    });
+
+    // Positively established rather than assumed: the lookalikes are really in
+    // the tarball. A green run over a tarball that dropped them all proves
+    // nothing, and #41's whole risk is that this guard is over-broad.
+    // `src/.gitignore` is seeded above but deliberately NOT required here: the
+    // pinned packer drops nested `.gitignore` files from the tarball entirely,
+    // measured, so requiring it reds a correct guard. The three below do ship,
+    // and each is a `.git`-prefixed name at depth, which is the shape at issue.
+    for (const entry of ['src/nested/.gitattributes', 'src/.github/dependabot.yml', 'config/.gitkeep']) {
+      assert.ok(
+        run.entries.includes(`package/${entry}`),
+        `the fixture must actually ship ${entry}, or this case clears the denylist of nothing; `
+        + `entries:\n${run.entries.join('\n')}`,
+      );
+    }
+    assert.equal(
+      run.status,
+      0,
+      'a nested .gitignore/.github/.gitkeep is not a nested .git directory, and a false positive here halts '
+      + `publishing in all ten consumers at once; stderr:\n${run.stderr}`,
+    );
+  });
+
+  test('a .git directory below the package root is caught, not just one at it', () => {
+    // Executed against the REAL packer on both pinned majors before being
+    // written: `files: ["vendor/**"]` with a credential-bearing
+    // `vendor/lib/.git/config` ships `package/vendor/lib/.git/config` on
+    // pnpm 9.15.9 (the version npm-publish.yml pins by default) and on 10.23.0
+    // alike. Against the root-anchored `^package/\.git(/|$)` the guard exited
+    // 0 and the credential shipped.
+    //
+    // It needs a vendored checkout or a submodule, which none of the ten
+    // consumers has today -- but it is the same file the guard is named for,
+    // and #41 is scoped to BREADTH (other kinds of file) rather than DEPTH (the
+    // same file elsewhere), so it would fall between the two issues.
+    const run = runGuard({
+      pkg: {
+        name: '@stonyx/nested',
+        version: '0.1.0',
+        files: ['vendor/**'],
+        scripts: { prepublishOnly: 'node -e "process.exit(0)"' },
+      },
+      files: {
+        'vendor/lib/index.js': 'module.exports = {};\n',
+        'vendor/lib/.git/config': '[remote "origin"]\n\turl = https://x:ghp_NESTEDFAKE@github.com/a/b.git\n',
+      },
+    });
+
+    assert.notEqual(
+      run.status,
+      0,
+      'a credential-bearing .git/config one directory down reached the tarball and the guard passed it. The '
+      + `denylist is anchored at the package root only; stdout:\n${run.stdout}\nstderr:\n${run.stderr}`,
+    );
+    assert.match(
+      run.stderr,
+      /package\/vendor\/lib\/\.git\/config/,
+      `the nested offender must be named at its real path; stderr:\n${run.stderr}`,
+    );
+    assert.deepEqual(run.pnpmArgs.filter((a) => a.startsWith('publish')), []);
+  });
+
+  test('a .git gitlink FILE is caught, which is the $ branch of the denylist', () => {
+    // `\.git(/|$)` has two branches and only the `/` one was ever exercised, so
+    // narrowing the pattern to `^package/\.git/` left the suite 344/344 green.
+    //
+    // The `$` branch is not decoration. In a git WORKTREE or SUBMODULE checkout
+    // `.git` is a regular FILE holding a `gitdir:` pointer, so it lists with no
+    // trailing slash -- and this repo's own release process uses worktrees.
+    // Hand-built because no packer will emit that shape on demand; the guard
+    // reads a tar listing, and a listing is all this needs to be.
+    let source = null;
+    const run = runGuard({
+      pkg: { name: '@stonyx/gitlink', version: '0.1.0', files: ['index.js'] },
+      files: { 'index.js': 'module.exports = {};\n' },
+      packOverride: packOverrideProducing(['  cp "$WF39_GITLINK" "$PACK_DEST/gitlink-0.1.0.tgz"']),
+      seed: ({ runnerTemp }) => {
+        source = join(runnerTemp, 'gitlink-source.tgz');
+        buildTarballFrom(source, {
+          'package/package.json': '{"name":"@stonyx/gitlink","version":"0.1.0"}\n',
+          'package/index.js': 'module.exports = {};\n',
+          'package/.git': 'gitdir: /home/runner/work/stonyx-cron/.git/worktrees/rel\n',
+        });
+        process.env.WF39_GITLINK = source;
+      },
+    });
+    delete process.env.WF39_GITLINK;
+
+    // The fixture's shape is the whole test, so it is asserted rather than
+    // trusted: `package/.git` must be present with NO trailing slash. If tar
+    // ever emitted it as a directory entry this case would silently revert to
+    // exercising the `/` branch the old pattern already covered.
+    assert.ok(
+      run.entries.includes('package/.git'),
+      `the fixture must list \`package/.git\` with no trailing slash, or it does not exercise the $ branch; `
+      + `entries:\n${run.entries.join('\n')}`,
+    );
+    assert.ok(
+      !run.entries.includes('package/.git/'),
+      `\`package/.git\` must be a FILE entry here; entries:\n${run.entries.join('\n')}`,
+    );
+
+    assert.notEqual(
+      run.status,
+      0,
+      'a .git gitlink file must be denied. It points at a real git directory, and a consumer packing a worktree '
+      + `checkout ships it with no trailing slash; stdout:\n${run.stdout}\nstderr:\n${run.stderr}`,
+    );
+    assert.match(
+      run.stderr,
+      /^package\/\.git$/m,
+      `the offender must be named exactly; stderr:\n${run.stderr}`,
+    );
+    assert.deepEqual(run.pnpmArgs.filter((a) => a.startsWith('publish')), []);
   });
 });

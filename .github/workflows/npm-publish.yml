@@ -505,18 +505,18 @@ jobs:
           # Publishing a tarball runs zero lifecycle scripts, so this invocation
           # is the only thing that runs it. It is not optional and it is not
           # swallowed: set -e fails the step if the build fails.
+          # No `unresolved` sentinel. Both branches assign before the value is
+          # read, so a check for it could never fire -- a check that cannot fail,
+          # inside the step whose entire thesis is that such checks are how a
+          # guard reports success without having inspected anything. Removed
+          # rather than kept as belt and braces: the belt was painted on.
           PREPUBLISH_DECLARED=$(pnpm pkg get scripts.prepublishOnly)
-          PREPUBLISH_STATE=unresolved
           if [ "$PREPUBLISH_DECLARED" = "{}" ]; then
             PREPUBLISH_STATE=absent
             echo "package.json declares no prepublishOnly script"
           else
             pnpm run prepublishOnly
             PREPUBLISH_STATE=ran
-          fi
-          if [ "$PREPUBLISH_STATE" = "unresolved" ]; then
-            echo "::error::prepublishOnly was neither run nor established as absent" >&2
-            exit 1
           fi
           echo "prepublishOnly: $PREPUBLISH_STATE"
 
@@ -569,10 +569,29 @@ jobs:
           # which is an accident of the character that follows the anchor rather
           # than something to rely on.
           #
+          # Three parts, each load-bearing:
+          #
+          #   ^package/     the tarball prefix, so this reads entries of a packed
+          #                 artifact rather than arbitrary paths. The manifest
+          #                 check above establishes the prefix is really there.
+          #   (.*/)?        ANY depth, not just the package root. Anchored at the
+          #                 root only, `files: ["vendor/**"]` with a
+          #                 `vendor/lib/.git/config` carrying a credential
+          #                 shipped and this step exited 0 -- measured. It is the
+          #                 same file the guard is named for, one directory down.
+          #   \.git(/|$)    both branches. `/` is a checked-out .git DIRECTORY;
+          #                 `$` is a git worktree or submodule gitlink, where
+          #                 .git is a FILE holding a `gitdir:` pointer and lists
+          #                 with no trailing slash.
+          #
+          # The `(/|$)` is also what keeps this off `.gitignore`,
+          # `.gitattributes`, `.gitkeep` and `.github/` at every depth, not just
+          # at the root -- abofs/stonyx-workflows#41's false-positive shapes.
+          #
           # grep exits 1 on no-match and >1 on error, and the difference is the
           # whole guarantee. `|| true` would erase it.
           set +e
-          grep -E '^package/\.git(/|$)' "$ENTRIES" > "$OFFENDERS"
+          grep -E '^package/(.*/)?\.git(/|$)' "$ENTRIES" > "$OFFENDERS"
           GREP_STATUS=$?
           set -e
           if [ "$GREP_STATUS" -gt 1 ]; then
