@@ -630,20 +630,98 @@ describe('AC4 -- the guard fails when it inspected nothing (#39)', () => {
     );
   });
 
+  // Two anti-vacuity checks stand between a nonsense artifact and a vacuous
+  // denylist scan: an ENTRY_COUNT floor and a `package/package.json` presence
+  // check. They ran in that order against a single fixture -- a tarball holding
+  // one empty `package/` directory entry -- which trips BOTH, and the case
+  // asserted only `notEqual(status, 0)`. So either check could be deleted with
+  // the whole suite staying 344/344 green, and the anti-vacuity layer could
+  // erode one check at a time in silence.
+  //
+  // That is abofs/stonyx-workflows#37's exact shape: the fix for a vacuous
+  // check, itself vacuous one level down. Each check now has a fixture the
+  // OTHER check passes, and each asserts the specific reason rather than a
+  // non-zero exit -- because "it failed" is what let them mask each other.
+
   test('a tarball with no package/package.json is not a packed artifact', () => {
     const run = runGuard({
-      pkg: { name: '@stonyx/empty', version: '0.1.0', files: ['index.js'] },
+      pkg: { name: '@stonyx/nomanifest', version: '0.1.0', files: ['index.js'] },
       files: { 'index.js': 'module.exports = {};\n' },
+      // Two real files and no manifest. The ENTRY_COUNT floor PASSES on this
+      // (2 >= 2), so the manifest check is the only thing that can reject it
+      // and deleting the manifest check makes this case red rather than
+      // silently handing it to its neighbour. Out of sample and not
+      // theoretical: with the manifest check deleted the guard accepts a
+      // non-package, scans the denylist over entries that can never match its
+      // `^package/` anchor, and exits 0.
       packOverride: packOverrideProducing([
         '  WF39_TMP=$(mktemp -d)',
         '  mkdir -p "$WF39_TMP/package"',
-        '  tar -czf "$PACK_DEST/hollow-0.1.0.tgz" -C "$WF39_TMP" package',
+        '  echo "export const a = 1;" > "$WF39_TMP/package/a.js"',
+        '  echo "export const b = 2;" > "$WF39_TMP/package/b.js"',
+        '  tar -czf "$PACK_DEST/nomanifest-0.1.0.tgz" -C "$WF39_TMP" package/a.js package/b.js',
         '  rm -rf "$WF39_TMP"',
       ]),
     });
 
     assert.notEqual(run.status, 0, 'an artifact with no manifest means the guard read something that is not a '
-      + `packed package, and a denylist over zero entries passes vacuously; stdout:\n${run.stdout}`);
+      + `packed package, and a denylist over its entries passes vacuously; stdout:\n${run.stdout}`);
+    assert.match(
+      run.stderr,
+      /::error::the release artifact has no package\/package\.json/,
+      'this must fail on the MANIFEST check. Failing on the entry-count floor instead means the two checks are '
+      + `covering for each other again and either can be deleted unnoticed; stderr:\n${run.stderr}`,
+    );
+    assert.doesNotMatch(
+      run.stderr,
+      /lists \d+ entries/,
+      `the entry-count floor must not be what rejects this fixture; stderr:\n${run.stderr}`,
+    );
+    // The guard dumps the listing so an operator can see what it read. Pinned,
+    // because a rejection that does not say what it rejected sends the reader
+    // to the packer rather than to their own package.json.
+    assert.match(run.stderr, /package\/a\.js/, `the listing must be dumped; stderr:\n${run.stderr}`);
+    assert.deepEqual(run.pnpmArgs.filter((a) => a.startsWith('publish')), []);
+  });
+
+  test('a tarball holding nothing but a manifest is too small to have been inspected', () => {
+    const run = runGuard({
+      pkg: { name: '@stonyx/lone', version: '0.1.0', files: ['index.js'] },
+      files: { 'index.js': 'module.exports = {};\n' },
+      // The mirror image: exactly one entry, and it IS `package/package.json`,
+      // so the manifest presence check PASSES on this fixture and the
+      // ENTRY_COUNT floor is the only thing that can reject it. Nothing seeded
+      // this shape before, which is why deleting the floor left the suite
+      // green.
+      //
+      // It is also the realistic one of the pair. A consumer whose `files`
+      // allowlist stops matching -- a renamed dist/, a build that produced
+      // nothing -- packs to exactly this, and without the floor the guard would
+      // report `passed the content guard` on an empty release.
+      packOverride: packOverrideProducing([
+        '  WF39_TMP=$(mktemp -d)',
+        '  mkdir -p "$WF39_TMP/package"',
+        '  echo \'{"name":"@stonyx/lone","version":"0.1.0"}\' > "$WF39_TMP/package/package.json"',
+        '  tar -czf "$PACK_DEST/lone-0.1.0.tgz" -C "$WF39_TMP" package/package.json',
+        '  rm -rf "$WF39_TMP"',
+      ]),
+    });
+
+    assert.notEqual(run.status, 0, 'a one-entry artifact must not be reported as inspected; '
+      + `stdout:\n${run.stdout}`);
+    assert.match(
+      run.stderr,
+      /::error::the release artifact lists 1 entries\./,
+      'this must fail on the ENTRY-COUNT floor, and on the count it actually read. The manifest check passes on '
+      + `this fixture by construction, so nothing else can reject it; stderr:\n${run.stderr}`,
+    );
+    assert.doesNotMatch(
+      run.stderr,
+      /has no package\/package\.json/,
+      'the manifest check must not be what rejects this fixture -- it is present, and if this message appears '
+      + `the fixture stopped isolating the floor; stderr:\n${run.stderr}`,
+    );
+    assert.deepEqual(run.pnpmArgs.filter((a) => a.startsWith('publish')), []);
   });
 });
 
