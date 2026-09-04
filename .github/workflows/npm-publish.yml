@@ -59,6 +59,25 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
           token: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}
+          # In cascade mode the token above is the ORG-WIDE CASCADE_PAT, and
+          # actions/checkout defaults `persist-credentials: true` -- which
+          # writes it into .git/config as an `http.<host>/.extraheader`
+          # Authorization entry. THE CONSUMER'S OWN CODE then runs in this same
+          # job, in five windows: `pnpm install` (lifecycle scripts), `pnpm
+          # test`, `pnpm version` (preversion/version/postversion) and `pnpm
+          # publish` (prepublishOnly/prepack/prepare). Any of them can read that
+          # file, and push access to any one of the eleven abofs/stonyx* repos
+          # would then yield a credential reaching all of them.
+          #
+          # Not hypothetical: 21 published @stonyx/cron versions shipped
+          # `package/.git/config` carrying a live credential to the public npm
+          # registry (four distinct tokens, all since revoked). The only thing
+          # that stopped the other ten was a narrow `files` allowlist.
+          #
+          # The two steps that genuinely need a credential -- the beta and
+          # stable commit/tag/push steps -- are handed it explicitly at their
+          # point of use instead (abofs/stonyx-workflows#35).
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -272,6 +291,13 @@ jobs:
           repository: abofs/stonyx-workflows
           ref: ${{ steps.workflows-ref.outputs.sha }}
           path: .stonyx-workflows
+          # Nothing reads git credentials out of this tree -- the steps below
+          # only execute scripts/derive-version.mjs off disk -- and the tree
+          # sits inside the consumer's workspace while the consumer's own
+          # lifecycle scripts run. An ambient GITHUB_TOKEN left in
+          # .stonyx-workflows/.git/config is a live credential next to consumer
+          # code for no benefit (abofs/stonyx-workflows#35).
+          persist-credentials: false
 
       - name: Calculate next alpha version
         id: alpha-version
@@ -444,18 +470,39 @@ jobs:
           # in every consumer repo (abofs/stonyx-workflows#32).
           BRANCH: ${{ github.ref_name }}
           PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}
+          # The checkout no longer leaves a credential in .git/config
+          # (abofs/stonyx-workflows#35), so the two commands below that reach
+          # the remote are handed one HERE. Same expression the checkout used,
+          # so the identity that pushes is unchanged.
+          GIT_REMOTE_TOKEN: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}
         run: |
           git add package.json pnpm-lock.yaml
           git commit -m "chore: release v$PUBLISHED_VERSION [skip ci]"
           git tag "v$PUBLISHED_VERSION"
+          # GIT_CONFIG_* rather than a remote URL or a `git config` write:
+          # nothing lands on disk, nothing outlives these two processes, and
+          # the credential never appears in a process argv. It is applied per
+          # command rather than exported so it is NOT in the environment of the
+          # `git commit`/`git tag` above, whose hooks a consumer can point at
+          # its own code via core.hooksPath.
+          AUTH_B64=$(printf 'x-access-token:%s' "$GIT_REMOTE_TOKEN" | base64 | tr -d '\n')
+          # ::add-mask:: knows the raw secret, not this encoding of it. Same
+          # reason actions/checkout calls core.setSecret on its own basic
+          # credential before using it.
+          echo "::add-mask::$AUTH_B64"
+          GIT_AUTH_KEY="http.${GITHUB_SERVER_URL:-https://github.com}/.extraheader"
+          GIT_AUTH_VALUE="AUTHORIZATION: basic $AUTH_B64"
+          authed_git() {
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="$GIT_AUTH_KEY" GIT_CONFIG_VALUE_0="$GIT_AUTH_VALUE" git "$@"
+          }
           # `--end-of-options` because quoting alone leaves argv residue: git
           # permits a ref named `--force` (porcelain refuses it, `update-ref`
           # does not), and `git push origin "--force" --tags` consumes it as a
           # FLAG rather than as a refspec. `--tags` moves ahead of the remote
           # so it is not swallowed as a positional after the terminator; the
           # ref set pushed is unchanged (abofs/stonyx-workflows#32).
-          git pull --rebase --autostash origin --end-of-options "$BRANCH"
-          git push --tags origin --end-of-options "$BRANCH"
+          authed_git pull --rebase --autostash origin --end-of-options "$BRANCH"
+          authed_git push --tags origin --end-of-options "$BRANCH"
 
       - name: Create GitHub Release (beta)
         if: contains(steps.package-version.outputs.version, 'beta')
@@ -470,12 +517,33 @@ jobs:
         if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
         env:
           PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}
+          # The checkout no longer leaves a credential in .git/config
+          # (abofs/stonyx-workflows#35), so the two commands below that reach
+          # the remote are handed one HERE. Same expression the checkout used,
+          # so the identity that pushes is unchanged.
+          GIT_REMOTE_TOKEN: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}
         run: |
           git add package.json pnpm-lock.yaml
           git commit -m "chore: release v$PUBLISHED_VERSION [skip ci]"
           git tag "v$PUBLISHED_VERSION"
-          git pull --rebase --autostash origin main
-          git push origin main --tags
+          # GIT_CONFIG_* rather than a remote URL or a `git config` write:
+          # nothing lands on disk, nothing outlives these two processes, and
+          # the credential never appears in a process argv. It is applied per
+          # command rather than exported so it is NOT in the environment of the
+          # `git commit`/`git tag` above, whose hooks a consumer can point at
+          # its own code via core.hooksPath.
+          AUTH_B64=$(printf 'x-access-token:%s' "$GIT_REMOTE_TOKEN" | base64 | tr -d '\n')
+          # ::add-mask:: knows the raw secret, not this encoding of it. Same
+          # reason actions/checkout calls core.setSecret on its own basic
+          # credential before using it.
+          echo "::add-mask::$AUTH_B64"
+          GIT_AUTH_KEY="http.${GITHUB_SERVER_URL:-https://github.com}/.extraheader"
+          GIT_AUTH_VALUE="AUTHORIZATION: basic $AUTH_B64"
+          authed_git() {
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="$GIT_AUTH_KEY" GIT_CONFIG_VALUE_0="$GIT_AUTH_VALUE" git "$@"
+          }
+          authed_git pull --rebase --autostash origin main
+          authed_git push origin main --tags
 
       - name: Create GitHub Release (stable)
         if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"

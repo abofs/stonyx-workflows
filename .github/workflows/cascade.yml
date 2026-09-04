@@ -26,6 +26,12 @@ jobs:
           repository: abofs/stonyx-workflows
           ref: main
           token: ${{ secrets.CASCADE_PAT }}
+          # The org-wide CASCADE_PAT again. This job runs no consumer code, so
+          # the exposure here is smaller than npm-publish.yml's -- but the
+          # dispatch step below already passes the PAT explicitly as
+          # `github-token:`, so nothing in this job reads it from .git/config
+          # and persisting it buys nothing (abofs/stonyx-workflows#35).
+          persist-credentials: false
 
       - name: Dispatch to downstream dependents
         uses: actions/github-script@v7

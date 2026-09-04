@@ -26,6 +26,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # This job runs the consumer's `pnpm install` lifecycle scripts.
+          # actions/checkout would otherwise leave the job's GITHUB_TOKEN in
+          # .git/config where that code can read it, and no step in this workflow
+          # reads git credentials (abofs/stonyx-workflows#35).
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
