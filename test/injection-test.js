@@ -1290,6 +1290,12 @@ describe('Beyond AC1-AC7 -- same-shape sinks found while sweeping the file (#32)
     assert.deepEqual(stepEnv(npmPublish, COMMIT_BETA_STEP), {
       BRANCH: '${{ github.ref_name }}',
       PUBLISHED_VERSION: '${{ steps.package-version.outputs.version }}',
+      // Added by abofs/stonyx-workflows#35: the checkout no longer persists a
+      // credential into .git/config, so this step -- one of only two that talk
+      // to the remote -- is handed the token at its point of use. Pinned here
+      // deliberately: if it ever disappears, the push steps have silently gone
+      // back to relying on ambient credentials that are no longer there.
+      GIT_REMOTE_TOKEN: "${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}",
     });
   });
 

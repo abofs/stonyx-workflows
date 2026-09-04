@@ -264,6 +264,21 @@ export const EXPRESSION_ALLOWLIST = {
         + 'write. The result is the `token:` input of actions/checkout, not program text.',
     },
     {
+      line: "GIT_REMOTE_TOKEN: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}",
+      context: 'jobs > publish > steps > env',
+      expression: "${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}",
+      occurrences: 2,
+      why: 'The SAME expression as the checkout token: above, now also bound into the step env: of the two '
+        + 'commit/tag/push steps -- the beta one and the stable one, hence two occurrences. It is here '
+        + 'because the checkout sets persist-credentials: false, so the credential is no longer sitting in '
+        + '.git/config for the consumer lifecycle scripts, tests and pack hooks that run in this job to read '
+        + '(abofs/stonyx-workflows#35). inputs.cascade-source is consumer-controlled but is used only as a '
+        + 'boolean test, exactly as it is one entry up; the two values it selects between are a secret and a '
+        + 'runner-supplied token, neither consumer-controlled. The destination is a step env: value, not '
+        + 'program text: the run: body reads "$GIT_REMOTE_TOKEN" as a quoted expansion and hands it to git '
+        + 'through GIT_CONFIG_VALUE_0, never through a command line or a file.',
+    },
+    {
       line: 'version: ${{ inputs.pnpm-version }}',
       context: 'jobs > publish > steps > with',
       expression: '${{ inputs.pnpm-version }}',
