@@ -535,16 +535,21 @@ jobs:
             echo "::error::the release artifact lists $ENTRY_COUNT entries. A guard that inspected nothing must not report success." >&2
             exit 1
           fi
-          if ! grep -q "^package/package\.json$" "$ENTRIES"; then
+          if ! grep -q '^package/package\.json$' "$ENTRIES"; then
             echo "::error::the release artifact has no package/package.json, so it is not a packed npm package and a denylist over its entries would pass vacuously:" >&2
             cat "$ENTRIES" >&2
             exit 1
           fi
 
+          # Single-quoted patterns. `$)` inside a double-quoted string survives
+          # only because bash leaves a `$` that cannot open an expansion alone,
+          # which is an accident of the character that follows the anchor rather
+          # than something to rely on.
+          #
           # grep exits 1 on no-match and >1 on error, and the difference is the
           # whole guarantee. `|| true` would erase it.
           set +e
-          grep -E "^package/\.git(/|$)" "$ENTRIES" > "$OFFENDERS"
+          grep -E '^package/\.git(/|$)' "$ENTRIES" > "$OFFENDERS"
           GREP_STATUS=$?
           set -e
           if [ "$GREP_STATUS" -gt 1 ]; then
