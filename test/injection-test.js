@@ -7,7 +7,27 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Script } from 'node:vm';
 
-import { parseSteps, readWorkflow, stepEnv, stepRunBody, stepScriptBody } from './helpers/workflow-yaml.js';
+import {
+  MissingStepKeyError,
+  envOf,
+  parseSteps,
+  readWorkflow,
+  runBodyOf,
+  stepEnv,
+  stepNamed,
+  stepRunBody,
+  stepScriptBody,
+} from './helpers/workflow-yaml.js';
+import { ESCAPE_ALLOWLIST, EXPRESSION_ALLOWLIST } from './helpers/expression-allowlist.js';
+import { rawSweepProblems, readWorkflowFile, workflowFileNames } from './helpers/raw-expression-scan.js';
+import {
+  ALLOWLIST,
+  deadAllowlistProblems,
+  duplicateNameProblems,
+  runSweepProblems,
+  scriptSweepProblems,
+  stepPopulationProblems,
+} from './helpers/interpolation-sweep.js';
 
 // Consumer-controlled-string injection sinks in the reusable workflows, for
 // abofs/stonyx-workflows#32.
@@ -59,12 +79,28 @@ const registry = JSON.parse(readFileSync(new URL('./fixtures/oauth-registry-stat
 
 const WORKFLOWS = { 'npm-publish.yml': npmPublish, 'cascade.yml': cascade };
 
-// Every workflow file in the repo, for the two repo-wide sweeps below. Read
-// from disk rather than listed, so a file added later inherits both sweeps
-// without anyone remembering to opt it in; each sweep pins the resulting list
-// so a failed read cannot make it iterate nothing.
+// Every file in `.github/workflows/`, for the repo-wide sweeps below. Read from
+// disk rather than listed, so a file added later inherits them without anyone
+// remembering to opt it in; the list itself is pinned below so a failed read
+// cannot make the sweeps iterate nothing.
+//
+// NO EXTENSION FILTER. GitHub Actions reads `.yaml` as well as `.yml`, and this
+// line used to filter to `.yml` -- which also made the pin that guards it
+// unable to fire, because it deep-equalled the ALREADY-FILTERED list. A
+// complete `.github/workflows/evil.yaml` carrying a `workflow_call` input into
+// a shell body measured 206 pass / 0 fail (#37, Phase 3 §4).
+//
+// It also used to call `readdirSync` here, which reproduced that same defect
+// one file over: the pin below deep-equalled a list this file had filtered
+// itself, so restoring `.filter((n) => n.endsWith('.yml'))` at this line was
+// measured at 256 pass / 0 fail -- a decorative guard, in the file the README
+// calls the guarantee's live half (#37, Phase 2 N-1). The enumeration is now
+// `workflowFileNames`, whose no-extension-filter property is proven against a
+// real temp directory in `raw-sweep-test.js` and reds when narrowed. That is
+// what makes the duplicate guarantee call at the bottom of this file DELIBERATE
+// duplicate coverage rather than an unequal pair.
 const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
-const WORKFLOW_FILES = readdirSync(WORKFLOW_DIR).filter((name) => name.endsWith('.yml')).sort();
+const WORKFLOW_FILES = workflowFileNames();
 
 const ALPHA_STEP = 'Calculate next alpha version';
 const BETA_STEP = 'Calculate next beta version';
@@ -520,7 +556,11 @@ describe('AC5 -- S3/S5: no expression reaches either github-script body (#32)', 
   // not the repo-bound OIDC identity. Pin the token wiring so a future edit
   // cannot quietly move the script off that credential -- or onto a wider one.
   test('cascade.yml dispatch still runs under CASCADE_PAT', () => {
-    const step = parseSteps(cascade).find((s) => s.name === DISPATCH_STEP);
+    // `stepNamed`, not `.find()`: this is the assertion guarding the org-level
+    // PAT, and a second step reusing this name would have resolved it to
+    // position 0 and passed while the duplicate carried a wider credential
+    // (measured; abofs/stonyx-workflows#37, bypass 1).
+    const step = stepNamed(cascade, DISPATCH_STEP);
     assert.match(step.body, /github-token: \$\{\{ secrets\.CASCADE_PAT \}\}/);
   });
 });
@@ -700,108 +740,95 @@ describe('AC5 -- S5: cascade.yml refuses hostile input before it dispatches (#32
   });
 });
 
-// The anti-drift sweep, and the only mechanism enforcing this suite's
-// one-sentence rule. It used to iterate `npm-publish.yml` alone -- one of the
-// five workflow files in the repo -- so adding a `${{ inputs.package-name }}`
-// shell sink to `cascade.yml`, or a second `${{ inputs.audit-level }}` sink to
-// `security-audit.yml`, left the suite fully green. The rule is about this
-// repo's workflows, not about one file of them, and a file added later must
-// inherit it without anyone remembering to opt in.
+// The anti-drift sweeps enforcing this suite's one-sentence rule.
+//
+// One of them is a guarantee and the rest are diagnostics, and which is which
+// is the whole subject of #37. The guarantee is the raw byte scan: every
+// `${{ }}` occurrence in every file in this directory, pinned to its exact
+// source line with a reason, no YAML understanding anywhere in it. The
+// per-file `run:`/`script:`/population/duplicate-name cases below are founded
+// on `test/helpers/workflow-yaml.js` and exist to NAME things -- which step,
+// which sink, which body the executed tests are really running.
+//
+// That split was earned. This block used to iterate `npm-publish.yml` alone, so
+// a `${{ inputs.package-name }}` shell sink in `cascade.yml` left the suite
+// green; widening it to every file left nine further shapes that made the
+// reader disagree with the file while the guard agreed with the reader, each
+// found after the previous fix shipped. The guarantee stopped being founded on
+// a reader rather than being given a tenth pin.
 describe('no workflow in this repo interpolates a consumer string into program text (#32)', () => {
   const FILES = WORKFLOW_FILES;
-
-  // Named exceptions only, and each one is pinned to a step and to an exact
-  // occurrence count -- otherwise "this expression is tolerated in this file"
-  // silently tolerates a SECOND copy of it, or the same expression appearing
-  // in a step that has nothing to do with the recorded reason.
-  const ALLOWLIST = {
-    'npm-publish.yml': [{
-      step: 'Install dependencies',
-      expression: "${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}",
-      occurrences: 1,
-      why: 'Both arms are fixed literals selected by a boolean. No consumer string can reach the shell through it.',
-    }],
-    'security-audit.yml': [{
-      step: 'Run security audit',
-      expression: '${{ inputs.audit-level }}',
-      occurrences: 1,
-      why: 'KNOWN OPEN SINK, tracked as abofs/stonyx-workflows#34. A workflow_call input interpolated into a shell '
-        + 'run: body -- the same defect class this suite closes, in a third file outside #32 two-file scope. '
-        + 'Reported and tracked, not fixed here. When #34 lands, delete this entry.',
-    }],
-  };
-
-  const exemption = (file, step, expression) => (ALLOWLIST[file] ?? [])
-    .find((entry) => entry.step === step && entry.expression === expression);
-
-  const countIn = (body, expression) => body.split(expression).length - 1;
 
   // Guards the sweep itself: if the directory read ever returned nothing, or a
   // file were renamed out from under it, every per-file case below would pass
   // by iterating an empty list.
-  test('every workflow file in the repo is swept', () => {
+  //
+  // `FILES` is now the UNFILTERED directory listing, which is what lets this
+  // fire at all. Filtering to `.yml` first meant a `.yaml` workflow -- or
+  // `ci.yml` renamed to `ci.yaml`, the exact drift the old docstring claimed to
+  // guard -- was removed before the assertion saw it, and the four per-file
+  // cases for that file silently stopped existing (#37, Phase 3 §4).
+  test('every file in .github/workflows/ is swept, with no extension filter', () => {
     assert.deepEqual(FILES, ['cascade.yml', 'ci.yml', 'npm-publish.yml', 'security-audit.yml', 'self-ci.yml']);
   });
 
+  // THE GUARANTEE. Everything else in this describe block is a diagnostic.
+  //
+  // Every `${{ }}` occurrence in every file in this directory, found by a raw
+  // byte scan that understands no YAML whatsoever, must be pinned to its exact
+  // source line in `test/helpers/expression-allowlist.js` with a stated reason.
+  // Every occurrence, every entry, no reader consulted -- so no unnamed step,
+  // nested block scalar, flow mapping, quoted key, escaped key, alias or file
+  // extension can hide one. `test/raw-sweep-test.js` runs every bypass family
+  // from all ten PR #38 reviews against it; this is the live-file half, stated
+  // in the file that carries the convention it enforces.
+  //
+  // The per-file sweeps below still name WHICH STEP and WHICH SINK an
+  // expression sits in, which is what makes a red actionable. If they are
+  // wrong, a message gets less helpful; nothing goes unswept.
+  test('every ${{ }} expression in .github/workflows/ is allowlisted against its source line', () => {
+    for (const file of FILES) {
+      assert.deepEqual(rawSweepProblems(file, readWorkflowFile(file), EXPRESSION_ALLOWLIST, ESCAPE_ALLOWLIST), []);
+    }
+  });
+
+  // The sweep itself now lives in `test/helpers/interpolation-sweep.js` as a
+  // function of `(file, text)`. It moved there so it could be run against
+  // deliberately broken workflow text: five mutations used to leave it green at
+  // 161/0, and `test/sweep-bypass-test.js` runs every one of them through the
+  // same functions called here (abofs/stonyx-workflows#37). A check whose only
+  // value is that it can go red has to be shown going red.
   for (const file of FILES) {
+    // Guards the per-file population the three cases below quantify over. Each
+    // of them passes trivially over a step the reader never saw, so the counts
+    // are taken off the RAW FILE TEXT by code that shares nothing with the
+    // reader. An unnamed step -- the commonest step form in GitHub Actions --
+    // used to be invisible to both sweeps at 185 pass / 0 fail
+    // (abofs/stonyx-workflows#37, bypass 6a).
+    test(`every step and every run:/script: body in ${file} is inside the sweep`, () => {
+      assert.deepEqual(stepPopulationProblems(file, readWorkflow(file)), []);
+    });
+
     test(`no run: body in ${file} interpolates anything but its allowlisted expressions`, () => {
-      const text = readWorkflow(file);
-      for (const step of parseSteps(text)) {
-        let body;
-        try {
-          body = stepRunBody(text, step.name);
-        } catch {
-          // A `uses:` step. Its `with:` values are action inputs rather than
-          // shell or JS source; the `script:` sweep below covers the ones that
-          // do carry program text.
-          continue;
-        }
-        for (const expression of new Set(body.match(/\$\{\{[^}]*\}\}/g) ?? [])) {
-          const entry = exemption(file, step.name, expression);
-          assert.ok(
-            entry,
-            `${file} step ${JSON.stringify(step.name)} interpolates ${expression} into shell source`,
-          );
-          assert.equal(
-            countIn(body, expression),
-            entry.occurrences,
-            `${file} step ${JSON.stringify(step.name)} interpolates ${expression} `
-            + `${countIn(body, expression)} time(s); the allowlist exempts ${entry.occurrences}`,
-          );
-        }
-      }
+      assert.deepEqual(runSweepProblems(file, readWorkflow(file)), []);
     });
 
     test(`no github-script body in ${file} interpolates anything at all`, () => {
-      const text = readWorkflow(file);
-      for (const step of parseSteps(text)) {
-        let script;
-        try {
-          script = stepScriptBody(text, step.name);
-        } catch {
-          continue; // no `script:` block on this step
-        }
-        assert.equal(
-          script.match(/\$\{\{[^}]*\}\}/g),
-          null,
-          `${file} step ${JSON.stringify(step.name)} interpolates an expression into JS source`,
-        );
-      }
+      assert.deepEqual(scriptSweepProblems(file, readWorkflow(file)), []);
+    });
+
+    // A step name is not unique in GitHub Actions -- only `id` is -- so a
+    // duplicated name is how a step hides from every name-keyed assertion in
+    // this suite. Reported per file rather than globally so the message names
+    // the file that has to change.
+    test(`no two steps in ${file} share a name`, () => {
+      assert.deepEqual(duplicateNameProblems(file, readWorkflow(file)), []);
     });
   }
 
   test('no allowlist entry is dead -- a fixed sink must lose its exemption', () => {
-    for (const [file, entries] of Object.entries(ALLOWLIST)) {
-      const text = readWorkflow(file);
-      for (const { step, expression, occurrences, why } of entries) {
-        const body = stepRunBody(text, step);
-        assert.equal(
-          countIn(body, expression),
-          occurrences,
-          `${file} step ${JSON.stringify(step)} no longer interpolates ${expression} ${occurrences} time(s); `
-          + `delete or correct its allowlist entry. Recorded reason was: ${why}`,
-        );
-      }
+    for (const file of Object.keys(ALLOWLIST)) {
+      assert.deepEqual(deadAllowlistProblems(file, readWorkflow(file)), []);
     }
   });
 });
@@ -951,9 +978,16 @@ describe('every `node -e` program stays a single-quoted shell string (#32, S1a)'
     for (const step of parseSteps(text)) {
       let body;
       try {
-        body = stepRunBody(text, step.name);
-      } catch {
-        continue; // a `uses:` step carries no shell source
+        // Positional, never re-resolved by name: a duplicated step name used to
+        // hand this the FIRST step's body twice (abofs/stonyx-workflows#37).
+        body = runBodyOf(step);
+      } catch (err) {
+        // Only "this step has no run:" is a skip. A body the extractor cannot
+        // READ must not vanish from the sweep -- that is the bare
+        // `catch { continue; }` this suite exists to catch, and it was still
+        // here (Phase 1 N2, Phase 4).
+        if (err.code === MissingStepKeyError.CODE) continue;
+        throw err;
       }
       for (const program of nodeEvalPrograms(body)) found.push({ step: step.name, ...program });
     }
@@ -1259,12 +1293,20 @@ describe('Beyond AC1-AC7 -- same-shape sinks found while sweeping the file (#32)
     });
   });
 
-  test('stepEnv reads every step in both workflows without throwing', () => {
+  // `envOf(step)`, not `stepEnv(text, step.name)`. This loop iterates
+  // positionally and then re-resolved BY NAME -- the exact aliasing
+  // `workflow-yaml.js` now documents as the cause of bypass 1, in the one call
+  // site that claims to read every step. Measured: with a duplicated name it
+  // read position 0's env twice, so the test's own title was false; and once
+  // the name-taking helpers began to throw, it red with a helper-ambiguity
+  // message from a test about `env:` comment handling
+  // (abofs/stonyx-workflows#37, Phase 1 W1).
+  test('envOf reads every step in both workflows without throwing', () => {
     for (const [workflow, text] of Object.entries(WORKFLOWS)) {
       for (const step of parseSteps(text)) {
         assert.doesNotThrow(
-          () => stepEnv(text, step.name),
-          `stepEnv threw on ${workflow} step ${JSON.stringify(step.name)}`,
+          () => envOf(step),
+          `envOf threw on ${workflow} step ${JSON.stringify(step.name)}`,
         );
       }
     }
