@@ -665,6 +665,43 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     );
   });
 
+  test('neither the guard nor any publish step is advisory', () => {
+    // The third bypass, and the only one that is total. `if:` on the guard and
+    // `always()` on a publish step are both pinned above, and
+    // `continue-on-error: true` steps straight past them: the guard still runs,
+    // still writes the poisoned tarball to $RUNNER_TEMP, still exits non-zero
+    // and still prints every ::error:: -- and the job status stays `success`,
+    // so every later step's implicit success() holds and all three publish
+    // steps upload the artifact the guard just rejected. Measured: the suite
+    // stayed 344/344 green with `continue-on-error: true` on the guard.
+    //
+    // Not a hypothetical idiom. It is THIS repo's established one for making a
+    // step advisory -- `security-audit.yml:45` uses it, and two agent-facing
+    // docs here (`docs/agents/qa-test-engineer.md:44`,
+    // `docs/agents/validation-loop-team.md:41`) plus `README.md:293` name it as
+    // the way to do that. The guard invokes each consumer's full build and test
+    // suite via prepublishOnly, which is exactly the step someone marks
+    // advisory the first time it flakes.
+    //
+    // Absence of the key, not falsiness of its value. `false` is the default,
+    // so writing it is a no-op one character away from the bypass; and an
+    // expression form (`${{ ... }}`) cannot be evaluated here at all, which
+    // makes it strictly worse than a literal.
+    const [guard] = stepsNamed(npmPublish, GUARD_STEP);
+    assert.ok(guard, `no step named ${JSON.stringify(GUARD_STEP)}`);
+
+    for (const step of [guard, ...publishSteps(npmPublish)]) {
+      const keys = stepKeys(step);
+      assert.ok(
+        !keys.includes('continue-on-error'),
+        `step ${JSON.stringify(step.name)} carries continue-on-error (${JSON.stringify(keys)}). On the guard that `
+        + 'is a complete bypass -- the step fails, the job stays green, and the three publish steps upload the '
+        + 'tarball it rejected. On a publish step it hides a failed upload. There is no advisory mode here: a '
+        + 'guard that annotates a permanent, unpublishable credential leak is not a guard',
+      );
+    }
+  });
+
   test('no publish step opts out of the default success() condition', () => {
     // The offline ceiling stated honestly: this suite cannot execute the
     // runner's step scheduler, so "a failed guard stops the publish" rests on
