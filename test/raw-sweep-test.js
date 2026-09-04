@@ -756,7 +756,7 @@ describe('G1 -- an allowlist entry has to say something (#37)', () => {
   // TOP of `ci.yml`'s list, which is the natural place to put one, reds
   // `a generic reason is refused ...` for a reason that has nothing to do with
   // what they wrote. Measured on this tree: an ordinary correct entry inserted
-  // at index 0 was 292 pass / 1 fail, and the same entry appended was 293 / 0.
+  // at index 0 was 318 pass / 1 fail, and the same entry appended was 319 / 0.
   // A red naming the wrong thing is the class this suite exists to remove, so
   // the fixture is pinned to the entry it means.
   const GOOD = EXPRESSION_ALLOWLIST['ci.yml'].find((e) => e.expression === '${{ inputs.pnpm-version }}');

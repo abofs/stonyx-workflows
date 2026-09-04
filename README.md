@@ -511,7 +511,7 @@ the value** -- a `uses:`, or the `run:` line that reads the `env:` var the entry
 approves -- is a human obligation here. Measured on this tree, and it lands on
 `#34`'s own prescribed remediation: `AUDIT_LEVEL: ${{ inputs.audit-level }}` in
 a step `env:`, both old entries deleted, a correct new entry written, and the
-body reading `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` is **309 pass
+body reading `run: eval "pnpm audit --audit-level $AUDIT_LEVEL"` is **319 pass
 / 0 fail** -- the same figure as the safe landing state, which is the point: the
 suite cannot tell them apart. The entry's reason -- *"an `env:` value is data the
 runner sets, not source that bash parses"* -- is then false about the file it
