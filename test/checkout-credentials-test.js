@@ -9,9 +9,9 @@ import { join } from 'node:path';
 import {
   anyPersistingCheckouts,
   checkoutSteps,
-  checkoutUsesLineCount,
   describeViolation,
   persistedCredentialViolations,
+  rawCheckoutCount,
 } from './helpers/checkout-credentials.js';
 import { workflowFileNames } from './helpers/raw-expression-scan.js';
 import { stepEnv, stepRunBody } from './helpers/workflow-yaml.js';
@@ -45,13 +45,14 @@ describe('#35 -- a privileged checkout does not persist its credential', () => {
   // quantifies over `checkoutSteps`, so a checkout that reader cannot see is
   // silently exempt from all of them -- #37's bypass 6a, where an unnamed step
   // was appended to the previous step's body and the suite stayed green at
-  // 185/0. `checkoutUsesLineCount` counts the same thing off raw text with code
-  // that shares nothing with the reader.
+  // 185/0. `rawCheckoutCount` counts the same thing off raw text by a
+  // mechanism the reader uses nowhere -- occurrences of the action name with
+  // comment lines dropped -- so it can see a step shape the reader misses.
   test('every actions/checkout step is found, with the population pinned off raw text', () => {
     assert.deepEqual(FILES, ['cascade.yml', 'ci.yml', 'npm-publish.yml', 'security-audit.yml', 'self-ci.yml']);
 
     const perFile = Object.fromEntries(FILES.map((f) => [f, checkoutSteps(read(f), f).length]));
-    const rawPerFile = Object.fromEntries(FILES.map((f) => [f, checkoutUsesLineCount(read(f))]));
+    const rawPerFile = Object.fromEntries(FILES.map((f) => [f, rawCheckoutCount(read(f))]));
 
     assert.deepEqual(perFile, rawPerFile, 'the reader and the raw count must agree about how many checkouts exist');
     assert.deepEqual(perFile, {
@@ -265,11 +266,40 @@ describe('#35 -- the guard can fail (non-vacuity)', () => {
       '',
     ].join('\n');
 
-    assert.equal(checkoutUsesLineCount(text), 1, 'the raw count sees it');
+    assert.equal(rawCheckoutCount(text), 1, 'the raw count sees it');
     assert.equal(checkoutSteps(text, 'u.yml').length, 1, 'and so does the reader');
     assert.deepEqual(persistedCredentialViolations(text, 'u.yml').map(describeViolation), [
       'u.yml:6 (unnamed step) token=${{ secrets.CASCADE_PAT }} persist-credentials=<absent, defaults to true>',
     ]);
+  });
+
+  // THE CONTROL MUST NOT BE THE READER IN A HAT. `rawCheckoutCount` exists so
+  // that a checkout `checkoutSteps` cannot see still reds the population
+  // assertion. That only works if the two disagree about SOMETHING, and an
+  // earlier revision counted with a byte-identical copy of the reader's own
+  // `USES_CHECKOUT` selector -- an independent import graph over an identical
+  // predicate, which is not independence at all.
+  //
+  // The flow-mapping step below is valid GitHub Actions, is one of the bypass
+  // families this repo's README already lists for #37, and persists an org PAT.
+  // The reader does not find it. The count must, or a real credential leak in
+  // this shape lands with the suite green.
+  test('a flow-mapping checkout the reader cannot see is still counted, so the population reds', () => {
+    const text = [
+      'jobs:',
+      '  test:',
+      '    steps:',
+      '      - { uses: actions/checkout@v4, with: { token: "${{ secrets.CASCADE_PAT }}" } }',
+      '',
+    ].join('\n');
+
+    assert.equal(checkoutSteps(text, 'flow.yml').length, 0, 'a documented limit of the reader, recorded not hidden');
+    assert.equal(rawCheckoutCount(text), 1, 'and the control disagrees with it, which is the whole point');
+  });
+
+  test('the control drops whole comment lines rather than counting the action name in prose', () => {
+    const text = ['      # see actions/checkout@v4 for why', '      - uses: actions/checkout@v4', ''].join('\n');
+    assert.equal(rawCheckoutCount(text), 1, 'the comment must not inflate the count');
   });
 
   test('a quoted `"uses":` key spelling of the same step is still found', () => {
@@ -281,7 +311,7 @@ describe('#35 -- the guard can fail (non-vacuity)', () => {
       '',
     ].join('\n');
 
-    assert.equal(checkoutUsesLineCount(text), 1);
+    assert.equal(rawCheckoutCount(text), 1);
     assert.equal(persistedCredentialViolations(text, 'q.yml').length, 1);
   });
 });

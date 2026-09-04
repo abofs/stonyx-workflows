@@ -1,24 +1,31 @@
 // Does an `actions/checkout` step leave its credential in `.git/config`?
 //
-// THIS FILE CARRIES A GUARANTEE, so it is written the way
-// `raw-expression-scan.js` is written rather than the way `workflow-yaml.js`
-// is: off raw text, with `match`, `split`, `indexOf` and `trim`, refusing
-// loudly on any shape it does not understand. `workflow-yaml.js` says of
-// itself "DIAGNOSTICS ONLY. NO GUARANTEE IN THIS SUITE DEPENDS ON THIS FILE",
-// and nine bypasses on abofs/stonyx-workflows#37 are why. So nothing here
-// imports it.
+// THIS FILE CARRIES A GUARANTEE, so it is a RAW-TEXT reader: it parses no YAML,
+// imports nothing at all, and refuses loudly on any shape it does not
+// understand. That is the discipline `raw-expression-scan.js` follows and the
+// opposite of `workflow-yaml.js`, which says of itself "DIAGNOSTICS ONLY. NO
+// GUARANTEE IN THIS SUITE DEPENDS ON THIS FILE" -- nine bypasses on
+// abofs/stonyx-workflows#37 are why. So nothing here imports it.
+//
+// It is NOT written the way `raw-expression-scan.js` is written, and an earlier
+// revision of this header claimed it was. That file's own header says
+// "Understands no YAML: `indexOf`, `slice`, `split`, `trim`, and not one
+// regex." This one uses seven anchored regexes and walks indentation to bound a
+// step. It is a reader -- a fail-closed one that throws where the diagnostics
+// reader guesses, but a reader.
 //
 // The property being guarded (abofs/stonyx-workflows#35):
 //
 //   `actions/checkout@v4` defaults `persist-credentials: true`, which writes an
 //   `http.<host>/.extraheader` Authorization entry into `.git/config`. In
 //   cascade mode `npm-publish.yml` checks out with the org-wide `CASCADE_PAT`
-//   and then runs the CONSUMER's own code in the same job -- five windows:
-//   `pnpm install` (lifecycle scripts), `pnpm test`, `pnpm version`
-//   (pre/version/post) and `pnpm publish` (prepublishOnly/prepack/prepare).
-//   Any of them can read `.git/config`. This is not hypothetical: 21 published
-//   `@stonyx/cron` versions shipped `package/.git/config` with a live
-//   credential to the public npm registry.
+//   and then runs the CONSUMER's own code in the same job -- four kinds of step
+//   at ten call sites: `pnpm install` (lifecycle scripts, 1), `pnpm test` (1),
+//   `pnpm version` (pre/version/post, 5) and `pnpm publish`
+//   (prepublishOnly/prepack/prepare, 3). Any of them can read `.git/config`.
+//   This is not hypothetical: 21 published `@stonyx/cron` versions shipped
+//   `package/.git/config` carrying a live credential to the public npm
+//   registry.
 //
 // Every judgement below is fail-closed. An unreadable step throws; an
 // unrecognised token spelling counts as PRIVILEGED; an unrecognised
@@ -29,21 +36,38 @@ const indentOf = (line) => line.match(/^([ \t]*)/)[1].length;
 
 /**
  * THE AUTHORITATIVE POPULATION: how many `actions/checkout` steps a workflow
- * declares, counted straight off the raw text.
+ * declares, counted off the raw text by a mechanism this file's reader does not
+ * use anywhere.
  *
- * It shares no code with `checkoutSteps` on purpose. Deriving the expected
- * count from the reader is what makes a reader that misses a step agree with
- * its own omission -- the exact shape of #37's bypass 6a, where an unnamed step
- * was appended to the previous step's body and the suite stayed green at
- * 185/0. The tests assert these two numbers agree, so a checkout the reader
- * cannot see reds on the count even when it defeats the reader.
+ * Deriving the expected count from the reader is what makes a reader that
+ * misses a step agree with its own omission -- the exact shape of #37's bypass
+ * 6a, where an unnamed step was appended to the previous step's body and the
+ * suite stayed green at 185/0. The tests assert this number and the reader's
+ * agree, so a checkout the reader cannot see reds on the count even when it
+ * defeats the reader.
  *
- * Admits the inline list-item form (`- uses: actions/checkout@v4`) and a quoted
- * key, because both are valid GitHub Actions and neither is what this repo
- * happens to write today.
+ * Which means the count must not share the reader's IDEA OF A CHECKOUT either,
+ * not merely its code. An earlier revision counted with a copy of
+ * `USES_CHECKOUT` -- byte-identical apart from the `g`/`m` flags -- so the
+ * control could not see any shape the reader missed, because it WAS the
+ * reader's selector. Measured: a flow-mapping step,
+ * `- { uses: actions/checkout@v4, with: { token: "${{ secrets.CASCADE_PAT }}" } }`,
+ * is valid GitHub Actions, persists an org PAT, and left both at 1 and the
+ * whole file green at 31/31.
+ *
+ * So this counts plain occurrences of the action name instead, with WHOLE
+ * COMMENT LINES dropped first. The strip is load-bearing, not cosmetic: this
+ * repo's own comments name `actions/checkout` three times in `npm-publish.yml`
+ * and once each in `ci.yml`, `security-audit.yml` and `self-ci.yml`, so an
+ * unstripped substring count reads 1/2/5/2/2 rather than 1/1/2/1/1.
+ *
+ * It over-reports rather than under-reports -- a trailing `# ... actions/checkout`
+ * comment or the string in a `run:` body inflates it, reds the count, and gets
+ * a decision written down. That is this file's direction of failure everywhere.
  */
-export function checkoutUsesLineCount(text) {
-  return (text.match(/^[ \t]*(?:-[ \t]+)?['"]?uses['"]?[ \t]*:[ \t]*['"]?actions\/checkout(?=[@'"\s]|$)/gm) ?? []).length;
+export function rawCheckoutCount(text) {
+  const withoutCommentLines = text.split('\n').filter((line) => !/^[ \t]*#/.test(line)).join('\n');
+  return (withoutCommentLines.match(/actions\/checkout/g) ?? []).length;
 }
 
 const USES_CHECKOUT = /^[ \t]*(?:-[ \t]+)?['"]?uses['"]?[ \t]*:[ \t]*['"]?actions\/checkout(?=[@'"\s]|$)/;
