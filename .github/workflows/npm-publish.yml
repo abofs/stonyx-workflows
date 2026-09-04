@@ -66,14 +66,15 @@ jobs:
           # job: `pnpm install` (preinstall/install/postinstall), `pnpm test`,
           # `pnpm version` (preversion/version/postversion, five sites) and
           # `pnpm publish` (prepublishOnly/prepack/prepare, three sites). Any of
-          # them can read that file, and push access to any one of the eleven
+          # them can read that file, and push access to any one of the twelve
           # abofs/stonyx* repos would then yield a credential reaching all of
           # them.
           #
           # Not hypothetical: 21 published @stonyx/cron versions shipped
           # `package/.git/config` carrying a live credential to the public npm
-          # registry (four distinct tokens, all since revoked). The only thing
-          # that stopped the other ten was a narrow `files` allowlist.
+          # registry (four distinct tokens, all since revoked). What stopped
+          # the other packages was a packlist accident, not a control anyone
+          # chose -- see docs/release.md.
           #
           # The two steps that genuinely need a credential -- the beta and
           # stable commit/tag/push steps -- are handed it explicitly at their
@@ -482,10 +483,22 @@ jobs:
           git tag "v$PUBLISHED_VERSION"
           # GIT_CONFIG_* rather than a remote URL or a `git config` write:
           # nothing lands on disk, nothing outlives these two processes, and
-          # the credential never appears in a process argv. It is applied per
-          # command rather than exported so it is NOT in the environment of the
-          # `git commit`/`git tag` above, whose hooks a consumer can point at
-          # its own code via core.hooksPath.
+          # the credential never appears in a process argv.
+          #
+          # It is applied per command rather than exported, but do NOT read
+          # that as containment of the local commands. GIT_REMOTE_TOKEN is a
+          # step-level `env:`, so the RAW PAT is in the environment of all five
+          # `git` processes in this step -- `add`, `commit` and `tag` included.
+          # What the per-command form withholds from those three is only
+          # GIT_CONFIG_VALUE_0, a base64 ENCODING of the same token. A consumer
+          # that repoints core.hooksPath reads the plaintext from a pre-commit
+          # hook just as well as from a pre-push one. Measured, and asserted as
+          # a CONTROL in test/checkout-credentials-test.js.
+          #
+          # The per-command form is still the right shape -- it is what keeps
+          # the credential out of .git/config and out of every argv -- but the
+          # residual is the whole step, not the two remote calls. Taking the
+          # long-lived org PAT out of the job is abofs/stonyx-workflows#36.
           AUTH_B64=$(printf 'x-access-token:%s' "$GIT_REMOTE_TOKEN" | base64 | tr -d '\n')
           # ::add-mask:: knows the raw secret, not this encoding of it. Same
           # reason actions/checkout calls core.setSecret on its own basic
@@ -529,10 +542,22 @@ jobs:
           git tag "v$PUBLISHED_VERSION"
           # GIT_CONFIG_* rather than a remote URL or a `git config` write:
           # nothing lands on disk, nothing outlives these two processes, and
-          # the credential never appears in a process argv. It is applied per
-          # command rather than exported so it is NOT in the environment of the
-          # `git commit`/`git tag` above, whose hooks a consumer can point at
-          # its own code via core.hooksPath.
+          # the credential never appears in a process argv.
+          #
+          # It is applied per command rather than exported, but do NOT read
+          # that as containment of the local commands. GIT_REMOTE_TOKEN is a
+          # step-level `env:`, so the RAW PAT is in the environment of all five
+          # `git` processes in this step -- `add`, `commit` and `tag` included.
+          # What the per-command form withholds from those three is only
+          # GIT_CONFIG_VALUE_0, a base64 ENCODING of the same token. A consumer
+          # that repoints core.hooksPath reads the plaintext from a pre-commit
+          # hook just as well as from a pre-push one. Measured, and asserted as
+          # a CONTROL in test/checkout-credentials-test.js.
+          #
+          # The per-command form is still the right shape -- it is what keeps
+          # the credential out of .git/config and out of every argv -- but the
+          # residual is the whole step, not the two remote calls. Taking the
+          # long-lived org PAT out of the job is abofs/stonyx-workflows#36.
           AUTH_B64=$(printf 'x-access-token:%s' "$GIT_REMOTE_TOKEN" | base64 | tr -d '\n')
           # ::add-mask:: knows the raw secret, not this encoding of it. Same
           # reason actions/checkout calls core.setSecret on its own basic

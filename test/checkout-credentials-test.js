@@ -371,16 +371,26 @@ describe('#35 -- the cascade path still receives its credential explicitly', () 
         assert.equal(call.env.GIT_CONFIG_KEY_0, 'http.https://github.com/.extraheader');
       }
 
-      // THE OTHER HALF, and the one that would go unnoticed: `git add`,
-      // `git commit` and `git tag` must NOT see it. A consumer can point
-      // core.hooksPath at its own code, so a hook fired by any of those three
-      // would inherit whatever is in their environment.
+      // THE OTHER HALF. `git add`, `git commit` and `git tag` must not receive
+      // GIT_CONFIG_VALUE_0 -- that is what "per command rather than exported"
+      // buys, and exporting it would red here.
+      //
+      // It is NOT containment, and the second assertion is the one that says
+      // so out loud rather than serving only as a control. GIT_REMOTE_TOKEN is
+      // a step-level `env:`, so the RAW PAT is in all five processes'
+      // environment; what these three are denied is a base64 ENCODING of a
+      // token they already hold in plaintext. A consumer that repoints
+      // core.hooksPath reads it from a pre-commit hook. Pinned here because
+      // the prose about this step has been wrong once already
+      // (abofs/stonyx-workflows#35, Phase 3 and Phase 5), and the closure is
+      // abofs/stonyx-workflows#36.
       const local = run.gitCalls.filter((c) => !credentialed.includes(c));
       assert.deepEqual(local.map((c) => c.argv[0]), ['add', 'commit', 'tag'], 'the local commands, in order');
       for (const call of local) {
-        assert.equal(call.env.GIT_CONFIG_VALUE_0, undefined, `${call.argv[0]} must not inherit the credential`);
-        assert.equal(call.env.GIT_REMOTE_TOKEN, 'SENTINEL-PAT', 'CONTROL: the step env IS visible here, so the '
-          + 'assertion above is detection rather than an empty environment');
+        assert.equal(call.env.GIT_CONFIG_VALUE_0, undefined, `${call.argv[0]} must not inherit the encoded header`);
+        assert.equal(call.env.GIT_REMOTE_TOKEN, 'SENTINEL-PAT', 'the RAW token IS here -- which makes the '
+          + 'assertion above detection rather than an empty environment, AND is itself the residual exposure #36 '
+          + 'closes; any doc saying these three do not get the credential is wrong');
       }
     });
   }

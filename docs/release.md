@@ -75,17 +75,42 @@ The npm identity is bound. The GitHub identity is not. Do not reason about one f
 | `pnpm version` | `preversion`, `version`, `postversion` | 5 |
 | `pnpm publish` | `prepublishOnly`, `prepack`, `prepare` | 3 |
 
-Any of them could read `.git/config`. The issue was originally filed naming only the first two; refinement widened it to the rest, and that is what rules out the "just split the job" fix -- `pnpm publish` **is** consumer code, so a split still stands the PAT next to lifecycle scripts. Push access to any one of the eleven `abofs/stonyx*` repos therefore yielded a credential reaching all of them, including repos the actor could not push to. No injection was required; that was the workflow operating exactly as designed ([stonyx-workflows#35](https://github.com/abofs/stonyx-workflows/issues/35)).
+Any of them could read `.git/config`. The issue was originally filed naming only the first two; refinement widened it to the rest, and that is what rules out the "just split the job" fix -- `pnpm publish` **is** consumer code, so a split still stands the PAT next to lifecycle scripts. Push access to any one of the **twelve** `abofs/stonyx*` repos therefore yielded a credential reaching all of them, including repos the actor could not push to. Twelve, not eleven: the count that gets re-derived here is the ten published packages plus this repo, which omits the private `abofs/stonyx-dashboard`. It publishes nothing, so it is easy to miss, but it consumes `ci.yml@main` and `security-audit.yml@main` and so is inside the blast radius like everything else. (It declares no git-protocol dependencies either, so the consumer-impact assessment below holds for it unchanged.) No injection was required; that was the workflow operating exactly as designed ([stonyx-workflows#35](https://github.com/abofs/stonyx-workflows/issues/35)).
 
-**It had already happened.** 21 published `@stonyx/cron` versions (`0.2.1-alpha.0`, `0.2.1-beta.0` through `beta.19`) shipped `package/.git/config` containing a real credential to the **public npm registry** -- four distinct tokens, all since revoked. The only thing that stopped the other ten packages was that each declares a narrow `files` allowlist. That is the same thin margin the `.stonyx-workflows/` note below depends on, and it is not a control anyone chose.
+**It had already happened.** 21 published `@stonyx/cron` versions (`0.2.1-alpha.0`, `0.2.1-beta.0` through `beta.19`) shipped `package/.git/config` containing a real credential to the **public npm registry** -- four distinct tokens, all since revoked.
+
+Two sets get conflated here, so they are separated once and for all. From a sweep of all 1,389 published tarballs across the ten `@stonyx/*` packages:
+
+| set | count | which |
+| --- | --- | --- |
+| ships `package/.git/config` at all | 23 | the 21 in the next row, plus `@stonyx/cron@0.2.0` and `@stonyx/events@0.1.0` |
+| **credential-bearing** | **21** | all `@stonyx/cron`: `0.2.1-alpha.0`, `0.2.1-beta.0` through `beta.19` |
+| metadata-only, no credential in any form | 2 | `@stonyx/cron@0.2.0`, `@stonyx/events@0.1.0` |
+
+The two metadata-only artifacts were packed from a **workstation**, not from CI: `git@github.com:` SSH remotes, local branch names, and GitKraken/VS Code keys (`gk-last-accessed`, `vscode-merge-base`). Both were opened and dumped in full -- zero `http.extraheader`, zero `AUTHORIZATION`, no credential of any kind. **21 is the security number**, and the "four distinct tokens, all since revoked" accounting covers every credential-bearing artifact that exists. There are no unchecked artifacts.
+
+**What spared the other packages was not a `files` allowlist.** The published tarballs falsify that in both directions: the leaking `@stonyx/cron` versions declared `files: ["*"]`, which excludes nothing, while `@stonyx/discord@0.1.0` and `@stonyx/sockets@0.1.0` declared the identical `["*"]` and stayed clean. The real mechanism, established on [stonyx-workflows#47](https://github.com/abofs/stonyx-workflows/pull/47), is a **basename collision in pnpm's packlist**: a top-level path in `files` whose basename matches a file inside `.git` drags that file in.
+
+```
+files: ["*"]                  -> 0 .git entries
+files: ["*"] + config/        -> package/.git/config
+files: ["*"] + description/   -> package/.git/description
+files: ["**"] or [".git/**"]  -> the whole .git
+```
+
+Identical on pnpm 9.15.9 and 10.23.0; npm's own packer does not do this. `@stonyx/cron` declares `config/environment.js`, so it shipped exactly the one `.git` entry named `config`; `discord` and `sockets` had no colliding top-level directory. So the margin was narrower than "an allowlist" and stranger -- it turned on whether a repo happened to have a directory sharing a name with a file in `.git`.
+
+**And a narrow allowlist would not have helped.** `@stonyx/cron@0.2.1-beta.96`, the current beta, still declares `files: ["dist", "config", "README.md"]` -- `config` is precisely the colliding basename -- and ships zero `.git` entries. `@stonyx/discord` and `@stonyx/sockets` declare it too. What excludes `.git` in those three today is an `.npmignore` entry, added after the fact. **No `files` list should be relied on to exclude `.git`**, and the durable control is the one this change makes: never write a credential into `.git/config` in the first place.
 
 ### What happens now
 
 - **The cascade checkout** (`npm-publish.yml`) and **the dependency-map checkout** (`cascade.yml`) both set `persist-credentials: false`. `cascade.yml`'s dispatch step already passed the PAT explicitly as `github-token:`, so nothing there read it from disk in the first place.
 - **The three ambient-token checkouts** (`ci.yml`, `self-ci.yml`, `security-audit.yml`) set it too. None of them reads git credentials, and each runs `pnpm install` lifecycle scripts, so a persisted `GITHUB_TOKEN` was a live credential sitting next to consumer code for no benefit.
-- **The two steps that push** -- `Commit version bump and create tag (beta)` and `(stable)` -- receive the token through a step `env:` as `GIT_REMOTE_TOKEN`, using the **same expression the checkout uses**, so the identity that pushes is unchanged. They hand it to git through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0`, set **per command** rather than exported. Nothing is written to disk, nothing outlives those two `git` processes, and the credential never appears in a process argv.
+- **The two steps that push** -- `Commit version bump and create tag (beta)` and `(stable)` -- receive the token through a step `env:` as `GIT_REMOTE_TOKEN`, using the **same expression the checkout uses**, so the identity that pushes is unchanged. They hand it to git through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0`, set **per command** rather than exported. Nothing is written to disk, the encoded credential outlives no process but the one it is prefixed to, and the credential never appears in a process argv. Read the next paragraph before concluding anything stronger than that.
 
-`git add`, `git commit` and `git tag` in those same steps do **not** get it. That is deliberate: a consumer can point `core.hooksPath` at its own code, so a hook fired by any of the three would inherit the step's environment. This is asserted behaviourally -- `test/checkout-credentials-test.js` executes both real `run:` bodies against a `git` stub that records each invocation's argv *and* environment.
+**`git add`, `git commit` and `git tag` in those same steps do get the raw token too.** `GIT_REMOTE_TOKEN` is a step-level `env:`, so it is in the environment of every process in both steps -- all five `git` invocations, not the two remote ones. What the per-command form withholds from the local three is `GIT_CONFIG_VALUE_0`, which is a base64 *encoding* of a token they already hold in plaintext. Withholding the encoding is not containment, and an earlier draft of this section said it was.
+
+This is asserted behaviourally -- `test/checkout-credentials-test.js` executes both real `run:` bodies against a `git` stub that records each invocation's argv *and* environment, and pins `GIT_REMOTE_TOKEN === 'SENTINEL-PAT'` on `add`, `commit` and `tag` explicitly. The per-command `GIT_CONFIG_*` form is still worth keeping: it is what stops the credential landing in a config file or a process argv. It just does not scope the secret to two of the five processes.
 
 ### What this means for a consumer
 
@@ -95,7 +120,51 @@ If your repo has a build step that expects to run authenticated git commands out
 
 ### Residual exposure, stated plainly
 
-The credential is still present in the *job* while a `git pull --rebase` or `git push` runs, so a consumer-supplied git hook fired by those two commands would still see it. That is a strictly smaller window than a file on disk readable by every step, and closing it entirely means not holding a long-lived org-wide PAT in the job at all. That is [stonyx-workflows#36](https://github.com/abofs/stonyx-workflows/issues/36) -- a GitHub App installation token scoped to the specific dependent repos, minted per run -- which is on hold pending an owner decision and is **not** implemented here.
+**The raw PAT is in the environment of both push steps in full, for the whole step.** A consumer-supplied git hook fired by *any* of `commit`, `tag`, `pull` or `push` can read it -- `pre-commit`, `prepare-commit-msg`, `commit-msg` and `post-commit` included, not only the pre-push ones. Two same-class paths are open and worth naming rather than leaving implicit: a `$GITHUB_PATH` append from an earlier lifecycle script shimming `git`, and `/proc/<pid>/environ` on the runner.
+
+This does **not** enlarge what an attacker can reach. Anyone able to repoint `core.hooksPath` already gets the token from the `pull`/`push` hooks, so the reachable credential set is unchanged; the window is five processes across two steps rather than two. And it remains far smaller than what it replaces -- a file on disk readable by every step for the whole job, across all ten consumer-code execution sites.
+
+Closing it means not holding a long-lived org-wide PAT in the job at all, which is the only thing that closes all three paths at once. That is [stonyx-workflows#36](https://github.com/abofs/stonyx-workflows/issues/36) -- a GitHub App installation token scoped to the specific dependent repos, minted per run -- which is on hold pending an owner decision and is **not** implemented here.
+
+### Runbook: the cascade push fails
+
+This change moves where a git credential failure surfaces, so it gets a runbook like the registry failures above. It applies to the **beta** and **stable** paths only -- the alpha path publishes and never commits, so it has no push step to fail.
+
+**How to recognise it.** The job reds at `Commit version bump and create tag (beta)` or `Commit version bump and create tag (stable)`, on the `authed_git pull` or `authed_git push` line, typically with a `403`/`401` or `could not read Username`. Two things make this different from before:
+
+- **It surfaces at the end of the job rather than the start.** Previously the credential was written into `.git/config` at `Checkout code` (step 1 of 26), so a bad push credential could fail there, before anything was published. Now the checkout succeeds on a token it discards, and the first thing that exercises the push credential is the push step itself (step 22 or 24 of 26) -- after the package is already on the registry.
+- **`Checkout code` being green tells you nothing about the push credential.** They are the same expression, but the checkout only needs read access to one repo.
+
+Distinguish it from the failure that looks identical but is not credential-related: `authed_git pull --rebase --autostash` can also red on a genuine rebase conflict or a non-fast-forward, which is a branch-state problem and needs no credential work at all. Read the message before assuming the credential.
+
+**What state the repo and the registry are in when it fails.** This is the part to get right before touching anything:
+
+| | state |
+| --- | --- |
+| **npm** | **Already published.** `Publish to NPM (beta)` / `(stable)` run *before* the commit step. The version is on the registry under its dist-tag. |
+| the version-bump commit | Created **locally on the runner only**. Never pushed; discarded when the runner is torn down. |
+| the tag | Same -- created locally, never pushed. |
+| the GitHub Release | Not created. That step runs after the commit step and is skipped. |
+| downstream cascade | **Not dispatched.** A consumer's `cascade` job declares `needs: publish`, so a failed publish job skips it and no dependent repo is rebuilt. |
+
+So the failure mode is: **the registry moved and the repo did not.** `main` still carries the pre-bump version in `package.json` and has no tag for what was published.
+
+**What to check, in order.**
+
+1. Read the actual git error. A `403` on push to a repo the identity can read is a permissions/expiry problem; a rebase conflict is not.
+2. Confirm whether the run was in cascade mode (`cascade-source` non-empty). Cascade runs push as `CASCADE_PAT`; ordinary runs push as the ambient `github.token`. Those have different failure causes, and only the first is org-wide.
+3. If cascade mode: the org PAT is the usual suspect -- expiry, a revoked grant, or a repo removed from its scope. That is an owner action; do not attempt to read or rotate the secret from a job.
+4. If not cascade mode: check branch protection on the target branch. `github.token` cannot push to a branch whose protection excludes it, and that is a repo setting change, not a workflow bug.
+5. Confirm the identity was not silently changed. `GIT_REMOTE_TOKEN` must bind the same expression as the checkout's `token:`; `test/checkout-credentials-test.js` reds if it drifts, so a green `self-ci.yml` on `main` already rules this out for the shipped workflow.
+
+**How to recover.**
+
+- **Do not simply re-run the job.** The version is already published and npm will not accept it twice. A re-run re-derives from the registry -- `deriveVersion` takes the highest published prerelease and adds one -- so it publishes a *new* version, widening the gap between the registry and the repo rather than closing it.
+- **Fix the credential or the branch state first**, then decide between two closes:
+  - *Publish forward.* Once the push works, run the publish again. It bumps to the next version, publishes it, and pushes the commit and tag for **that** version. The stranded version stays on the registry as a version with no tag. This is the normal choice: it is one command and it leaves the repo and the registry consistent going forward.
+  - *Reconcile by hand.* If the stranded version must be tagged, bump `package.json` to it and tag it in a normal PR, from a workstation, with the same `v<version>` spelling the workflow uses. Do not push a tag the workflow will later try to create.
+- **Re-dispatch the cascade if the release mattered downstream.** Nothing dispatched, so dependents are still pinned to the previous version. They pick it up on their next cascade or publish; if that is too slow, the owner can dispatch `cascade-publish` to the dependents directly.
+- **Nothing needs to change in a consumer's `publish.yml`** in any of these cases.
 
 ### The guard
 
@@ -126,6 +195,6 @@ Nor can a change be rehearsed before it lands: `workflow_dispatch` on `abofs/sto
 Two consequences worth knowing:
 
 - **The ref you pin governs the script too.** The checkout is pinned to `${{ job.workflow_sha }}` -- the exact commit your `uses:` line resolved to. Pin the workflow to `@main` and you get `main`'s derivation logic; pin it to a tag or a SHA and you get that commit's. The workflow and the script are always one artifact, never two independently-resolved ones.
-- **`.stonyx-workflows/` exists transiently in your workspace** between the version bump and the cleanup step. It is removed before publishing, so it cannot reach your tarball -- and every current `@stonyx/*` package also declares a `files` allowlist that would exclude it anyway. If you drop that allowlist, the cleanup step becomes the only thing keeping it out.
+- **`.stonyx-workflows/` exists transiently in your workspace** between the version bump and the cleanup step. It is removed before publishing, so it cannot reach your tarball, and every current `@stonyx/*` package also declares a `files` allowlist that does not list it. Treat the cleanup as the control anyway, not the allowlist: it is asserted to run before the first `pnpm publish` step in `test/workflows-test.js`, whereas an allowlist is a per-consumer setting that can change without anything here noticing -- and, as the `.git/config` incident above shows, an allowlist does not exclude what you would expect it to. If you drop yours, the cleanup step is all that is left.
 
 This requires no change to any consumer's `publish.yml`.
