@@ -551,7 +551,33 @@ jobs:
           # Read the artifact, not the report the packer prints. No pipeline here:
           # $? after `tar ... | grep` is the status of grep, which is how a tar error
           # becomes a green step.
+          #
+          # The status is read explicitly rather than left to `set -e`, because the
+          # interesting failure is not the one `set -e` reports usefully. A tar that
+          # dies PARTWAY -- a truncated artifact, which is what an interrupted
+          # upload, a half-written cache entry or a full disk produces -- exits
+          # non-zero AFTER having already written every entry it managed to read.
+          # Measured on GNU tar 1.35 (ubuntu-latest's tar) and on bsdtar, same
+          # result: a 32-entry archive truncated to half its bytes exits non-zero
+          # and still lists ~15 entries, `package/package.json` among them.
+          #
+          # A partial listing therefore clears both anti-vacuity checks below on
+          # its own merits, while every entry past the truncation point is simply
+          # absent from what the denylist scans -- and `.git` sorts late in a real
+          # pack. Measured with `|| true` appended to the tar line: the step printed
+          # `passed the content guard: 16 entries, 0 denied` for an artifact
+          # carrying `package/.git/config`. That is this guard's own defect,
+          # reported as a clean pass, so the status gets its own ::error:: rather
+          # than surfacing as a bare tar message: it is the one failure here that
+          # means the guard's INPUT was incomplete rather than wrong.
+          set +e
           tar -tzf "$TARBALL" > "$ENTRIES"
+          TAR_STATUS=$?
+          set -e
+          if [ "$TAR_STATUS" != "0" ]; then
+            echo "::error::reading the release artifact's entry list failed with status $TAR_STATUS. A tar that stops partway still writes the entries it got to, so every check below would scan a PARTIAL listing and a denied path past the truncation point would be invisible to it." >&2
+            exit 1
+          fi
 
           ENTRY_COUNT=$(wc -l < "$ENTRIES" | tr -d " ")
           if [ "$ENTRY_COUNT" -lt 2 ]; then
@@ -594,6 +620,14 @@ jobs:
           grep -E '^package/(.*/)?\.git(/|$)' "$ENTRIES" > "$OFFENDERS"
           GREP_STATUS=$?
           set -e
+          # This branch is deliberately NOT covered by a test, and that is a
+          # disclosed gap rather than an oversight. Reaching it means making grep
+          # exit >1 on a readable regular file, which no fixture can arrange --
+          # only a grep stub can. A stub on PATH also intercepts the `grep -q`
+          # manifest check eight lines up, so it would change which check rejects
+          # the fixture; a stub that discriminates on argv to avoid that is a test
+          # of the stub's argv matcher, not of this branch. The tar status above is
+          # the analogous check that a fixture CAN reach, and it is pinned.
           if [ "$GREP_STATUS" -gt 1 ]; then
             echo "::error::scanning the release artifact entry list failed with status $GREP_STATUS" >&2
             exit 1

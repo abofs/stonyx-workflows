@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -160,6 +161,28 @@ const rawPublishInvocations = (text) => (
 );
 
 const dedent = (body) => body.split('\n').map((l) => l.replace(/^ {10}/, '')).join('\n') + '\n';
+
+/**
+ * Every `::error::` string the guard step can print, comments excluded so a
+ * message quoted inside a comment is not counted as one the step emits.
+ *
+ * Shared by the two README pins below -- membership and split -- so they cannot
+ * disagree about what the population is.
+ */
+const emittedGuardErrors = () => (
+  stepRunBody(npmPublish, GUARD_STEP)
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .map((l) => l.match(/::error::(.+?)"\s*>&2/))
+    .filter(Boolean)
+    .map((m) => m[1])
+);
+
+/** Number words, for pinning README prose that counts a list in English. */
+const NUMBER_WORDS = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
+  seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+};
 
 const REAL_PNPM = (() => {
   const found = spawnSync('sh', ['-c', 'command -v pnpm'], { encoding: 'utf8' });
@@ -355,6 +378,77 @@ function buildTarballFrom(destPath, files) {
     mkdirSync(dirname(destPath), { recursive: true });
     const packed = spawnSync('tar', ['-czf', destPath, '-C', staging, ...Object.keys(files)], { encoding: 'utf8' });
     assert.equal(packed.status, 0, `hand-building the fixture tarball failed: ${packed.stderr}`);
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A tarball whose gzip stream is cut in half: the shape an interrupted upload,
+ * a half-written cache entry or a full disk leaves behind.
+ *
+ * This is the fixture the `|| true` mutation on the guard's `tar` line needs,
+ * and the reason the earlier round's "no fixture can reach the checks below
+ * with tar having failed" was wrong. A CORRUPT-non-gzip archive lists nothing,
+ * so the entry-count floor catches it either way. A TRUNCATED one is different:
+ * tar exits non-zero only AFTER writing every entry it managed to read, so the
+ * listing is a genuine prefix of the archive.
+ *
+ * Three properties make that prefix dangerous, and all three are asserted on
+ * the built fixture at the point of use rather than assumed here:
+ *
+ *   - it holds well over 2 entries, so the ENTRY_COUNT floor passes;
+ *   - `package/package.json` is the FIRST member, so the manifest check passes;
+ *   - `package/.git/config` is the LAST member, so it sits past the cut and the
+ *     denylist scan -- reading only the prefix -- finds nothing to report.
+ *
+ * The payloads are `randomBytes`, not repeated text, on purpose: gzip must not
+ * collapse them, or the byte offset the cut lands at stops corresponding to any
+ * particular entry index and the fixture degenerates into the corrupt case.
+ */
+function buildTruncatedTarball(destPath, { payloads = 30 } = {}) {
+  const staging = mkdtempSync(join(tmpdir(), 'wf39-trunc-'));
+  try {
+    // Member ORDER is the fixture, so it is built as an explicit list rather
+    // than left to whatever order the filesystem hands back.
+    const members = ['package/package.json'];
+    writeTree(staging, {
+      'package/package.json': JSON.stringify({ name: '@stonyx/truncated', version: '0.1.0' }) + '\n',
+    });
+    for (let i = 0; i < payloads; i++) {
+      const rel = `package/payload-${String(i).padStart(2, '0')}.bin`;
+      mkdirSync(dirname(join(staging, rel)), { recursive: true });
+      writeFileSync(join(staging, rel), randomBytes(4096));
+      members.push(rel);
+    }
+    writeTree(staging, {
+      'package/.git/config': '[remote "origin"]\n\turl = git@github.com:abofs/example.git\n',
+    });
+    members.push('package/.git/config');
+
+    const full = join(staging, 'full.tgz');
+    const packed = spawnSync('tar', ['-czf', full, '-C', staging, ...members], { encoding: 'utf8' });
+    assert.equal(packed.status, 0, `hand-building the fixture tarball failed: ${packed.stderr}`);
+
+    // The whole archive really does carry the poison -- checked here, because
+    // the truncated copy is by construction the one that hides it, and a
+    // fixture that never had a `.git` entry would make the test vacuous.
+    const wholeListing = spawnSync('tar', ['-tzf', full], { encoding: 'utf8' });
+    assert.equal(wholeListing.status, 0, `the untruncated fixture must list cleanly: ${wholeListing.stderr}`);
+    const whole = wholeListing.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    assert.ok(
+      whole.includes('package/.git/config'),
+      `the untruncated fixture must carry package/.git/config; entries:\n${whole.join('\n')}`,
+    );
+    assert.equal(
+      whole.at(-1),
+      'package/.git/config',
+      `the poison must be the LAST member or it does not land past the cut; entries:\n${whole.join('\n')}`,
+    );
+
+    mkdirSync(dirname(destPath), { recursive: true });
+    const bytes = readFileSync(full);
+    writeFileSync(destPath, bytes.subarray(0, Math.floor(bytes.length / 2)));
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
@@ -796,6 +890,116 @@ describe('AC4 -- the guard fails when it inspected nothing (#39)', () => {
     );
     assert.deepEqual(run.pnpmArgs.filter((a) => a.startsWith('publish')), []);
   });
+
+  // The tar STATUS check is a third member of the same family, and it was
+  // nearly shipped unpinned on the reasoning that "tar failing means the entry
+  // list is empty, so the ENTRY_COUNT floor catches it anyway". That is true of
+  // a CORRUPT archive and false of a TRUNCATED one, and the difference is the
+  // whole check: tar stops partway, exits non-zero, and leaves behind a real
+  // prefix of the listing that clears both checks above on its own merits.
+  //
+  // Both shapes get a case, and each asserts its own reason, for the same
+  // reason the pair above does: "it failed" is what let checks mask each other.
+
+  test('a truncated artifact fails on the tar status, not on a listing it half-read', () => {
+    let source = null;
+    const run = runGuard({
+      pkg: { name: '@stonyx/truncated', version: '0.1.0', files: ['index.js'] },
+      files: { 'index.js': 'module.exports = {};\n' },
+      packOverride: packOverrideProducing(['  cp "$WF39_TRUNCATED" "$PACK_DEST/truncated-0.1.0.tgz"']),
+      seed: ({ runnerTemp }) => {
+        source = join(runnerTemp, 'truncated-source.tgz');
+        buildTruncatedTarball(source);
+        process.env.WF39_TRUNCATED = source;
+      },
+    });
+    delete process.env.WF39_TRUNCATED;
+
+    // The fixture's shape IS the test, so all three properties are established
+    // positively before any verdict is asserted. Without them this case could
+    // silently degrade into the corrupt one and pass on the floor instead.
+    assert.ok(
+      run.entries.length >= 2,
+      'the partial listing must clear the ENTRY_COUNT floor, or the floor is what rejects this and the tar '
+      + `status check is still unpinned; entries:\n${run.entries.join('\n')}`,
+    );
+    assert.ok(
+      run.entries.includes('package/package.json'),
+      `the partial listing must clear the manifest check too; entries:\n${run.entries.join('\n')}`,
+    );
+    assert.deepEqual(
+      run.entries.filter((e) => /^package\/(.*\/)?\.git(\/|$)/.test(e)),
+      [],
+      'the poison must be PAST the cut. If the partial listing already shows it, the denylist rejects this '
+      + `fixture and it stops testing the tar status at all; entries:\n${run.entries.join('\n')}`,
+    );
+
+    assert.notEqual(
+      run.status,
+      0,
+      'a truncated artifact must hard-fail. Its listing is a clean-looking prefix of an archive that carries '
+      + `package/.git/config; stdout:\n${run.stdout}\nstderr:\n${run.stderr}`,
+    );
+    assert.match(
+      run.stderr,
+      /::error::reading the release artifact's entry list failed with status [1-9]/,
+      'this must fail on the TAR STATUS, and report the status it read. Both anti-vacuity checks pass on this '
+      + `fixture by construction, so nothing else can reject it; stderr:\n${run.stderr}`,
+    );
+    assert.doesNotMatch(
+      run.stderr,
+      /lists \d+ entries|has no package\/package\.json|denied path\(s\)/,
+      'no other check may be what rejects this -- if one is, the fixture stopped isolating the tar status; '
+      + `stderr:\n${run.stderr}`,
+    );
+    // The mutation this case exists for. `tar -tzf ... || true` makes the step
+    // print exactly this line for an artifact carrying package/.git/config, so
+    // reporting success is itself the failure, not merely a missing rejection.
+    assert.doesNotMatch(
+      run.stdout,
+      /passed the content guard/,
+      `a partial listing must never be reported as a clean pass; stdout:\n${run.stdout}`,
+    );
+    assert.deepEqual(run.pnpmArgs.filter((a) => a.startsWith('publish')), []);
+  });
+
+  test('a corrupt non-gzip artifact fails on the tar status as well', () => {
+    const run = runGuard({
+      pkg: { name: '@stonyx/corrupt', version: '0.1.0', files: ['index.js'] },
+      files: { 'index.js': 'module.exports = {};\n' },
+      packOverride: packOverrideProducing([
+        '  printf \'not a gzip stream at all\' > "$PACK_DEST/corrupt-0.1.0.tgz"',
+      ]),
+    });
+
+    // Stated rather than implied: this fixture does NOT isolate the tar status
+    // check. tar rejects the header outright and lists nothing, so with the
+    // status check deleted the ENTRY_COUNT floor rejects it on `lists 0
+    // entries` and this case would stay green. The truncated case above is what
+    // pins the check; this one pins that the two shapes are reported
+    // DIFFERENTLY, so an unreadable archive is not diagnosed as an empty
+    // package and an operator is not sent to their own `files` field.
+    assert.deepEqual(
+      run.entries,
+      [],
+      'a corrupt archive must list nothing, or it is not the shape this case describes; '
+      + `entries:\n${run.entries.join('\n')}`,
+    );
+
+    assert.notEqual(run.status, 0, `a corrupt artifact must hard-fail; stdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+    assert.match(
+      run.stderr,
+      /::error::reading the release artifact's entry list failed with status [1-9]/,
+      'an unreadable archive must be reported as unreadable rather than as a package with no entries -- the '
+      + `two send an operator to different places; stderr:\n${run.stderr}`,
+    );
+    assert.doesNotMatch(
+      run.stdout,
+      /passed the content guard/,
+      `stdout:\n${run.stdout}`,
+    );
+    assert.deepEqual(run.pnpmArgs.filter((a) => a.startsWith('publish')), []);
+  });
 });
 
 describe('AC5 -- no publish path can bypass the guard (#39)', () => {
@@ -909,29 +1113,23 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
 
   test('every ::error:: the guard can emit is indexed in README', () => {
     // README carries a curated block introduced by its own sentence -- "so a
-    // red job can be grepped rather than guessed at". The guard adds nine
-    // strings to a step every consumer meets on every publish run, and seven of
+    // red job can be grepped rather than guessed at". The guard adds ten
+    // strings to a step every consumer meets on every publish run, and eight of
     // them describe a BROKEN GUARD rather than a poisoned tarball. Those are
     // what an operator greps while ten repos cannot release, which is the
     // reason the block exists.
     //
     // Pinned rather than merely added, because a curated list nobody checks is
     // how README ended up with ten stale `319`s (abofs/stonyx-workflows#44).
-    // Adding a tenth ::error:: to the guard now reds until it is indexed.
-    const body = stepRunBody(npmPublish, GUARD_STEP);
-    const emitted = body
-      .split('\n')
-      .filter((l) => !/^\s*#/.test(l))
-      .map((l) => l.match(/::error::(.+?)"\s*>&2/))
-      .filter(Boolean)
-      .map((m) => m[1]);
+    // Adding an eleventh ::error:: to the guard now reds until it is indexed.
+    const emitted = emittedGuardErrors();
 
     // The population, established before it is quantified over. An extractor
     // that silently matched nothing would make every assertion below vacuous --
     // which is the defect this whole suite exists to answer for.
     assert.ok(
-      emitted.length >= 8,
-      `expected the guard to emit at least 8 ::error:: strings, extracted ${emitted.length}. The extractor has `
+      emitted.length >= 9,
+      `expected the guard to emit at least 9 ::error:: strings, extracted ${emitted.length}. The extractor has `
       + 'stopped matching the guard body, so the check below would pass over an empty list',
     );
 

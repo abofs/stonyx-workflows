@@ -219,7 +219,7 @@ wired today. Read the whole list rather than the top of it:
 ::error::npm view <package> versions --json returned unparseable output
 ```
 
-The release-artifact guard adds nine more. They are split here because the
+The release-artifact guard adds ten more. They are split here because the
 split is what an operator needs at the point of use: **one** of them means the
 tarball is poisoned and the consumer must change their `package.json`; the other
 **eight** mean the guard itself could not establish what it was looking at, and
@@ -242,6 +242,7 @@ not in the consumer:
 ::error::the pack destination $PACK_DIR is not under $RUNNER_TEMP
 ::error::expected exactly one tarball in $PACK_DIR, found $PACKED. Refusing to guess which one would be released.
 ::error::$STRAY .tgz file(s) in the package root. They are absorbed by the next pack and they perturb the rebase in the tag steps below:
+::error::reading the release artifact's entry list failed with status $TAR_STATUS. A tar that stops partway still writes the entries it got to, ...
 ::error::the release artifact lists $ENTRY_COUNT entries. A guard that inspected nothing must not report success.
 ::error::the release artifact has no package/package.json, so it is not a packed npm package and a denylist over its entries would pass vacuously:
 ::error::scanning the release artifact entry list failed with status $GREP_STATUS
