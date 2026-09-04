@@ -174,6 +174,18 @@ const packOverrideProducing = (bodyLines) => [
   'fi',
 ].join('\n');
 
+/**
+ * Every path in the workspace, relative and sorted, excluding the stub `.bin`
+ * directory the harness itself puts there.
+ */
+function workspaceTree(root) {
+  const found = spawnSync('sh', ['-c', "find . -mindepth 1 -not -path './.bin*' | sort"], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  return found.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+}
+
 function writeTree(root, files) {
   for (const [path, contents] of Object.entries(files)) {
     const full = join(root, path);
@@ -232,6 +244,12 @@ function runGuard({ pkg, files = {}, packOverride = '', seed = () => {} }) {
         cwd: workspace,
         encoding: 'utf8',
       }).stdout.trim(),
+      // Everything the step left in the package root, so AC6 can assert on
+      // what the guard ADDED rather than only on the file extension it added.
+      // A pack directory inside the workspace leaves no `.tgz` behind -- the
+      // tarball is moved out of it -- but it does leave an untracked directory,
+      // which is enough to perturb the rebase in the tag steps.
+      tree: workspaceTree(workspace),
       workspace,
       runnerTemp,
       log,
@@ -289,19 +307,41 @@ describe('AC1 -- the inspected artifact is the published artifact (#39)', () => 
   test('the guard runs prepublishOnly before it packs, and packs outside the package root', () => {
     const body = stepRunBody(npmPublish, GUARD_STEP);
 
-    const prepublishAt = body.indexOf('prepublishOnly');
-    const packAt = body.search(/pnpm pack\b/);
+    // Comment lines are stripped first. The guard's own comments explain what
+    // `pnpm pack` does and does not run, so a scan of the raw body finds the
+    // word `pnpm pack` in the PROSE ahead of the real `pnpm run prepublishOnly`
+    // and reports an ordering violation that does not exist. An ordering
+    // assertion has to read the executable lines.
+    const executable = body.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
 
-    assert.notEqual(prepublishAt, -1, 'the guard must invoke prepublishOnly explicitly: `pnpm pack` runs only '
+    const prepublishAt = executable.search(/pnpm run prepublishOnly\b/);
+    const packAt = executable.search(/pnpm pack\b/);
+
+    assert.notEqual(prepublishAt, -1, 'the guard must invoke `pnpm run prepublishOnly` explicitly: `pnpm pack` runs only '
       + 'prepack and prepare, so four of the ten consumers would be guarded with no build output present');
     assert.notEqual(packAt, -1, 'the guard must pack the artifact it inspects');
     assert.ok(prepublishAt < packAt, 'prepublishOnly must run BEFORE the pack, or the pack sees a pre-build tree');
 
+    // The destination is resolved through one level of shell variable rather
+    // than being matched as a literal, because the guard names it once and
+    // reuses it. Resolving it is the difference between asserting where the
+    // tarball goes and asserting how the author chose to spell it.
+    const assignments = Object.fromEntries(
+      [...executable.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)="([^"]*)"\s*$/gm)].map((m) => [m[1], m[2]]),
+    );
+    const destination = executable.match(/--pack-destination\s+"([^"]+)"/);
+    assert.ok(destination, 'the pack must name a destination. A bare `pnpm pack` writes the .tgz into the '
+      + 'package root, where the next pack absorbs it and the rebase in the tag steps trips over it. `--out` '
+      + 'is not the alternative: pnpm 9.15.9, the version npm-publish.yml pins by default, rejects it with '
+      + '`Unknown option: out`');
+
+    const resolved = destination[1].replace(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/, (whole, name) => (
+      Object.hasOwn(assignments, name) ? assignments[name] : whole
+    ));
     assert.match(
-      body,
-      /--pack-destination\s+"\$RUNNER_TEMP\//,
-      'the pack destination must be under $RUNNER_TEMP. `--out` is not available: pnpm 9.15.9, the version '
-      + 'npm-publish.yml pins by default, rejects it with `Unknown option: out`',
+      resolved,
+      /^\$RUNNER_TEMP\//,
+      `the pack destination resolves to ${JSON.stringify(resolved)}, which is not under $RUNNER_TEMP`,
     );
   });
 
@@ -499,6 +539,19 @@ describe('AC4 -- the guard fails when it inspected nothing (#39)', () => {
 
     assert.notEqual(run.status, 0, `a pack that produced nothing must fail the step; stdout:\n${run.stdout}`);
     assert.deepEqual(run.pnpmArgs.filter((a) => a.startsWith('publish')), []);
+
+    // The diagnostic is pinned, not just the exit code. Without the explicit
+    // count check the step still fails -- `mv "$(find ...)"` with an empty
+    // argument errors -- but it fails as `mv: missing destination file
+    // operand`, which reads like a broken workflow rather than like a pack that
+    // produced nothing. Measured: deleting the count check left this whole
+    // suite green, so the check was carrying only a message and nothing was
+    // holding the message.
+    assert.match(
+      run.stderr,
+      /expected exactly one tarball[\s\S]*found 0/,
+      `the failure must say what it found; stderr:\n${run.stderr}`,
+    );
   });
 
   test('a stale tarball from a prior run is not inspected in place of a fresh one', () => {
@@ -538,6 +591,11 @@ describe('AC4 -- the guard fails when it inspected nothing (#39)', () => {
     assert.notEqual(run.status, 0, 'two candidate tarballs is an ambiguity, not a pass. `tar tzf a.tgz b.tgz` '
       + `treats the second as a member name and never opens it; stdout:\n${run.stdout}`);
     assert.deepEqual(run.pnpmArgs.filter((a) => a.startsWith('publish')), []);
+    assert.match(
+      run.stderr,
+      /expected exactly one tarball[\s\S]*found 2/,
+      `the failure must name the ambiguity rather than surfacing as an mv error; stderr:\n${run.stderr}`,
+    );
   });
 
   test('a tarball with no package/package.json is not a packed artifact', () => {
@@ -652,6 +710,31 @@ describe('AC6 -- the guard leaves nothing packable behind (#39)', () => {
     );
   });
 
+  // The `.tgz` count alone is not enough, and the gap is not theoretical: with
+  // the pack destination moved to `./stonyx-pack` the tarball is still MOVED
+  // out to $RUNNER_TEMP, so the workspace ends with zero .tgz files and an
+  // untracked DIRECTORY -- green on the check above, `git status --porcelain`
+  // non-empty, and the autostash in the tag steps carrying a build artifact.
+  // Measured: that mutation left the whole suite green until this case existed.
+  test('a successful guard run adds nothing at all to the package root', () => {
+    const run = runGuard(CLEAN_CONSUMER);
+    assert.equal(run.status, 0, `stderr:\n${run.stderr}`);
+
+    const seeded = new Set(['./package.json', ...Object.keys(CLEAN_CONSUMER.files).flatMap((path) => {
+      const parts = path.split('/');
+      return parts.map((_, i) => `./${parts.slice(0, i + 1).join('/')}`);
+    })]);
+
+    const added = run.tree.filter((p) => !seeded.has(p));
+    assert.deepEqual(
+      added,
+      [],
+      `the guard added ${JSON.stringify(added)} to the package root. This fixture declares a no-op `
+      + 'prepublishOnly, so anything here came from the guard itself -- a pack directory, a listing file, or '
+      + 'a tarball. All three are absorbed by the next pack and all three dirty the worktree for the rebase.',
+    );
+  });
+
   test('a stray .tgz in the package root hard-fails rather than shipping', () => {
     const run = runGuard({
       ...CLEAN_CONSUMER,
@@ -706,7 +789,22 @@ describe('AC7 -- the failure names the offending paths and their count (#39)', (
         + `stderr:\n${run.stderr}`,
       );
     }
-    assert.match(run.stderr, /\b3\b/, 'the count must be the number of matched entries');
+
+    // The expected count comes from the artifact, not from a literal. `tar
+    // -czf` emits DIRECTORY entries as well as file entries, so a hand-built
+    // fixture with three planted files under .git/ produces six matches
+    // (`package/.git/`, `package/.git/refs/`, `package/.git/refs/heads/` and
+    // the three files). Hard-coding 3 here reds a guard that is reporting
+    // correctly -- and "fixing" it by hard-coding 6 would then red the day the
+    // packer stops emitting directory entries. Deriving it means the assertion
+    // is that the guard counted what is in the tarball.
+    const expected = run.entries.filter((e) => /^package\/\.git(\/|$)/.test(e));
+    assert.ok(expected.length >= 3, `the fixture must carry several .git entries; it carried ${expected.length}`);
+    assert.match(
+      run.stderr,
+      new RegExp(`\\b${expected.length}\\b`),
+      `the reported count must be the ${expected.length} matched entries; stderr:\n${run.stderr}`,
+    );
   });
 
   test('a .gitignore or .github entry is not mistaken for a .git directory', () => {

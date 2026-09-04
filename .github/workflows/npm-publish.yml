@@ -458,6 +458,20 @@ jobs:
           rm -f "$TARBALL" "$ENTRIES" "$OFFENDERS"
           mkdir -p "$PACK_DIR"
 
+          # The destination is checked, not merely written down. A pack
+          # directory inside the package root is absorbed by the next pack and
+          # leaves the worktree dirty for the `git pull --rebase --autostash` in
+          # the tag steps below, and neither of those shows up as a failure
+          # here -- the guard would still pass, having quietly broken the two
+          # steps that follow it.
+          case "$PACK_DIR" in
+            "$RUNNER_TEMP"/*) ;;
+            *)
+              echo "::error::the pack destination $PACK_DIR is not under $RUNNER_TEMP" >&2
+              exit 1
+              ;;
+          esac
+
           # `pnpm pack` runs prepack and prepare -- NOT prepublishOnly. Four of
           # the ten consumers build there (stonyx, stonyx-discord, stonyx-events,
           # stonyx-logs, measured), and stonyx-events and stonyx-logs declare
@@ -502,6 +516,7 @@ jobs:
             exit 1
           fi
           mv "$(find "$PACK_DIR" -maxdepth 1 -type f -name "*.tgz")" "$TARBALL"
+          rm -rf "$PACK_DIR"
 
           STRAY=$(find . -maxdepth 1 -type f -name "*.tgz" | wc -l | tr -d " ")
           if [ "$STRAY" != "0" ]; then
