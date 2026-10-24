@@ -45,3 +45,63 @@ jobs:
 
       - name: Run tests
         run: pnpm test
+
+      # Docs-import check (abofs/stonyx#122): every stonyx import a consumer can
+      # copy out of README.md or docs/**/*.md must resolve against the package's
+      # real exports. This job holds no secrets -- no NPM_TOKEN, no CASCADE_PAT,
+      # only a read-only GITHUB_TOKEN that no step below is given -- and the
+      # check must stay in this job, never in npm-publish.yml or cascade.yml.
+      - name: Build
+        # The repo's own package resolves by self-reference to dist/, and not
+        # every consumer's `pnpm test` builds (stonyx-events, stonyx-logs).
+        run: pnpm run --if-present build
+
+      - name: Resolve stonyx-workflows ref
+        id: workflows-ref
+        env:
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_sha is empty. Refusing to fall back to a moving ref for the docs-import check."
+            exit 1
+          fi
+          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout stonyx-workflows (for docs-import check)
+        uses: actions/checkout@v4
+        with:
+          repository: abofs/stonyx-workflows
+          ref: ${{ steps.workflows-ref.outputs.sha }}
+          path: .stonyx-workflows
+          # Nothing reads git credentials out of this tree; the steps below only
+          # run scripts off disk (abofs/stonyx-workflows#35).
+          persist-credentials: false
+
+      - name: Install docs-import check tooling
+        # The checker's pinned TypeScript, installed inside the tooling tree.
+        # The script loads only this copy, never the consumer's.
+        working-directory: .stonyx-workflows
+        run: pnpm install --frozen-lockfile --ignore-scripts --ignore-workspace
+
+      - name: Install stonyx packages the docs import but the repo does not declare
+        # stonyx core's docs import modules that are not core dependencies.
+        # They are installed at @beta into a temp dir, never into the repo, with
+        # no lifecycle scripts. The names are validated against the stonyx
+        # npm-name grammar by the script before they reach npm.
+        run: |
+          set -euo pipefail
+          registry="$RUNNER_TEMP/stonyx-doc-registry"
+          mkdir -p "$registry"
+          names="$(node .stonyx-workflows/scripts/doc-registry-packages.mjs --repo .)"
+          if [ -z "$names" ]; then
+            echo "No undeclared stonyx packages imported by the docs."
+            exit 0
+          fi
+          specs=()
+          while IFS= read -r name; do specs+=("$name@beta"); done <<< "$names"
+          echo "Installing into $registry: ${specs[*]}"
+          cd "$registry"
+          npm install --prefix "$registry" --ignore-scripts --no-audit --no-fund --no-package-lock "${specs[@]}"
+
+      - name: Check doc imports
+        run: node .stonyx-workflows/scripts/check-doc-imports.mjs --repo . --resolve-from "$RUNNER_TEMP/stonyx-doc-registry"

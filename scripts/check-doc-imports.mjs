@@ -48,7 +48,7 @@
 import { existsSync, globSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 // Deliberately looser than the package-name grammar: `@stonyx/Orm` or
 // `@stonyx/orm/` must be extracted so TypeScript reports them (TS2307), not
@@ -292,19 +292,17 @@ function fileExistsWithProbe(path) {
 // ---------------------------------------------------------------------------
 // TypeScript
 
-function loadTypeScript(repo) {
-  // This repo's pinned TypeScript first, so the verdict does not depend on
-  // which TypeScript the checked repo happens to have; the repo's own as a
-  // fallback when this tree was not installed.
-  const candidates = [import.meta.url, pathToFileURL(join(repo, 'package.json')).href];
-  for (const from of candidates) {
-    try {
-      return createRequire(from)('typescript');
-    } catch {
-      // try the next
-    }
+function loadTypeScript() {
+  // Only this repo's pinned TypeScript, never the checked repo's: the verdict
+  // must not depend on which TypeScript the consumer has, and ci.yml runs this
+  // script inside the consumer's workspace, where the consumer's own
+  // node_modules are code the consumer controls. An uninstalled tooling tree
+  // is a usage error (exit 2), not a silent switch to the consumer's copy.
+  try {
+    return createRequire(import.meta.url)('typescript');
+  } catch {
+    throw new Error(`typescript is not installed next to ${fileURLToPath(import.meta.url)}; run pnpm install in the stonyx-workflows checkout`);
   }
-  throw new Error('typescript is not installed here or in the checked repo');
 }
 
 const ANONYMOUS_DEFAULT = /^_?default\d*$/;
@@ -396,6 +394,14 @@ function sanitize(text) {
 // ---------------------------------------------------------------------------
 // The check
 
+/** The default doc set: `README.md` and `docs/**\/*.md`, repo-relative. */
+export function discoverDocFiles(repo) {
+  return [
+    ...(existsSync(join(repo, 'README.md')) ? ['README.md'] : []),
+    ...globSync('docs/**/*.md', { cwd: repo }).sort(),
+  ];
+}
+
 /**
  * @param {{ repo: string, files?: string[], resolveFrom?: string[] }} opts
  * @returns {{ checked: number, failures: object[], skippedAnonymousDefault: object[],
@@ -407,14 +413,11 @@ export function checkDocImports({ repo, files, resolveFrom = [] }) {
   // the same directory (symlink vs realpath) is still reported repo-relative.
   repo = realpathSync(resolve(repo));
   resolveFrom = resolveFrom.map((d) => realpathSync(resolve(d)));
-  const ts = loadTypeScript(repo);
+  const ts = loadTypeScript();
 
   const docFiles = files?.length
     ? files.map((f) => relative(repo, realpathSync(resolve(repo, f))))
-    : [
-      ...(existsSync(join(repo, 'README.md')) ? ['README.md'] : []),
-      ...globSync('docs/**/*.md', { cwd: repo }).sort(),
-    ];
+    : discoverDocFiles(repo);
 
   const failures = [];
   const skippedAnonymousDefault = [];
