@@ -254,6 +254,24 @@ describe('red fixtures (each must name file:line and the code)', () => {
     const r = run('core-declares-cron', '--file', 'cases/red-declared-not-installed.md', '--resolve-from', join(root, 'registry'));
     assertRed(r, 'cases/red-declared-not-installed.md', 4, 'TS2307');
   });
+
+  // An untyped package never reaches TypeScript: findPackageDir alone decides
+  // whether it resolves, so its own/declared guard needs its own red case.
+  test('an untyped declared dependency the repo has not installed is not rescued by --resolve-from', () => {
+    const dir = join(root, 'core-declares-legacy');
+    cpSync(join(root, 'core'), dir, { recursive: true });
+    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ ...pkg, dependencies: { '@stonyx/legacy': '*' } }));
+    const r = run('core-declares-legacy', '--file', 'cases/red-declared-untyped-not-installed.md', '--resolve-from', join(root, 'registry'));
+    assertRed(r, 'cases/red-declared-untyped-not-installed.md', 4, 'TS2307');
+    assert.doesNotMatch(r.stdout, /1\.0\.0-registry-fixture/);
+  });
+
+  test('control: the same untyped package, undeclared, does resolve from --resolve-from', () => {
+    const r = run('core', '--file', 'cases/red-declared-untyped-not-installed.md', '--resolve-from', join(root, 'registry'));
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(r.summary.unchecked, 1, r.stdout);
+  });
 });
 
 describe('green fixtures', () => {
