@@ -1,1 +1,3 @@
 node_modules/
+# Committed fixture: a resolve-from directory must be named node_modules to be resolvable.
+!test/fixtures/doc-imports/registry/node_modules/

@@ -1,0 +1,11 @@
+{
+  "name": "stonyx",
+  "version": "0.0.0-fixture",
+  "private": true,
+  "type": "module",
+  "types": "./types/main.d.ts",
+  "exports": {
+    ".": { "types": "./types/main.d.ts", "default": "./types/main.js" },
+    "./config": { "types": "./types/config.d.ts", "default": "./types/config.js" }
+  }
+}
