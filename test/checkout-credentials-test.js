@@ -57,7 +57,9 @@ describe('#35 -- a privileged checkout does not persist its credential', () => {
     assert.deepEqual(perFile, rawPerFile, 'the reader and the raw count must agree about how many checkouts exist');
     assert.deepEqual(perFile, {
       'cascade.yml': 1,
-      'ci.yml': 1,
+      // The consumer checkout, and the stonyx-workflows tooling checkout for
+      // the docs-import check (abofs/stonyx#122).
+      'ci.yml': 2,
       'npm-publish.yml': 2,
       'security-audit.yml': 1,
       'self-ci.yml': 1,

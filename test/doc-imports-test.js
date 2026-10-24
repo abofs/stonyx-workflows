@@ -1,12 +1,14 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, globSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { cpSync, globSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { extractFences, extractImports, formatReport, matchExports } from '../scripts/check-doc-imports.mjs';
+import { docRegistryPackages } from '../scripts/doc-registry-packages.mjs';
 import { readWorkflow } from './helpers/workflow-yaml.js';
 
 // Committed red/green controls for scripts/check-doc-imports.mjs
@@ -318,11 +320,15 @@ describe('cli and output', () => {
   });
 });
 
-describe('unwired (part 1 of 2)', () => {
-  // Part 2 wires the step into ci.yml after the docs it fails on are fixed,
-  // and replaces this with the step assertion (#122 validation 3).
-  for (const file of ['ci.yml', 'npm-publish.yml', 'cascade.yml', 'security-audit.yml']) {
-    test(`${file} does not run check-doc-imports yet`, () => {
+describe('wired into ci.yml (part 2)', () => {
+  // Part 1 asserted no workflow ran the script. Part 2 wires it into the
+  // reusable ci.yml; the step-by-step assertions are in workflows-test.js.
+  test('ci.yml runs check-doc-imports against the consumer repo', () => {
+    assert.match(readWorkflow('ci.yml'), /^\s*run: node \.stonyx-workflows\/scripts\/check-doc-imports\.mjs --repo \. /m);
+  });
+
+  for (const file of ['npm-publish.yml', 'cascade.yml', 'security-audit.yml']) {
+    test(`${file} (which holds publish credentials or CASCADE_PAT, or is not the CI job) does not run it`, () => {
       assert.ok(!readWorkflow(file).includes('check-doc-imports'), file);
     });
   }
@@ -331,5 +337,98 @@ describe('unwired (part 1 of 2)', () => {
     const dirs = globSync('**/node_modules', { cwd: FIXTURES });
     assert.deepEqual(dirs, ['registry/node_modules']);
     assert.ok(readFileSync(new URL('../.gitignore', import.meta.url), 'utf8').includes('!test/fixtures/doc-imports/registry/node_modules/'));
+  });
+});
+
+describe('TypeScript comes from the tooling tree only, never the checked repo', () => {
+  // ci.yml runs the script inside the consumer's workspace. A fallback to the
+  // consumer's node_modules/typescript would let consumer-controlled code
+  // decide the verdict. Here the script sits in a directory with no
+  // TypeScript, and the checked repo HAS one: the run must refuse (exit 2),
+  // not borrow it.
+  let lone;
+  before(() => {
+    lone = mkdtempSync(join(tmpdir(), 's95-doc-imports-lone-'));
+    mkdirSync(join(lone, 'tool'));
+    cpSync(SCRIPT, join(lone, 'tool', 'check-doc-imports.mjs'));
+    cpSync(join(FIXTURES, 'discord'), join(lone, 'repo'), { recursive: true });
+    const realTs = dirname(createRequire(SCRIPT).resolve('typescript/package.json'));
+    mkdirSync(join(lone, 'repo', 'node_modules'));
+    symlinkSync(realTs, join(lone, 'repo', 'node_modules', 'typescript'), 'dir');
+  });
+  after(() => rmSync(lone, { recursive: true, force: true }));
+
+  test('with no TypeScript next to the script, the consumer copy is not used: exit 2', () => {
+    const r = runCli(join(lone, 'tool', 'check-doc-imports.mjs'), join(lone, 'repo'), '--file', 'cases/green-subpath.md');
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.equal(r.summary, null, r.stdout);
+    assert.match(r.stderr, /typescript is not installed next to /);
+  });
+
+  test('control: the same repo and doc pass with the tooling TypeScript', () => {
+    const r = runCli(SCRIPT, join(lone, 'repo'), '--file', 'cases/green-subpath.md');
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.ok(r.summary && Number(r.summary.checked) > 0, r.stdout);
+  });
+});
+
+describe('doc-registry-packages: what ci.yml installs at @beta for --resolve-from', () => {
+  const HELPER = fileURLToPath(new URL('../scripts/doc-registry-packages.mjs', import.meta.url));
+  let repo;
+  before(() => {
+    repo = mkdtempSync(join(tmpdir(), 's95-doc-registry-'));
+    writeFileSync(join(repo, 'package.json'), JSON.stringify({
+      name: 'stonyx',
+      dependencies: { '@stonyx/utils': '1' },
+      devDependencies: { '@stonyx/logs': '1' },
+      peerDependencies: { '@stonyx/events': '1' },
+    }));
+    writeFileSync(join(repo, 'README.md'), [
+      '```js',
+      "import { a } from '@stonyx/orm';",
+      "import Command from '@stonyx/discord/command';",
+      "import { b } from '@stonyx/utils/string';",
+      "import config from 'stonyx/config';",
+      '```',
+      'Prose mention: `@stonyx/prose-only` is not a fenced import.',
+    ].join('\n'));
+    mkdirSync(join(repo, 'docs', 'deep'), { recursive: true });
+    writeFileSync(join(repo, 'docs', 'deep', 'a.md'), [
+      '```ts',
+      "import { c } from '@stonyx/cron';",
+      "import { d } from '@stonyx/orm/db';",
+      "import { e } from '@stonyx/Orm';",
+      "import { f } from '@stonyx/$(touch pwned)';",
+      "import { g } from '@stonyx/events';",
+      "import { h } from '@stonyx/logs';",
+      '```',
+    ].join('\n'));
+  });
+  after(() => rmSync(repo, { recursive: true, force: true }));
+
+  test('lists undeclared stonyx packages only: not self, not any declared field, deduplicated, sorted', () => {
+    assert.deepEqual(docRegistryPackages(repo), ['@stonyx/cron', '@stonyx/discord', '@stonyx/orm']);
+  });
+
+  test('a name outside the stonyx npm-name grammar never reaches the output', () => {
+    // check-doc-imports fails these as unresolved; they must not become npm argv.
+    const out = docRegistryPackages(repo);
+    assert.ok(!out.some((n) => /Orm|\$|\(/.test(n)), out.join(','));
+  });
+
+  test('a module repo whose docs import only its declared deps lists nothing', () => {
+    // The shape every module repo has on dev today (measured): none needs the registry.
+    assert.deepEqual(docRegistryPackages(join(root, 'discord')), []);
+  });
+
+  test('CLI prints one name per line and exits 0; a bad argument exits 2', () => {
+    const ok = spawnSync(process.execPath, [HELPER, '--repo', repo], { encoding: 'utf8' });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(ok.stdout, '@stonyx/cron\n@stonyx/discord\n@stonyx/orm\n');
+    const bad = spawnSync(process.execPath, [HELPER, '--nope'], { encoding: 'utf8' });
+    assert.equal(bad.status, 2);
+    assert.equal(bad.stdout, '');
+    const missing = spawnSync(process.execPath, [HELPER, '--repo', join(repo, 'no-such-dir')], { encoding: 'utf8' });
+    assert.equal(missing.status, 2);
   });
 });

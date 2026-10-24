@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 
 import {
-  MissingStepKeyError, onKeys, parseSteps, readWorkflow, runBodyOf, stepRunBody, workflowPath,
+  MissingStepKeyError, onKeys, parseSteps, readWorkflow, runBodyOf, stepEnv, stepNamed, stepRunBody, workflowPath,
 } from './helpers/workflow-yaml.js';
 
 // Workflow-source assertions for abofs/stonyx-workflows#22 (story A).
@@ -166,10 +166,126 @@ describe('self-ci.yml gates this repo (#22 AC3)', () => {
   });
 });
 
+// abofs/stonyx#122 part 2: the docs-import check runs in the reusable ci.yml.
+// Every consumer calls ci.yml@main, so these assertions are what stands
+// between an edit here and a silently unchecked (or credentialed) check in
+// ten repos at once.
+
+const ci = readWorkflow('ci.yml');
+
+const DOC_STEPS = {
+  install: 'Install dependencies',
+  build: 'Build',
+  ref: 'Resolve stonyx-workflows ref',
+  checkout: 'Checkout stonyx-workflows (for docs-import check)',
+  tooling: 'Install docs-import check tooling',
+  registry: 'Install stonyx packages the docs import but the repo does not declare',
+  check: 'Check doc imports',
+};
+
+/** A step's `with:` (or other single-level mapping) entries, comments skipped. */
+function mappingOf(step, key) {
+  const lines = step.body.split('\n');
+  const at = lines.findIndex((l) => new RegExp(`^\\s*${key}:\\s*$`).test(l));
+  if (at === -1) return null;
+  const indent = lines[at].match(/^ */)[0].length;
+  const out = {};
+  for (const line of lines.slice(at + 1)) {
+    if (line.trim() === '' || line.trim().startsWith('#')) continue;
+    if (line.match(/^ */)[0].length <= indent) break;
+    const m = line.match(/^\s*([\w-]+):\s*(.*)$/);
+    assert.ok(m, `unreadable ${key}: line in ${step.name}: ${line}`);
+    out[m[1]] = m[2].trim();
+  }
+  return out;
+}
+
+/** A top-level `key: value` of the step itself (uses:, id:, working-directory:). */
+function stepKey(step, key) {
+  const lines = step.body.split('\n').filter((l) => l.trim() !== '');
+  const indent = Math.min(...lines.map((l) => l.match(/^ */)[0].length));
+  const line = lines.find((l) => l.match(/^ */)[0].length === indent && l.trim().startsWith(`${key}:`));
+  return line ? line.trim().slice(key.length + 1).trim() : null;
+}
+
 describe('ci.yml runs check-doc-imports (abofs/stonyx#122 part 2)', () => {
-  test.todo('ci.yml builds before the docs-import check');
-  test.todo('ci.yml checks out abofs/stonyx-workflows at job.workflow_sha with persist-credentials: false');
-  test.todo('the tooling TypeScript is installed inside the checked-out tooling dir, with --ignore-scripts');
-  test.todo('the check runs the checked-out script against the consumer repo');
-  test.todo('no workflow that holds publish credentials or CASCADE_PAT runs the check');
+  test('the docs-import steps exist once each, in order, after install', () => {
+    const names = parseSteps(ci).map((s) => s.name);
+    const positions = Object.values(DOC_STEPS).map((n) => {
+      assert.equal(names.filter((x) => x === n).length, 1, `exactly one step named ${n}`);
+      return names.indexOf(n);
+    });
+    assert.deepEqual(positions, [...positions].sort((a, b) => a - b), `steps out of order: ${names.join(' | ')}`);
+  });
+
+  test('ci.yml builds before the check (the repo resolves itself through dist/)', () => {
+    assert.equal(stepRunBody(ci, DOC_STEPS.build).trim(), 'pnpm run --if-present build');
+  });
+
+  test('the tooling ref is job.workflow_sha, and an empty one fails the job', () => {
+    const step = stepNamed(ci, DOC_STEPS.ref);
+    assert.equal(stepKey(step, 'id'), 'workflows-ref');
+    assert.equal(stepEnv(ci, DOC_STEPS.ref).WORKFLOW_SHA, '${{ job.workflow_sha }}');
+    const body = stepRunBody(ci, DOC_STEPS.ref);
+    assert.match(body, /if \[ -z "\$WORKFLOW_SHA" \]; then[\s\S]*exit 1[\s\S]*fi/);
+    assert.match(body, /echo "sha=\$WORKFLOW_SHA" >> "\$GITHUB_OUTPUT"/);
+  });
+
+  test('stonyx-workflows is checked out at that sha with persist-credentials: false', () => {
+    const step = stepNamed(ci, DOC_STEPS.checkout);
+    assert.match(stepKey(step, 'uses'), /^actions\/checkout@/);
+    assert.deepEqual(mappingOf(step, 'with'), {
+      repository: 'abofs/stonyx-workflows',
+      ref: '${{ steps.workflows-ref.outputs.sha }}',
+      path: '.stonyx-workflows',
+      'persist-credentials': 'false',
+    });
+  });
+
+  test('the tooling TypeScript is installed inside the checked-out tooling dir, with no lifecycle scripts', () => {
+    const step = stepNamed(ci, DOC_STEPS.tooling);
+    assert.equal(stepKey(step, 'working-directory'), '.stonyx-workflows');
+    assert.equal(runBodyOf(step).trim(), 'pnpm install --frozen-lockfile --ignore-scripts --ignore-workspace');
+  });
+
+  test('registry packages are installed at @beta into RUNNER_TEMP, never with lifecycle scripts', () => {
+    const body = stepRunBody(ci, DOC_STEPS.registry);
+    assert.match(body, /^\s*set -euo pipefail$/m);
+    assert.match(body, /registry="\$RUNNER_TEMP\/stonyx-doc-registry"/);
+    assert.match(body, /node \.stonyx-workflows\/scripts\/doc-registry-packages\.mjs --repo \./);
+    assert.match(body, /specs\+=\("\$name@beta"\)/);
+    // Every line that names an install, except a message that only mentions one.
+    const installs = body.split('\n')
+      .filter((l) => /\b(npm|pnpm|yarn)\s+(install|i|add|ci)\b/.test(l) && !/^\s*echo\b/.test(l));
+    assert.ok(installs.length >= 1, 'the step must install something');
+    for (const line of installs) {
+      assert.match(line, /--ignore-scripts/, line);
+      assert.match(line, /--prefix "\$registry"/, line);
+    }
+  });
+
+  test('the check runs the checked-out script against the consumer repo, with the registry dir', () => {
+    assert.equal(
+      stepRunBody(ci, DOC_STEPS.check).trim(),
+      'node .stonyx-workflows/scripts/check-doc-imports.mjs --repo . --resolve-from "$RUNNER_TEMP/stonyx-doc-registry"',
+    );
+    for (const script of ['scripts/check-doc-imports.mjs', 'scripts/doc-registry-packages.mjs']) {
+      assert.ok(existsSync(new URL(`../${script}`, import.meta.url)), `${script} must exist in this repo`);
+    }
+  });
+
+  test('the job holds no secrets and only a read-only token', () => {
+    assert.ok(!/\bsecrets\./.test(ci), 'ci.yml must not reference any secret');
+    assert.ok(!/CASCADE_PAT|NPM_TOKEN|NODE_AUTH_TOKEN/.test(ci.replace(/^\s*#.*$/gm, '')), 'no credential names outside comments');
+    assert.match(ci, /^permissions:\n {2}contents: read\n/m);
+    assert.ok(!/^ +permissions:/m.test(ci), 'no job-level permissions override');
+  });
+
+  for (const file of ['npm-publish.yml', 'cascade.yml', 'security-audit.yml', 'self-ci.yml']) {
+    test(`${file} does not run the docs-import check (it stays out of credentialed workflows)`, () => {
+      const text = readWorkflow(file);
+      assert.ok(!text.includes('check-doc-imports'), file);
+      assert.ok(!text.includes('doc-registry-packages'), file);
+    });
+  }
 });

@@ -46,12 +46,13 @@ jobs:
       - name: Run tests
         run: pnpm test
 
-      # Docs-import check (abofs/stonyx#122): every stonyx import a consumer can
-      # copy out of README.md or docs/**/*.md must resolve against the package's
-      # real exports. This job holds no secrets -- no NPM_TOKEN, no CASCADE_PAT,
-      # only a read-only GITHUB_TOKEN that no step below is given -- and the
-      # check must stay in this job, never in npm-publish.yml or cascade.yml.
       - name: Build
+        # The docs-import check (abofs/stonyx#122) starts here. Every stonyx
+        # import a consumer can copy out of README.md or docs/**/*.md must
+        # resolve against the package's real exports. This job holds no
+        # secrets -- no NPM_TOKEN, no CASCADE_PAT, only a read-only GITHUB_TOKEN
+        # that no step below is given -- and the check must stay in this job,
+        # never in npm-publish.yml or cascade.yml.
         # The repo's own package resolves by self-reference to dist/, and not
         # every consumer's `pnpm test` builds (stonyx-events, stonyx-logs).
         run: pnpm run --if-present build
@@ -101,7 +102,20 @@ jobs:
           while IFS= read -r name; do specs+=("$name@beta"); done <<< "$names"
           echo "Installing into $registry: ${specs[*]}"
           cd "$registry"
-          npm install --prefix "$registry" --ignore-scripts --no-audit --no-fund --no-package-lock "${specs[@]}"
+          # A module publish moves its beta dist-tag before every registry
+          # mirror serves the new version (measured: ETARGET for a tag only
+          # seconds old), so an install racing a publish is retried, boundedly.
+          for attempt in 1 2 3; do
+            if npm install --prefix "$registry" --ignore-scripts --no-audit --no-fund --no-package-lock "${specs[@]}"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "npm install failed (attempt $attempt of 3); retrying in 30s"
+              sleep 30
+            fi
+          done
+          echo "::error::Could not install ${specs[*]} from the registry after 3 attempts."
+          exit 1
 
       - name: Check doc imports
         run: node .stonyx-workflows/scripts/check-doc-imports.mjs --repo . --resolve-from "$RUNNER_TEMP/stonyx-doc-registry"

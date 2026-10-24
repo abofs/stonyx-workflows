@@ -192,6 +192,24 @@ export const EXPRESSION_ALLOWLIST = {
         + 'actions/setup-node. An action input, not program text; nothing in this file interpolates it into a '
         + 'run: body.',
     },
+    {
+      line: 'WORKFLOW_SHA: ${{ job.workflow_sha }}',
+      context: 'jobs > test > steps > env',
+      expression: '${{ job.workflow_sha }}',
+      occurrences: 1,
+      why: 'job.workflow_sha is runner context -- the commit of this reusable ci.yml -- reaching a step `env:` '
+        + 'value for the docs-import check (abofs/stonyx#122). The run: body refuses to continue when '
+        + '"$WORKFLOW_SHA" is empty rather than letting the checkout fall back to a moving ref.',
+    },
+    {
+      line: 'ref: ${{ steps.workflows-ref.outputs.sha }}',
+      context: 'jobs > test > steps > with',
+      expression: '${{ steps.workflows-ref.outputs.sha }}',
+      occurrences: 1,
+      why: 'steps.workflows-ref.outputs.sha is the pinned stonyx-workflows commit produced by the step above, '
+        + 'reaching the `ref:` input of actions/checkout for the docs-import tooling. An action input, and the '
+        + 'value is a SHA this workflow derived, not consumer text.',
+    },
   ],
 
   'npm-publish.yml': [
