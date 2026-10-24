@@ -165,3 +165,11 @@ describe('self-ci.yml gates this repo (#22 AC3)', () => {
     }
   });
 });
+
+describe('ci.yml runs check-doc-imports (abofs/stonyx#122 part 2)', () => {
+  test.todo('ci.yml builds before the docs-import check');
+  test.todo('ci.yml checks out abofs/stonyx-workflows at job.workflow_sha with persist-credentials: false');
+  test.todo('the tooling TypeScript is installed inside the checked-out tooling dir, with --ignore-scripts');
+  test.todo('the check runs the checked-out script against the consumer repo');
+  test.todo('no workflow that holds publish credentials or CASCADE_PAT runs the check');
+});
