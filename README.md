@@ -72,7 +72,7 @@ jobs:
 Reusable workflow for publishing npm packages with alpha/beta/stable release stages and cascade support.
 
 **Features:**
-- **Alpha** (PR): Dynamic version calculation from npm, no commit to PR branch, no tag/release
+- **Alpha** (PR): Dynamic version calculation from npm, no commit to PR branch, no tag/release. Comments the published version and its `pnpm add` install command on the PR (`Comment on PR with alpha version` step)
 - **Beta** (push to any branch other than `main`, i.e. a merge to `dev`, or cascade): Dynamic version calculation, commits the bump to the pushed branch, creates tag + GitHub release
 - **Stable** (push to `main`): `pnpm version patch` (drops the prerelease suffix), commits to `main`, creates tag + GitHub release. Manual dispatch with `patch`/`minor`/`major` or `custom-version` also publishes a non-prerelease version, but dispatch is frozen
 - **Cascade mode**: When triggered via `cascade-source`, updates all `@stonyx/*` dependencies to latest from npm before publishing, and installs with `--no-frozen-lockfile` instead of `--frozen-lockfile` so the updated ranges can resolve
@@ -258,7 +258,7 @@ guard never got as far as packing.
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `CASCADE_PAT` | No | PAT with `repo` scope. Required when `cascade-source` is set (used for checkout token to push back to main) |
+| `CASCADE_PAT` | No | PAT with `repo` scope. Required when `cascade-source` is set (used as the checkout token, and to push the beta bump back to the checked-out branch: the dispatch's `github.ref`, which is the repo's default branch) |
 
 **Outputs:**
 
@@ -945,7 +945,7 @@ Create a GitHub PAT (or fine-grained token) with `repo` scope and store it as an
 
 This token is used for:
 1. **`cascade.yml`** — `repos.createDispatchEvent()` API calls to trigger downstream repos
-2. **`npm-publish.yml`** — checkout token during cascade mode, enabling `git push` back to `main`
+2. **`npm-publish.yml`** — checkout token during cascade mode, enabling `git push` back to the checked-out branch (the repo's default branch, since a `repository_dispatch` runs on it)
 
 Child repos pass it via `secrets: inherit` (org secrets are automatically available).
 
