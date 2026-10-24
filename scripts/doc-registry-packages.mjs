@@ -27,17 +27,14 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { discoverDocFiles, extractImports, splitSpec } from './check-doc-imports.mjs';
+import { declaredNames, discoverDocFiles, extractImports, splitSpec } from './check-doc-imports.mjs';
 
 export const PACKAGE_NAME_RE = /^(?:stonyx|@stonyx\/[a-z0-9][a-z0-9-]*)$/;
-
-const DEP_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
 
 export function docRegistryPackages(repo) {
   repo = realpathSync(resolve(repo));
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
-  const known = new Set([pkg.name]);
-  for (const field of DEP_FIELDS) for (const name of Object.keys(pkg[field] ?? {})) known.add(name);
+  const known = declaredNames(pkg);
 
   const wanted = new Set();
   for (const file of discoverDocFiles(repo)) {

@@ -1,7 +1,7 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, globSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -12,7 +12,7 @@ import { docRegistryPackages } from '../scripts/doc-registry-packages.mjs';
 import { readWorkflow } from './helpers/workflow-yaml.js';
 
 // Committed red/green controls for scripts/check-doc-imports.mjs
-// (abofs/stonyx#122, part 1: the checker, merged unwired).
+// (abofs/stonyx#122: the checker, part 1, and its ci.yml wiring, part 2).
 //
 // Every red case asserts the exact `file:line: CODE` it must print, not just a
 // non-zero exit: a crash (syntax error, missing typescript) also exits non-zero
@@ -236,6 +236,24 @@ describe('red fixtures (each must name file:line and the code)', () => {
     const r = run('core', '--file', 'cases/green-registry.md');
     assertRed(r, 'cases/green-registry.md', 6, 'TS2307');
   });
+
+  // ci.yml's registry dir holds a published `stonyx` (every module depends on
+  // it). The repo's own name must never resolve from there, or deleting a
+  // subpath from core's exports passes against the published copy.
+  test('the repo\'s own subpath missing from its exports is not rescued by a published copy in --resolve-from', () => {
+    const r = run('core', '--file', 'cases/red-self-not-in-own-exports.md', '--resolve-from', join(root, 'registry'));
+    assertRed(r, 'cases/red-self-not-in-own-exports.md', 4, 'TS2307');
+    assert.doesNotMatch(r.stdout, /9\.9\.9-registry-fixture/);
+  });
+
+  test('a declared dependency the repo has not installed is not rescued by --resolve-from', () => {
+    const dir = join(root, 'core-declares-cron');
+    cpSync(join(root, 'core'), dir, { recursive: true });
+    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ ...pkg, dependencies: { '@stonyx/cron': '*' } }));
+    const r = run('core-declares-cron', '--file', 'cases/red-declared-not-installed.md', '--resolve-from', join(root, 'registry'));
+    assertRed(r, 'cases/red-declared-not-installed.md', 4, 'TS2307');
+  });
 });
 
 describe('green fixtures', () => {
@@ -341,28 +359,43 @@ describe('wired into ci.yml (part 2)', () => {
 });
 
 describe('TypeScript comes from the tooling tree only, never the checked repo', () => {
-  // ci.yml runs the script inside the consumer's workspace. A fallback to the
-  // consumer's node_modules/typescript would let consumer-controlled code
-  // decide the verdict. Here the script sits in a directory with no
-  // TypeScript, and the checked repo HAS one: the run must refuse (exit 2),
-  // not borrow it.
+  // ci.yml checks the tooling out INSIDE the consumer, at
+  // <consumer>/.stonyx-workflows, so Node's ancestor walk from the script
+  // reaches <consumer>/node_modules. These runs use that exact nesting, with
+  // no TypeScript installed in the tooling tree: the run must refuse (exit 2),
+  // not borrow, and never execute, the consumer's copy.
   let lone;
+  const nestedScript = (repo) => join(lone, repo, '.stonyx-workflows', 'scripts', 'check-doc-imports.mjs');
   before(() => {
     lone = mkdtempSync(join(tmpdir(), 's95-doc-imports-lone-'));
-    mkdirSync(join(lone, 'tool'));
-    cpSync(SCRIPT, join(lone, 'tool', 'check-doc-imports.mjs'));
-    cpSync(join(FIXTURES, 'discord'), join(lone, 'repo'), { recursive: true });
+    for (const repo of ['repo', 'planted']) {
+      cpSync(join(FIXTURES, 'discord'), join(lone, repo), { recursive: true });
+      mkdirSync(dirname(nestedScript(repo)), { recursive: true });
+      cpSync(SCRIPT, nestedScript(repo));
+      mkdirSync(join(lone, repo, 'node_modules'));
+    }
+    // A real TypeScript in the consumer: borrowing it would pass the doc.
     const realTs = dirname(createRequire(SCRIPT).resolve('typescript/package.json'));
-    mkdirSync(join(lone, 'repo', 'node_modules'));
     symlinkSync(realTs, join(lone, 'repo', 'node_modules', 'typescript'), 'dir');
+    // A consumer-written "typescript": loading it runs consumer code.
+    const fake = join(lone, 'planted', 'node_modules', 'typescript');
+    mkdirSync(fake);
+    writeFileSync(join(fake, 'package.json'), JSON.stringify({ name: 'typescript', version: '0.0.0-planted', main: 'index.js' }));
+    writeFileSync(join(fake, 'index.js'), `require('node:fs').writeFileSync(${JSON.stringify(join(lone, 'PLANTED-RAN'))}, '1');\n`);
   });
   after(() => rmSync(lone, { recursive: true, force: true }));
 
-  test('with no TypeScript next to the script, the consumer copy is not used: exit 2', () => {
-    const r = runCli(join(lone, 'tool', 'check-doc-imports.mjs'), join(lone, 'repo'), '--file', 'cases/green-subpath.md');
+  test('nested under a consumer that has TypeScript, with none in the tooling tree: exit 2, not the consumer copy', () => {
+    const r = runCli(nestedScript('repo'), join(lone, 'repo'), '--file', 'cases/green-subpath.md');
     assert.equal(r.status, 2, r.stdout + r.stderr);
     assert.equal(r.summary, null, r.stdout);
-    assert.match(r.stderr, /typescript is not installed next to /);
+    assert.match(r.stderr, /typescript is not installed next to .*refusing .*, which is outside /);
+  });
+
+  test('a consumer-planted typescript is never executed', () => {
+    const r = runCli(nestedScript('planted'), join(lone, 'planted'), '--file', 'cases/green-subpath.md');
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.ok(!existsSync(join(lone, 'PLANTED-RAN')), 'the consumer\'s node_modules/typescript ran');
   });
 
   test('control: the same repo and doc pass with the tooling TypeScript', () => {
