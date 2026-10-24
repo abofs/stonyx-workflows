@@ -1,9 +1,9 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, globSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, globSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { extractFences, extractImports, formatReport, matchExports } from '../scripts/check-doc-imports.mjs';
@@ -31,7 +31,11 @@ before(() => {
 after(() => rmSync(root, { recursive: true, force: true }));
 
 function run(repo, ...args) {
-  const r = spawnSync(process.execPath, [SCRIPT, '--repo', join(root, repo), ...args], { encoding: 'utf8' });
+  return runCli(SCRIPT, join(root, repo), ...args);
+}
+
+function runCli(script, repoPath, ...args) {
+  const r = spawnSync(process.execPath, [script, '--repo', repoPath, ...args], { encoding: 'utf8' });
   const summary = r.stdout.match(/^check-doc-imports: files=(\d+) checked=(\d+) failed=(\d+) skipped-anonymous-default=(\d+) members-unchecked=(\d+) typescript=(\S+)$/m);
   return {
     status: r.status,
@@ -104,6 +108,27 @@ describe('extraction', () => {
     const { statements, unextracted } = extractImports(md);
     assert.deepEqual(statements, []);
     assert.deepEqual(unextracted, [{ line: 4, spec: '@stonyx/orm', lang: 'sh' }]);
+  });
+
+  test('a // comment inside a multi-line import does not stop extraction', () => {
+    const md = "```js\nimport {\n  Command, // the base class\n  type Ctx, /* ctx */\n} from '@stonyx/discord/command';\n```";
+    const { statements, unextracted } = extractImports(md);
+    assert.deepEqual(statements.map((s) => [s.line, s.spec]), [[2, '@stonyx/discord/command']]);
+    assert.deepEqual(unextracted, []);
+  });
+
+  test('commented-out imports are neither checked nor failed; live code beside them is', () => {
+    const md = "```js\n// import A from '@stonyx/a';\n/* import B from '@stonyx/b';\n   import C from '@stonyx/c'; */\nconst u = 'http://x'; import D from '@stonyx/d'; // import E from '@stonyx/e'\n```";
+    const { statements, unextracted } = extractImports(md);
+    assert.deepEqual(statements.map((s) => [s.line, s.spec]), [[5, '@stonyx/d']]);
+    assert.deepEqual(unextracted, []);
+  });
+
+  test('specs outside the package-name grammar are extracted (so TS reports them), not ignored', () => {
+    const md = "```js\nimport A from '@stonyx/Orm';\nimport B from '@stonyx/orm/';\nimport C from 'stonyx/';\nimport D from 'stonyx-utils';\nimport E from '@stonyxx/orm';\n```";
+    const { statements, unextracted } = extractImports(md);
+    assert.deepEqual(statements.map((s) => s.spec), ['@stonyx/Orm', '@stonyx/orm/', 'stonyx/']);
+    assert.deepEqual(unextracted, []);
   });
 
   test('exports matching follows Node: exact key first, then longest wildcard prefix', () => {
@@ -241,6 +266,31 @@ describe('cli and output', () => {
     const r = spawnSync(process.execPath, [SCRIPT, '--nope'], { encoding: 'utf8' });
     assert.equal(r.status, 2);
     assert.match(r.stderr, /unknown argument: --nope/);
+  });
+
+  // The entry guard once compared resolve(argv[1]) with import.meta.url, which
+  // Node gives as the realpath: invoked through any symlink (macOS /tmp, a
+  // symlinked checkout) the script printed nothing and exited 0.
+  test('invoked through a symlinked directory or file, the CLI still checks', () => {
+    symlinkSync(dirname(SCRIPT), join(root, 'scripts-link'), 'dir');
+    symlinkSync(SCRIPT, join(root, 'script-link.mjs'), 'file');
+    for (const script of [join(root, 'scripts-link', 'check-doc-imports.mjs'), join(root, 'script-link.mjs')]) {
+      const r = runCli(script, join(root, 'discord'), '--file', 'cases/red-missing-member.md');
+      assertRed(r, 'cases/red-missing-member.md', 4, 'TS2614');
+    }
+  });
+
+  test('a symlinked --repo with a --file given by its realpath reports the file repo-relative', () => {
+    symlinkSync(join(root, 'discord'), join(root, 'discord-link'), 'dir');
+    const file = join(realpathSync(root), 'discord', 'cases', 'red-missing-member.md');
+    assertRed(runCli(SCRIPT, join(root, 'discord-link'), '--file', file), 'cases/red-missing-member.md', 4, 'TS2614');
+  });
+
+  test('a --repo that does not exist exits 2, not a vacuous 0', () => {
+    const r = run('no-such-repo');
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.equal(r.summary, null, r.stdout);
+    assert.match(r.stderr, /ENOENT/);
   });
 
   test('doc-derived text cannot start an output line (workflow commands are line-anchored)', () => {
