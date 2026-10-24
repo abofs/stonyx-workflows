@@ -75,7 +75,7 @@ Reusable workflow for publishing npm packages with alpha/beta/stable release sta
 - **Alpha** (PR): Dynamic version calculation from npm, no commit to PR branch, no tag/release
 - **Beta** (merge to main or cascade): Dynamic version calculation, commits to main, creates tag + GitHub release
 - **Stable** (manual dispatch): Patch/minor/major bump, creates tag + GitHub release
-- **Cascade mode**: When triggered via `cascade-source`, updates all `@stonyx/*` dependencies to latest from npm before publishing
+- **Cascade mode**: When triggered via `cascade-source`, updates all `@stonyx/*` dependencies to latest from npm before publishing, and installs with `--no-frozen-lockfile` instead of `--frozen-lockfile` so the updated ranges can resolve
 
 **Note for consumers:** on the alpha and beta paths this workflow checks
 `abofs/stonyx-workflows` out into `.stonyx-workflows/` in your workspace to
@@ -864,7 +864,9 @@ patterns** is the rule the checks themselves are built to:
 }
 ```
 
-To add a new package or dependency relationship, edit `dependency-map.json` and submit a PR.
+The map is not derived from any `package.json`: nothing detects a new package or a changed dependency, so it must be edited by hand. To add a new package or dependency relationship, edit `dependency-map.json` and submit a PR.
+
+`cascade.yml` deduplicates `dependents` by `repo` before dispatching, so a repo listed under both `dependencies` and `devDependencies` receives one `repository_dispatch`, not two.
 
 ---
 
