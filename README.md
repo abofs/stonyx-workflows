@@ -59,7 +59,8 @@ does not resolve against the package's real `exports` fails CI
    as `TS2307` at its doc `file:line` and the other names still install. Any
    other `npm view` failure keeps the name for the install. A published
    package with no `beta` dist-tag still fails this step. Today only stonyx
-   core needs this step: its docs import orm, discord, cron and rest-server.
+   core needs this step; `node scripts/doc-registry-packages.mjs --repo
+   <repo>` prints the set it installs, so this README does not list it.
    The repo's own package and its declared dependencies are never resolved
    from this directory, even though it holds a published `stonyx` (every
    module depends on it).
@@ -70,9 +71,8 @@ The job holds no secrets: no `NPM_TOKEN`, no `CASCADE_PAT`. Its read-only
 `GITHUB_TOKEN` reaches only the `actions/checkout` and setup actions, as their
 default `token:` input. No checkout persists it (`persist-credentials:
 false`), and no `run:` step has it in its environment. The check is
-deliberately not in
-`npm-publish.yml` or `cascade.yml`, and `test/workflows-test.js` reds if it
-appears there.
+deliberately not in `npm-publish.yml` or `cascade.yml`, and
+`test/workflows-test.js` reds if it appears there.
 
 Registry mode is not deterministic: a module publish can turn stonyx core's
 CI red with no core change. That is the drift the check exists to surface;
@@ -546,7 +546,7 @@ node path/to/check-doc-imports.mjs --repo . [--resolve-from <dir>]... [--file <d
   commented-out stonyx import is `UNEXTRACTED` too: delete it or move it to
   prose.
 - **`--resolve-from <dir>`:** a directory holding a `node_modules/`, tried
-  for any import the repo cannot resolve. stonyx core's docs import modules
+  for any import of a package the repo neither is nor declares. stonyx core's docs import modules
   that are not core dependencies; those are installed there (with
   `--ignore-scripts`) rather than added to core's devDependencies, which
   `loadModules` would boot. Every TypeScript failure names the resolved

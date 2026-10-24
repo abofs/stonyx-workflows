@@ -5,9 +5,10 @@
  *
  * ci.yml installs each of these at `@beta` (with `--ignore-scripts`) into a
  * temp directory and passes it to check-doc-imports.mjs as `--resolve-from`.
- * That is how stonyx core's docs, which import orm, discord, cron and
- * rest-server, are checked without adding those modules to core's
- * devDependencies (`loadModules` reads devDependencies and would boot them).
+ * That is how stonyx core's docs, which import modules core does not depend
+ * on, are checked without adding those modules to core's devDependencies
+ * (`loadModules` reads devDependencies and would boot them). Run this script
+ * for the current set; it is derived, so it is not listed here.
  *
  * Declared means listed in `dependencies`, `devDependencies`,
  * `peerDependencies` or `optionalDependencies`; those resolve from the repo's
