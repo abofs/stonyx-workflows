@@ -1,9 +1,16 @@
-import { describe, test } from 'node:test';
+import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
-  MissingStepKeyError, onKeys, parseSteps, readWorkflow, runBodyOf, stepEnv, stepNamed, stepRunBody, workflowPath,
+  MissingStepKeyError, onKeys, parseSteps, readWorkflow, runBodyOf, scalarKeyLineCount, stepEnv, stepNamed, stepRunBody,
+  workflowPath,
 } from './helpers/workflow-yaml.js';
 
 // Workflow-source assertions for abofs/stonyx-workflows#22 (story A).
@@ -208,6 +215,16 @@ function stepKey(step, key) {
   return line ? line.trim().slice(key.length + 1).trim() : null;
 }
 
+/** The step's own keys (quoted or not), at the step's key indent. */
+function topLevelKeys(step) {
+  const lines = step.body.split('\n').filter((l) => l.trim() !== '');
+  const indent = Math.min(...lines.map((l) => l.match(/^ */)[0].length));
+  return lines
+    .filter((l) => l.match(/^ */)[0].length === indent)
+    .map((l) => l.trim().match(/^(['"]?)([\w-]+)\1\s*:/)?.[2])
+    .filter(Boolean);
+}
+
 describe('ci.yml runs check-doc-imports (abofs/stonyx#122 part 2)', () => {
   test('the docs-import steps exist once each, in order, after install', () => {
     const names = parseSteps(ci).map((s) => s.name);
@@ -274,6 +291,40 @@ describe('ci.yml runs check-doc-imports (abofs/stonyx#122 part 2)', () => {
     }
   });
 
+  // Deleting a step is caught above; switching one off is the same defect in
+  // a smaller form. `if: false` skips it and `continue-on-error: true` turns
+  // its failure green, on every caller at once.
+  for (const name of Object.values(DOC_STEPS)) {
+    test(`${name}: no if: and no continue-on-error: (the step cannot be switched off)`, () => {
+      const top = topLevelKeys(stepNamed(ci, name));
+      assert.ok(!top.includes('if'), `${name} has an if:`);
+      assert.ok(!top.includes('continue-on-error'), `${name} has continue-on-error:`);
+    });
+  }
+
+  test('nor can the whole job: no continue-on-error anywhere, no if: on the job', () => {
+    assert.equal(scalarKeyLineCount(ci, 'continue-on-error'), 0);
+    const lines = ci.split('\n');
+    const job = lines.findIndex((l) => /^ {2}test:\s*$/.test(l));
+    const steps = lines.findIndex((l, i) => i > job && /^ {4}steps:\s*$/.test(l));
+    assert.ok(job !== -1 && steps > job, 'jobs.test and its steps: located');
+    const header = lines.slice(job + 1, steps).filter((l) => /^ {4}['"]?if['"]?\s*:/.test(l));
+    assert.deepEqual(header, [], 'jobs.test has an if:');
+  });
+
+  test('the registry step\'s failure exit is pinned: it ends in exit 1, and nothing in it swallows a status', () => {
+    const body = stepRunBody(ci, DOC_STEPS.registry);
+    const lines = body.split('\n').map((l) => l.trim()).filter((l) => l !== '');
+    assert.equal(lines.at(-1), 'exit 1');
+    assert.match(lines.at(-2), /^echo "::error::Could not install /);
+    for (const name of Object.values(DOC_STEPS)) {
+      const step = stepNamed(ci, name);
+      if (!topLevelKeys(step).includes('run')) continue;
+      const run = runBodyOf(step);
+      assert.ok(!/\|\|\s*(true|:|exit 0)\b|\bset \+e\b/.test(run), `${name} swallows a failure status`);
+    }
+  });
+
   test('the job holds no secrets and only a read-only token', () => {
     assert.ok(!/\bsecrets\./.test(ci), 'ci.yml must not reference any secret');
     assert.ok(!/CASCADE_PAT|NPM_TOKEN|NODE_AUTH_TOKEN/.test(ci.replace(/^\s*#.*$/gm, '')), 'no credential names outside comments');
@@ -288,4 +339,103 @@ describe('ci.yml runs check-doc-imports (abofs/stonyx#122 part 2)', () => {
       assert.ok(!text.includes('doc-registry-packages'), file);
     });
   }
+});
+
+// The registry step's real body, run under bash with a stub `npm` on PATH: a
+// name npm says does not exist is skipped (so the check reports it at its doc
+// line), any other npm failure keeps it, and an install that keeps failing
+// fails the step. `sleep` is stubbed so the retry costs no time.
+describe('ci.yml registry step, executed with a stub npm', () => {
+  const body = stepRunBody(ci, DOC_STEPS.registry);
+  const TOOLING = fileURLToPath(new URL('..', import.meta.url));
+  let dir;
+
+  before(() => {
+    dir = mkdtempSync(join(tmpdir(), 's95-registry-step-'));
+    mkdirSync(join(dir, 'bin'));
+    // Stub npm. `view <name>`: E404 for names in NPM_404, another error for
+    // names in NPM_DOWN, else success. `install`: logs its argv, then exits
+    // NPM_INSTALL_RC.
+    writeFileSync(join(dir, 'bin', 'npm'), [
+      '#!/bin/sh',
+      'if [ "$1" = view ]; then',
+      '  case " $NPM_404 " in *" $2 "*) echo "npm error code E404" >&2; exit 1;; esac',
+      '  case " $NPM_DOWN " in *" $2 "*) echo "npm error code ECONNRESET" >&2; exit 1;; esac',
+      '  echo "$2"; exit 0',
+      'fi',
+      'echo "$*" >> "$NPM_LOG"',
+      'exit "${NPM_INSTALL_RC:-0}"',
+      '',
+    ].join('\n'));
+    writeFileSync(join(dir, 'bin', 'sleep'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(dir, 'bin', 'npm'), 0o755);
+    chmodSync(join(dir, 'bin', 'sleep'), 0o755);
+
+    const repo = join(dir, 'repo');
+    mkdirSync(repo);
+    writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'stonyx' }));
+    writeFileSync(join(repo, 'README.md'), [
+      '```js',
+      "import Orm from '@stonyx/orm';",
+      "import Typo from '@stonyx/rest-servr';",
+      '```',
+    ].join('\n'));
+    symlinkSync(TOOLING, join(repo, '.stonyx-workflows'), 'dir');
+  });
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  function runStep(env, repo = join(dir, 'repo')) {
+    const log = join(dir, `npm-${Math.random().toString(36).slice(2)}.log`);
+    writeFileSync(log, '');
+    const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', body], {
+      cwd: repo,
+      encoding: 'utf8',
+      env: {
+        PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+        RUNNER_TEMP: join(dir, 'runner-temp'),
+        NPM_LOG: log,
+        ...env,
+      },
+    });
+    const installs = readFileSync(log, 'utf8').split('\n').filter(Boolean);
+    return { ...r, installs, out: r.stdout + r.stderr };
+  }
+
+  test('an unpublished name is skipped, not retried; the published one is still installed', () => {
+    const r = runStep({ NPM_404: '@stonyx/rest-servr' });
+    assert.equal(r.status, 0, r.out);
+    assert.equal(r.installs.length, 1, r.out);
+    assert.match(r.installs[0], /@stonyx\/orm@beta/);
+    assert.doesNotMatch(r.installs[0], /rest-servr/);
+    assert.match(r.stdout, /@stonyx\/rest-servr is not published/);
+  });
+
+  test('a non-404 npm view failure does not skip the name: it reaches the install', () => {
+    const r = runStep({ NPM_DOWN: '@stonyx/rest-servr' });
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.installs[0], /@stonyx\/rest-servr@beta/);
+  });
+
+  test('every name unpublished: nothing installed, exit 0 (the check reports each at its doc line)', () => {
+    const r = runStep({ NPM_404: '@stonyx/orm @stonyx/rest-servr' });
+    assert.equal(r.status, 0, r.out);
+    assert.deepEqual(r.installs, []);
+  });
+
+  test('an install that keeps failing fails the step after 3 attempts', () => {
+    const r = runStep({ NPM_INSTALL_RC: '1' });
+    assert.equal(r.status, 1, r.out);
+    assert.equal(r.installs.length, 3, r.out);
+    assert.match(r.stdout, /^::error::Could not install /m);
+  });
+
+  test('a failing name helper fails the step, not an empty install list', () => {
+    const bad = join(dir, 'bad-repo');
+    mkdirSync(bad, { recursive: true });
+    writeFileSync(join(bad, 'package.json'), '{ not json');
+    symlinkSync(TOOLING, join(bad, '.stonyx-workflows'), 'dir');
+    const r = runStep({}, bad);
+    assert.notEqual(r.status, 0, r.out);
+    assert.doesNotMatch(r.stdout, /No undeclared stonyx packages/);
+  });
 });
