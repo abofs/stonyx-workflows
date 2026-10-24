@@ -2,5 +2,5 @@
 
 ```js
 import Command from '@stonyx/discord/command';
-import { /* the bot */ default as Bot } from '@stonyx/discord/bot';
+import { "default" as Bot } from '@stonyx/discord/bot';
 ```

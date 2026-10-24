@@ -11,7 +11,8 @@
  *   - Statements: `import ... from`, `export ... from` and side-effect
  *     `import '...'` of `stonyx`, `stonyx/<subpath>`, `@stonyx/<pkg>` and
  *     `@stonyx/<pkg>/<subpath>`.
- *   - Out of scope: dynamic `import('...')`, `require(...)`, prose and inline
+ *   - Out of scope: imports of anything but `stonyx` / `@stonyx/*` (e.g.
+ *     discord.js), dynamic `import('...')`, `require(...)`, prose and inline
  *     code spans, indented (non-fenced) code blocks.
  *
  * Mechanism
@@ -44,12 +45,15 @@
  * Exit status: 0 clean, 1 failures, 2 usage or internal error.
  */
 
-import { existsSync, globSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, globSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const SPEC_RE = /^(?:stonyx|@stonyx\/[a-z0-9][a-z0-9._-]*)(?:\/[^'"\s]+)?$/;
+// Deliberately looser than the package-name grammar: `@stonyx/Orm` or
+// `@stonyx/orm/` must be extracted so TypeScript reports them (TS2307), not
+// ignored by both the extractors and the guard.
+export const SPEC_RE = /^(?:stonyx|@stonyx)(?:\/[^'"\s]*)?$/;
 
 const JS_LANGS = new Set([
   '', 'js', 'javascript', 'mjs', 'cjs', 'jsx', 'ts', 'typescript', 'mts', 'cts', 'tsx', 'gjs', 'gts',
@@ -106,6 +110,41 @@ export function extractFences(markdown) {
   return fences;
 }
 
+/**
+ * Blank out JS comments, keeping length and newlines so offsets and line
+ * numbers are unchanged. Strings are skipped. A comment opener counts only at
+ * the start of a line or after whitespace or one of `;,(){}[]=`, so a `/*` or
+ * `//` inside a regex literal (`/\/*\/`) does not start one and hide the rest
+ * of the fence, and an unclosed `/*` masks nothing. Only the extractors read
+ * the masked text; the guard reads the raw fence, so a misread here can turn a
+ * statement UNEXTRACTED (red) but can never hide one.
+ */
+export function maskComments(text) {
+  const out = text.split('');
+  let quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === '\\') i++;
+      else if (c === quote || (c === '\n' && quote !== '`')) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      quote = c;
+      continue;
+    }
+    if (c !== '/' || (text[i + 1] !== '/' && text[i + 1] !== '*')) continue;
+    if (i > 0 && !/[\s;,(){}[\]=]/.test(text[i - 1])) continue;
+    const close = text[i + 1] === '/' ? text.indexOf('\n', i) : text.indexOf('*/', i + 2);
+    // An unclosed `/*` is not JS; masking it would hide the rest of the fence.
+    if (close === -1 && text[i + 1] === '*') continue;
+    const end = close === -1 ? text.length : text[i + 1] === '/' ? close : close + 2;
+    for (let j = i; j < end; j++) if (out[j] !== '\n') out[j] = ' ';
+    i = end - 1;
+  }
+  return out.join('');
+}
+
 function lineOf(text, index) {
   let n = 0;
   for (let i = 0; i < index; i++) if (text.charCodeAt(i) === 10) n++;
@@ -121,11 +160,15 @@ export function extractImports(markdown) {
   const unextracted = [];
   for (const fence of extractFences(markdown)) {
     const isJs = JS_LANGS.has(fence.lang);
+    // The extractors read JS fences with comments blanked, so a `// note` on a
+    // member line does not break the statement. The guard below reads the raw
+    // text: a commented-out import is still reported (AC3), never skipped.
+    const code = isJs ? maskComments(fence.text) : fence.text;
     const covered = [];
     if (isJs) {
       for (const re of [STATEMENT_RE, SIDE_EFFECT_RE]) {
         re.lastIndex = 0;
-        for (const m of fence.text.matchAll(re)) {
+        for (const m of code.matchAll(re)) {
           const spec = m[2];
           if (!SPEC_RE.test(spec)) continue;
           const lead = m[0].length - m[0].trimStart().length;
@@ -134,9 +177,9 @@ export function extractImports(markdown) {
           if (covered.some(([s, e]) => start < e && s < end)) continue;
           covered.push([start, end]);
           statements.push({
-            line: fence.startLine + lineOf(fence.text, start),
+            line: fence.startLine + lineOf(code, start),
             spec,
-            text: fence.text.slice(start, end),
+            text: code.slice(start, end),
           });
         }
       }
@@ -145,7 +188,8 @@ export function extractImports(markdown) {
       if (!SPEC_RE.test(m[2])) continue;
       const at = m.index;
       if (covered.some(([s, e]) => at >= s && at < e)) continue;
-      unextracted.push({ line: fence.startLine + lineOf(fence.text, at), spec: m[2], lang: fence.lang });
+      const commented = code[at] !== fence.text[at];
+      unextracted.push({ line: fence.startLine + lineOf(fence.text, at), spec: m[2], lang: fence.lang, ...(commented && { commented }) });
     }
   }
   statements.sort((a, b) => a.line - b.line);
@@ -358,12 +402,15 @@ function sanitize(text) {
  *   membersUnchecked: object[], files: string[], typescript: string }}
  */
 export function checkDocImports({ repo, files, resolveFrom = [] }) {
-  repo = resolve(repo);
-  resolveFrom = resolveFrom.map((d) => resolve(d));
+  // Canonical paths throughout: a missing --repo is an error (exit 2), not a
+  // vacuous files=0 pass, and a --file given through a different spelling of
+  // the same directory (symlink vs realpath) is still reported repo-relative.
+  repo = realpathSync(resolve(repo));
+  resolveFrom = resolveFrom.map((d) => realpathSync(resolve(d)));
   const ts = loadTypeScript(repo);
 
   const docFiles = files?.length
-    ? files.map((f) => relative(repo, resolve(repo, f)))
+    ? files.map((f) => relative(repo, realpathSync(resolve(repo, f))))
     : [
       ...(existsSync(join(repo, 'README.md')) ? ['README.md'] : []),
       ...globSync('docs/**/*.md', { cwd: repo }).sort(),
@@ -382,7 +429,9 @@ export function checkDocImports({ repo, files, resolveFrom = [] }) {
         file, line: u.line, spec: u.spec, code: 'UNEXTRACTED',
         message: u.lang && !JS_LANGS.has(u.lang)
           ? `import of '${u.spec}' inside a \`${u.lang}\` fence; tag the fence js/ts so it is checked, or move it to prose`
-          : `import of '${u.spec}' was not extracted as a statement; write it as one \`import ... from '...'\` statement at the start of a line`,
+          : u.commented
+            ? `commented-out import of '${u.spec}' is not checked; delete it, or move it to prose`
+            : `import of '${u.spec}' was not extracted as a statement; write it as one \`import ... from '...'\` statement at the start of a line`,
       });
     }
   }
@@ -407,6 +456,13 @@ export function checkDocImports({ repo, files, resolveFrom = [] }) {
       continue;
     }
     const match = matchExports(info.pkg.exports, subpath);
+    // TypeScript resolves `pkg/` to the main entry; Node rejects any specifier
+    // ending in '/' when the package has exports (ERR_PACKAGE_PATH_NOT_EXPORTED,
+    // trailing-slash mappings are removed: DEP0155).
+    if (subpath.endsWith('/') && info.pkg.exports != null) {
+      failures.push({ ...pick(s), code: 'NOT-EXPORTED', message: `'${s.spec}' ends in '/', which Node does not resolve against the exports of ${info.label}; drop the trailing '/'` });
+      continue;
+    }
     if (match?.wildcard) {
       const target = runtimeTarget(match.target);
       const file = target && fileExistsWithProbe(join(info.dir, target.replaceAll('*', match.star)));
@@ -533,7 +589,7 @@ function suggestSubpaths(ts, repo, resolveFrom, misses, packageInfo) {
   for (const { failure, pkgName, member } of wanted) {
     const hits = [];
     for (const [spec, surface] of surfaces) {
-      if (!spec.startsWith(pkgName) || spec === failure.spec) continue;
+      if ((spec !== pkgName && !spec.startsWith(`${pkgName}/`)) || spec === failure.spec) continue;
       if (surface.defaultName === member) hits.push(`import ${member} from '${spec}'`);
       else if (surface.named.includes(member)) hits.push(`import { ${member} } from '${spec}'`);
     }
@@ -576,7 +632,18 @@ function parseArgs(argv) {
   return args;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Node gives import.meta.url as the realpath; argv[1] is the path as typed.
+// Both sides must be canonical, or running through a symlink (macOS /tmp, a
+// symlinked checkout) skips the check and exits 0 with no output.
+const isMain = () => {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+
+if (isMain()) {
   let result;
   try {
     result = checkDocImports(parseArgs(process.argv.slice(2)));

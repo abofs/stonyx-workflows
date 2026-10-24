@@ -117,10 +117,19 @@ describe('extraction', () => {
     assert.deepEqual(unextracted, []);
   });
 
-  test('commented-out imports are neither checked nor failed; live code beside them is', () => {
+  test('commented-out imports are not extracted but the guard still fails them; live code beside them is extracted', () => {
     const md = "```js\n// import A from '@stonyx/a';\n/* import B from '@stonyx/b';\n   import C from '@stonyx/c'; */\nconst u = 'http://x'; import D from '@stonyx/d'; // import E from '@stonyx/e'\n```";
     const { statements, unextracted } = extractImports(md);
     assert.deepEqual(statements.map((s) => [s.line, s.spec]), [[5, '@stonyx/d']]);
+    assert.deepEqual(unextracted.map((u) => [u.line, u.spec, u.commented]), [
+      [2, '@stonyx/a', true], [3, '@stonyx/b', true], [4, '@stonyx/c', true], [5, '@stonyx/e', true],
+    ]);
+  });
+
+  test('a comment opener that is not a comment hides nothing (regex literal, unclosed /*)', () => {
+    const md = "```js\nconst re = /\\/*/; import A from '@stonyx/a';\n/* never closed\nimport B from '@stonyx/b';\n```";
+    const { statements, unextracted } = extractImports(md);
+    assert.deepEqual(statements.map((s) => s.spec), ['@stonyx/a', '@stonyx/b']);
     assert.deepEqual(unextracted, []);
   });
 
@@ -174,6 +183,7 @@ describe('red fixtures (each must name file:line and the code)', () => {
   test('a fenced stonyx import that extracts to 0 fails, with checked=0', () => {
     const r = run('discord', '--file', 'cases/red-unextracted.md');
     assertRed(r, 'cases/red-unextracted.md', 4, 'UNEXTRACTED');
+    assert.match(r.stdout, /commented-out import of '@stonyx\/discord\/command'/);
     assert.equal(r.summary.checked, 0);
   });
 
@@ -187,6 +197,11 @@ describe('red fixtures (each must name file:line and the code)', () => {
     const r = run('discord', '--file', 'cases/red-untagged-language.md');
     assertRed(r, 'cases/red-untagged-language.md', 4, 'UNEXTRACTED');
     assert.match(r.stdout, /inside a `text` fence/);
+  });
+
+  test('trailing slash: TypeScript resolves it, Node does not, so it fails on the exports map', () => {
+    const r = run('discord', '--file', 'cases/red-trailing-slash.md');
+    assertRed(r, 'cases/red-trailing-slash.md', 4, 'NOT-EXPORTED');
   });
 
   test('wildcard export to a missing file', () => {
