@@ -55,11 +55,19 @@ const JS_LANGS = new Set([
   '', 'js', 'javascript', 'mjs', 'cjs', 'jsx', 'ts', 'typescript', 'mts', 'cts', 'tsx', 'gjs', 'gts',
 ]);
 
-// An import/export clause can only contain identifiers, whitespace, braces,
-// commas and `*` (`type` and `as` are identifiers here). Restricting the
-// clause to that set stops a match from starting at an unrelated
-// `export default class X {` and running on into the next statement.
-const STATEMENT_RE = /(?:^|(?<=;))[ \t]*(?:import|export)\b[\w$\s{},*]*?\bfrom\s*(['"])([^'"\n]+)\1/gm;
+// The clause is matched by its grammar -- an optional `type`, then a default
+// binding (optionally followed by named or namespace bindings), named bindings
+// `{ ... }`, or `*` / `* as ns` -- rather than by a character class. A class
+// of identifier/brace/space characters lets `export default class X {\n}\n`
+// run on into the next `import ... from`, which is a real statement.
+const ID = String.raw`[A-Za-z_$][\w$]*`;
+const NAMED = String.raw`\{[\w$\s,]*\}`;
+const NS = String.raw`\*(?:\s+as\s+${ID})?`;
+const CLAUSE = String.raw`(?:type\s+)?(?:${ID}(?:\s*,\s*(?:${NAMED}|${NS}))?|${NAMED}|${NS})`;
+const STATEMENT_RE = new RegExp(
+  String.raw`(?:^|(?<=;))[ \t]*(?:import|export)(?:\s+|(?=[{*]))${CLAUSE}\s*\bfrom\s*(['"])([^'"\n]+)\1`,
+  'gm',
+);
 const SIDE_EFFECT_RE = /(?:^|(?<=;))[ \t]*import\s*(['"])([^'"\n]+)\1/gm;
 // The guard's own view of "an import of a stonyx spec is written here". It
 // shares nothing with the two extractors above beyond the spec grammar.

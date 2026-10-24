@@ -1,0 +1,14 @@
+{
+  "name": "@stonyx/discord",
+  "version": "0.0.0-fixture",
+  "private": true,
+  "type": "module",
+  "types": "./types/main.d.ts",
+  "exports": {
+    ".": { "types": "./types/main.d.ts", "default": "./types/main.js" },
+    "./bot": { "types": "./types/bot.d.ts", "default": "./types/bot.js" },
+    "./command": { "types": "./types/command.d.ts", "default": "./types/command.js" },
+    "./config": { "types": "./types/config.d.ts", "default": "./types/config.js" },
+    "./widgets/*": { "types": "./types/widgets/*.d.ts", "default": "./types/widgets/*.js" }
+  }
+}
