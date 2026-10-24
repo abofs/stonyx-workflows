@@ -45,3 +45,97 @@ jobs:
 
       - name: Run tests
         run: pnpm test
+
+      - name: Build
+        # The docs-import check (abofs/stonyx#122) starts here. Every stonyx
+        # import a consumer can copy out of README.md or docs/**/*.md must
+        # resolve against the package's real exports. This job holds no
+        # secrets -- no NPM_TOKEN, no CASCADE_PAT. Its read-only GITHUB_TOKEN
+        # reaches only the checkout/setup actions, as their default `token:`
+        # input; no checkout persists it and no `run:` step has it in its
+        # environment. The check must stay in this job, never in
+        # npm-publish.yml or cascade.yml.
+        # The repo's own package resolves by self-reference to dist/, and not
+        # every consumer's `pnpm test` builds (stonyx-events, stonyx-logs).
+        run: pnpm run --if-present build
+
+      - name: Resolve stonyx-workflows ref
+        id: workflows-ref
+        env:
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_sha is empty. Refusing to fall back to a moving ref for the docs-import check."
+            exit 1
+          fi
+          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout stonyx-workflows (for docs-import check)
+        uses: actions/checkout@v4
+        with:
+          repository: abofs/stonyx-workflows
+          ref: ${{ steps.workflows-ref.outputs.sha }}
+          path: .stonyx-workflows
+          # Nothing reads git credentials out of this tree; the steps below only
+          # run scripts off disk (abofs/stonyx-workflows#35).
+          persist-credentials: false
+
+      - name: Install docs-import check tooling
+        # The checker's pinned TypeScript, installed inside the tooling tree.
+        # The script refuses (exit 2) any TypeScript whose realpath is outside
+        # this tree, so the consumer's node_modules above it is never loaded.
+        working-directory: .stonyx-workflows
+        run: pnpm install --frozen-lockfile --ignore-scripts --ignore-workspace
+
+      - name: Install stonyx packages the docs import but the repo does not declare
+        # stonyx core's docs import modules that are not core dependencies.
+        # They are installed at @beta into a temp dir, never into the repo, with
+        # no lifecycle scripts. The names are validated against the stonyx
+        # npm-name grammar by the script before they reach npm.
+        run: |
+          set -euo pipefail
+          registry="$RUNNER_TEMP/stonyx-doc-registry"
+          mkdir -p "$registry"
+          names="$(node .stonyx-workflows/scripts/doc-registry-packages.mjs --repo .)"
+          if [ -z "$names" ]; then
+            echo "No undeclared stonyx packages imported by the docs."
+            exit 0
+          fi
+          # npm runs from the temp dir, so no .npmrc in the consumer's tree
+          # applies to it.
+          cd "$registry"
+          specs=()
+          while IFS= read -r name; do
+            # A name the registry has never published (a typo in a doc) is not
+            # installed, and not retried: the check then reports it as TS2307
+            # at its doc file:line. Only npm's E404 for the package itself
+            # skips a name; any other failure keeps it, and the install below
+            # fails the job.
+            if ! err="$(npm view "$name" name 2>&1 >/dev/null)" && grep -q 'code E404' <<< "$err"; then
+              echo "$name is not published; not installing it (the check reports it at its doc line)."
+              continue
+            fi
+            specs+=("$name@beta")
+          done <<< "$names"
+          if [ "${#specs[@]}" -eq 0 ]; then
+            echo "None of the imported stonyx packages is published; nothing to install."
+            exit 0
+          fi
+          echo "Installing into $registry: ${specs[*]}"
+          # A module publish moves its beta dist-tag before every registry
+          # mirror serves the new version (measured: ETARGET for a tag only
+          # seconds old), so an install racing a publish is retried, boundedly.
+          for attempt in 1 2 3; do
+            if npm install --prefix "$registry" --ignore-scripts --no-audit --no-fund --no-package-lock "${specs[@]}"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "npm install failed (attempt $attempt of 3); retrying in 30s"
+              sleep 30
+            fi
+          done
+          echo "::error::Could not install ${specs[*]} from the registry after 3 attempts."
+          exit 1
+
+      - name: Check doc imports
+        run: node .stonyx-workflows/scripts/check-doc-imports.mjs --repo . --resolve-from "$RUNNER_TEMP/stonyx-doc-registry"

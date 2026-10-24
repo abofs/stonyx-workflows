@@ -20,9 +20,11 @@
  *   the repo root and is type-checked with `module`/`moduleResolution` NodeNext
  *   and `verbatimModuleSyntax`. The repo's own package resolves by
  *   self-reference, so it must be BUILT first: with no `dist/` the probes go red
- *   with TS2307 (fail closed). Anything the repo cannot resolve is retried from
- *   each `--resolve-from <dir>` (a directory holding a `node_modules/`), which is
- *   how stonyx core's docs reach modules that are not its dependencies.
+ *   with TS2307 (fail closed). A package the repo neither is nor declares is
+ *   retried from each `--resolve-from <dir>` (a directory holding a
+ *   `node_modules/`), which is how stonyx core's docs reach modules that are
+ *   not its dependencies. The repo's own name and its declared dependencies
+ *   are never looked up there.
  *
  * On top of the TypeScript diagnostics:
  *   - DEFAULT-NAME: a default import's binding must equal the default export's
@@ -48,7 +50,7 @@
 import { existsSync, globSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 // Deliberately looser than the package-name grammar: `@stonyx/Orm` or
 // `@stonyx/orm/` must be extracted so TypeScript reports them (TS2307), not
@@ -203,6 +205,20 @@ function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
+const DEP_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
+
+/**
+ * The package itself plus every name it declares. These resolve from the
+ * repo's own build and install only: a copy of one of them inside a
+ * `--resolve-from` dir (a registry package's transitive dependency, e.g.
+ * `stonyx` under `@stonyx/orm`) must never stand in for it.
+ */
+export function declaredNames(pkg) {
+  const names = new Set([pkg.name]);
+  for (const field of DEP_FIELDS) for (const name of Object.keys(pkg[field] ?? {})) names.add(name);
+  return names;
+}
+
 export function splitSpec(spec) {
   const parts = spec.split('/');
   const name = spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
@@ -210,7 +226,7 @@ export function splitSpec(spec) {
   return { name, subpath: rest ? `.${rest}` : '.' };
 }
 
-function findPackageDir(name, repo, resolveFrom) {
+function findPackageDir(name, repo, resolveFrom, declared) {
   const own = join(repo, 'package.json');
   if (existsSync(own) && readJson(own).name === name) return repo;
   const bases = [];
@@ -218,7 +234,7 @@ function findPackageDir(name, repo, resolveFrom) {
     bases.push(dir);
     if (dirname(dir) === dir) break;
   }
-  bases.push(...resolveFrom);
+  if (!declared.has(name)) bases.push(...resolveFrom);
   for (const base of bases) {
     const candidate = join(base, 'node_modules', ...name.split('/'));
     if (existsSync(join(candidate, 'package.json'))) return candidate;
@@ -292,19 +308,30 @@ function fileExistsWithProbe(path) {
 // ---------------------------------------------------------------------------
 // TypeScript
 
-function loadTypeScript(repo) {
-  // This repo's pinned TypeScript first, so the verdict does not depend on
-  // which TypeScript the checked repo happens to have; the repo's own as a
-  // fallback when this tree was not installed.
-  const candidates = [import.meta.url, pathToFileURL(join(repo, 'package.json')).href];
-  for (const from of candidates) {
-    try {
-      return createRequire(from)('typescript');
-    } catch {
-      // try the next
-    }
+// The stonyx-workflows checkout: scripts/ sits directly under it.
+const TOOLING_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+function loadTypeScript() {
+  // Only this repo's pinned TypeScript, never the checked repo's: the verdict
+  // must not depend on which TypeScript the consumer has, and ci.yml runs this
+  // script inside the consumer's workspace, where the consumer's own
+  // node_modules are code the consumer controls. An uninstalled tooling tree
+  // is a usage error (exit 2), not a silent switch to the consumer's copy.
+  // ci.yml checks this tree out at <consumer>/.stonyx-workflows, so Node's
+  // ancestor walk from here reaches <consumer>/node_modules: a resolved copy
+  // is accepted only if its realpath is inside this tree.
+  const require = createRequire(import.meta.url);
+  const notInstalled = `typescript is not installed next to ${fileURLToPath(import.meta.url)}; run pnpm install in the stonyx-workflows checkout`;
+  let resolved;
+  try {
+    resolved = realpathSync(require.resolve('typescript'));
+  } catch {
+    throw new Error(notInstalled);
   }
-  throw new Error('typescript is not installed here or in the checked repo');
+  if (!resolved.startsWith(realpathSync(TOOLING_ROOT) + sep)) {
+    throw new Error(`${notInstalled} (refusing ${resolved}, which is outside ${realpathSync(TOOLING_ROOT)})`);
+  }
+  return require(resolved);
 }
 
 const ANONYMOUS_DEFAULT = /^_?default\d*$/;
@@ -344,7 +371,7 @@ function moduleSurfaces(ts, program, checker, probes) {
   return out;
 }
 
-function createProgram(ts, repo, resolveFrom, probes) {
+function createProgram(ts, repo, resolveFrom, declared, probes) {
   const options = {
     module: ts.ModuleKind.NodeNext,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
@@ -369,6 +396,7 @@ function createProgram(ts, repo, resolveFrom, probes) {
     const mode = ts.getModeForUsageLocation(containingSourceFile, lit, opts);
     const first = ts.resolveModuleName(lit.text, containingFile, opts, host, undefined, redirectedReference, mode);
     if (first.resolvedModule || !virtual.has(containingFile)) return first;
+    if (declared.has(splitSpec(lit.text).name)) return first;
     for (const dir of resolveFrom) {
       const retry = ts.resolveModuleName(lit.text, join(dir, '__stonyx_doc_import_probe__.mts'), opts, host, undefined, redirectedReference, ts.ModuleKind.ESNext);
       if (retry.resolvedModule) return retry;
@@ -396,6 +424,14 @@ function sanitize(text) {
 // ---------------------------------------------------------------------------
 // The check
 
+/** The default doc set: `README.md` and `docs/**\/*.md`, repo-relative. */
+export function discoverDocFiles(repo) {
+  return [
+    ...(existsSync(join(repo, 'README.md')) ? ['README.md'] : []),
+    ...globSync('docs/**/*.md', { cwd: repo }).sort(),
+  ];
+}
+
 /**
  * @param {{ repo: string, files?: string[], resolveFrom?: string[] }} opts
  * @returns {{ checked: number, failures: object[], skippedAnonymousDefault: object[],
@@ -407,14 +443,12 @@ export function checkDocImports({ repo, files, resolveFrom = [] }) {
   // the same directory (symlink vs realpath) is still reported repo-relative.
   repo = realpathSync(resolve(repo));
   resolveFrom = resolveFrom.map((d) => realpathSync(resolve(d)));
-  const ts = loadTypeScript(repo);
+  const ts = loadTypeScript();
+  const declared = existsSync(join(repo, 'package.json')) ? declaredNames(readJson(join(repo, 'package.json'))) : new Set();
 
   const docFiles = files?.length
     ? files.map((f) => relative(repo, realpathSync(resolve(repo, f))))
-    : [
-      ...(existsSync(join(repo, 'README.md')) ? ['README.md'] : []),
-      ...globSync('docs/**/*.md', { cwd: repo }).sort(),
-    ];
+    : discoverDocFiles(repo);
 
   const failures = [];
   const skippedAnonymousDefault = [];
@@ -439,7 +473,7 @@ export function checkDocImports({ repo, files, resolveFrom = [] }) {
   const pkgCache = new Map();
   const packageInfo = (name) => {
     if (!pkgCache.has(name)) {
-      const dir = findPackageDir(name, repo, resolveFrom);
+      const dir = findPackageDir(name, repo, resolveFrom, declared);
       const pkg = dir ? readJson(join(dir, 'package.json')) : null;
       pkgCache.set(name, dir ? { dir, pkg, typed: hasTypes(pkg), label: `${name}@${pkg.version ?? '?'}` } : null);
     }
@@ -498,7 +532,7 @@ export function checkDocImports({ repo, files, resolveFrom = [] }) {
   // TypeScript: one virtual probe per statement, at the repo root.
   const probeDir = join(repo, '__stonyx_doc_import_probes__');
   const probes = tsStatements.map((s, i) => ({ ...s, fileName: join(probeDir, `p${i}.mts`).split(sep).join('/'), source: `${s.text};\n` }));
-  const { program, checker } = probes.length ? createProgram(ts, repo, resolveFrom, probes) : {};
+  const { program, checker } = probes.length ? createProgram(ts, repo, resolveFrom, declared, probes) : {};
 
   const memberMisses = [];
   for (const p of probes) {
@@ -547,7 +581,7 @@ export function checkDocImports({ repo, files, resolveFrom = [] }) {
     }
   }
 
-  suggestSubpaths(ts, repo, resolveFrom, memberMisses, packageInfo);
+  suggestSubpaths(ts, repo, resolveFrom, declared, memberMisses, packageInfo);
 
   failures.sort((a, b) => (a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1));
   return {
@@ -570,7 +604,7 @@ function memberFrom(diag, ts) {
 }
 
 /** Append "exported by '<pkg>/<sub>'" to member misses, from the package's own exports. */
-function suggestSubpaths(ts, repo, resolveFrom, misses, packageInfo) {
+function suggestSubpaths(ts, repo, resolveFrom, declared, misses, packageInfo) {
   const wanted = misses.filter((m) => m.member && m.member !== 'default');
   if (!wanted.length) return;
   const specs = new Set();
@@ -584,7 +618,7 @@ function suggestSubpaths(ts, repo, resolveFrom, misses, packageInfo) {
   const probeDir = join(repo, '__stonyx_doc_import_suggest__');
   const probes = [...specs].map((spec, i) => ({ spec, fileName: join(probeDir, `s${i}.mts`).split(sep).join('/'), source: `import '${spec}';\n` }));
   if (!probes.length) return;
-  const { program, checker } = createProgram(ts, repo, resolveFrom, probes);
+  const { program, checker } = createProgram(ts, repo, resolveFrom, declared, probes);
   const surfaces = moduleSurfaces(ts, program, checker, probes);
   for (const { failure, pkgName, member } of wanted) {
     const hits = [];

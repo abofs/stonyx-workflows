@@ -1,9 +1,16 @@
-import { describe, test } from 'node:test';
+import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
-  MissingStepKeyError, onKeys, parseSteps, readWorkflow, runBodyOf, stepRunBody, workflowPath,
+  MissingStepKeyError, onKeys, parseSteps, readWorkflow, runBodyOf, scalarKeyLineCount, stepEnv, stepNamed, stepRunBody,
+  workflowPath,
 } from './helpers/workflow-yaml.js';
 
 // Workflow-source assertions for abofs/stonyx-workflows#22 (story A).
@@ -163,5 +170,289 @@ describe('self-ci.yml gates this repo (#22 AC3)', () => {
     for (const name of ['ci.yml', 'npm-publish.yml', 'cascade.yml', 'security-audit.yml']) {
       assert.deepEqual(onKeys(readWorkflow(name)), ['workflow_call'], `${name} triggers`);
     }
+  });
+});
+
+// abofs/stonyx#122 part 2: the docs-import check runs in the reusable ci.yml.
+// Every consumer calls ci.yml@main, so these assertions are what stands
+// between an edit here and a silently unchecked (or credentialed) check in
+// ten repos at once.
+
+const ci = readWorkflow('ci.yml');
+
+const DOC_STEPS = {
+  install: 'Install dependencies',
+  build: 'Build',
+  ref: 'Resolve stonyx-workflows ref',
+  checkout: 'Checkout stonyx-workflows (for docs-import check)',
+  tooling: 'Install docs-import check tooling',
+  registry: 'Install stonyx packages the docs import but the repo does not declare',
+  check: 'Check doc imports',
+};
+
+/** A step's `with:` (or other single-level mapping) entries, comments skipped. */
+function mappingOf(step, key) {
+  const lines = step.body.split('\n');
+  const at = lines.findIndex((l) => new RegExp(`^\\s*${key}:\\s*$`).test(l));
+  if (at === -1) return null;
+  const indent = lines[at].match(/^ */)[0].length;
+  const out = {};
+  for (const line of lines.slice(at + 1)) {
+    if (line.trim() === '' || line.trim().startsWith('#')) continue;
+    if (line.match(/^ */)[0].length <= indent) break;
+    const m = line.match(/^\s*([\w-]+):\s*(.*)$/);
+    assert.ok(m, `unreadable ${key}: line in ${step.name}: ${line}`);
+    out[m[1]] = m[2].trim();
+  }
+  return out;
+}
+
+/** A top-level `key: value` of the step itself (uses:, id:, working-directory:). */
+function stepKey(step, key) {
+  const lines = step.body.split('\n').filter((l) => l.trim() !== '');
+  const indent = Math.min(...lines.map((l) => l.match(/^ */)[0].length));
+  const line = lines.find((l) => l.match(/^ */)[0].length === indent && l.trim().startsWith(`${key}:`));
+  return line ? line.trim().slice(key.length + 1).trim() : null;
+}
+
+/** The step's own keys (quoted or not), at the step's key indent. */
+function topLevelKeys(step) {
+  const lines = step.body.split('\n').filter((l) => l.trim() !== '');
+  const indent = Math.min(...lines.map((l) => l.match(/^ */)[0].length));
+  return lines
+    .filter((l) => l.match(/^ */)[0].length === indent)
+    .map((l) => l.trim().match(/^(['"]?)([\w-]+)\1\s*:/)?.[2])
+    .filter(Boolean);
+}
+
+describe('ci.yml runs check-doc-imports (abofs/stonyx#122 part 2)', () => {
+  test('the docs-import steps exist once each, in order, after install', () => {
+    const names = parseSteps(ci).map((s) => s.name);
+    const positions = Object.values(DOC_STEPS).map((n) => {
+      assert.equal(names.filter((x) => x === n).length, 1, `exactly one step named ${n}`);
+      return names.indexOf(n);
+    });
+    assert.deepEqual(positions, [...positions].sort((a, b) => a - b), `steps out of order: ${names.join(' | ')}`);
+  });
+
+  test('ci.yml builds before the check (the repo resolves itself through dist/)', () => {
+    assert.equal(stepRunBody(ci, DOC_STEPS.build).trim(), 'pnpm run --if-present build');
+  });
+
+  test('the tooling ref is job.workflow_sha, and an empty one fails the job', () => {
+    const step = stepNamed(ci, DOC_STEPS.ref);
+    assert.equal(stepKey(step, 'id'), 'workflows-ref');
+    assert.equal(stepEnv(ci, DOC_STEPS.ref).WORKFLOW_SHA, '${{ job.workflow_sha }}');
+    const body = stepRunBody(ci, DOC_STEPS.ref);
+    assert.match(body, /if \[ -z "\$WORKFLOW_SHA" \]; then[\s\S]*exit 1[\s\S]*fi/);
+    assert.match(body, /echo "sha=\$WORKFLOW_SHA" >> "\$GITHUB_OUTPUT"/);
+  });
+
+  test('stonyx-workflows is checked out at that sha with persist-credentials: false', () => {
+    const step = stepNamed(ci, DOC_STEPS.checkout);
+    assert.match(stepKey(step, 'uses'), /^actions\/checkout@/);
+    assert.deepEqual(mappingOf(step, 'with'), {
+      repository: 'abofs/stonyx-workflows',
+      ref: '${{ steps.workflows-ref.outputs.sha }}',
+      path: '.stonyx-workflows',
+      'persist-credentials': 'false',
+    });
+  });
+
+  test('the tooling TypeScript is installed inside the checked-out tooling dir, with no lifecycle scripts', () => {
+    const step = stepNamed(ci, DOC_STEPS.tooling);
+    assert.equal(stepKey(step, 'working-directory'), '.stonyx-workflows');
+    assert.equal(runBodyOf(step).trim(), 'pnpm install --frozen-lockfile --ignore-scripts --ignore-workspace');
+  });
+
+  test('registry packages are installed at @beta into RUNNER_TEMP, never with lifecycle scripts', () => {
+    const body = stepRunBody(ci, DOC_STEPS.registry);
+    assert.match(body, /^\s*set -euo pipefail$/m);
+    assert.match(body, /registry="\$RUNNER_TEMP\/stonyx-doc-registry"/);
+    assert.match(body, /node \.stonyx-workflows\/scripts\/doc-registry-packages\.mjs --repo \./);
+    assert.match(body, /specs\+=\("\$name@beta"\)/);
+    // Every line that names an install, except a message that only mentions one.
+    const installs = body.split('\n')
+      .filter((l) => /\b(npm|pnpm|yarn)\s+(install|i|add|ci)\b/.test(l) && !/^\s*echo\b/.test(l));
+    assert.ok(installs.length >= 1, 'the step must install something');
+    for (const line of installs) {
+      assert.match(line, /--ignore-scripts/, line);
+      assert.match(line, /--prefix "\$registry"/, line);
+    }
+  });
+
+  test('the check runs the checked-out script against the consumer repo, with the registry dir', () => {
+    assert.equal(
+      stepRunBody(ci, DOC_STEPS.check).trim(),
+      'node .stonyx-workflows/scripts/check-doc-imports.mjs --repo . --resolve-from "$RUNNER_TEMP/stonyx-doc-registry"',
+    );
+    for (const script of ['scripts/check-doc-imports.mjs', 'scripts/doc-registry-packages.mjs']) {
+      assert.ok(existsSync(new URL(`../${script}`, import.meta.url)), `${script} must exist in this repo`);
+    }
+  });
+
+  // Deleting a step is caught above; switching one off is the same defect in
+  // a smaller form. `if: false` skips it and `continue-on-error: true` turns
+  // its failure green, on every caller at once.
+  for (const name of Object.values(DOC_STEPS)) {
+    test(`${name}: no if: and no continue-on-error: (the step cannot be switched off)`, () => {
+      const top = topLevelKeys(stepNamed(ci, name));
+      assert.ok(!top.includes('if'), `${name} has an if:`);
+      assert.ok(!top.includes('continue-on-error'), `${name} has continue-on-error:`);
+    });
+  }
+
+  test('nor can the whole job: no continue-on-error anywhere, no if: on the job', () => {
+    assert.equal(scalarKeyLineCount(ci, 'continue-on-error'), 0);
+    const lines = ci.split('\n');
+    const job = lines.findIndex((l) => /^ {2}test:\s*$/.test(l));
+    const steps = lines.findIndex((l, i) => i > job && /^ {4}steps:\s*$/.test(l));
+    assert.ok(job !== -1 && steps > job, 'jobs.test and its steps: located');
+    const header = lines.slice(job + 1, steps).filter((l) => /^ {4}['"]?if['"]?\s*:/.test(l));
+    assert.deepEqual(header, [], 'jobs.test has an if:');
+  });
+
+  test('the registry step\'s failure exit is pinned: it ends in exit 1, and nothing in it swallows a status', () => {
+    const body = stepRunBody(ci, DOC_STEPS.registry);
+    const lines = body.split('\n').map((l) => l.trim()).filter((l) => l !== '');
+    assert.equal(lines.at(-1), 'exit 1');
+    assert.match(lines.at(-2), /^echo "::error::Could not install /);
+    for (const name of Object.values(DOC_STEPS)) {
+      const step = stepNamed(ci, name);
+      if (!topLevelKeys(step).includes('run')) continue;
+      const run = runBodyOf(step);
+      assert.ok(!/\|\|\s*(true|:|exit 0)\b|\bset \+e\b/.test(run), `${name} swallows a failure status`);
+    }
+  });
+
+  test('the job holds no secrets and only a read-only token', () => {
+    assert.ok(!/\bsecrets\./.test(ci), 'ci.yml must not reference any secret');
+    assert.ok(!/CASCADE_PAT|NPM_TOKEN|NODE_AUTH_TOKEN/.test(ci.replace(/^\s*#.*$/gm, '')), 'no credential names outside comments');
+    assert.match(ci, /^permissions:\n {2}contents: read\n/m);
+    assert.ok(!/^ +permissions:/m.test(ci), 'no job-level permissions override');
+  });
+
+  for (const file of ['npm-publish.yml', 'cascade.yml', 'security-audit.yml', 'self-ci.yml']) {
+    test(`${file} does not run the docs-import check (it stays out of credentialed workflows)`, () => {
+      const text = readWorkflow(file);
+      assert.ok(!text.includes('check-doc-imports'), file);
+      assert.ok(!text.includes('doc-registry-packages'), file);
+    });
+  }
+});
+
+// The registry step's real body, run under bash with a stub `npm` on PATH: a
+// name npm says does not exist is skipped (so the check reports it at its doc
+// line), any other npm failure keeps it, and an install that keeps failing
+// fails the step. `sleep` is stubbed so the retry costs no time.
+describe('ci.yml registry step, executed with a stub npm', () => {
+  const body = stepRunBody(ci, DOC_STEPS.registry);
+  const TOOLING = fileURLToPath(new URL('..', import.meta.url));
+  let dir;
+
+  before(() => {
+    dir = mkdtempSync(join(tmpdir(), 's95-registry-step-'));
+    mkdirSync(join(dir, 'bin'));
+    // Stub npm. `view <name>`: E404 for names in NPM_404, another error for
+    // names in NPM_DOWN, else success; every view logs its cwd to
+    // NPM_VIEW_LOG. `install`: logs its argv, then exits NPM_INSTALL_RC.
+    writeFileSync(join(dir, 'bin', 'npm'), [
+      '#!/bin/sh',
+      'if [ "$1" = view ]; then',
+      '  pwd -P >> "$NPM_VIEW_LOG"',
+      '  case " $NPM_404 " in *" $2 "*) echo "npm error code E404" >&2; exit 1;; esac',
+      '  case " $NPM_DOWN " in *" $2 "*) echo "npm error code ECONNRESET" >&2; exit 1;; esac',
+      '  echo "$2"; exit 0',
+      'fi',
+      'echo "$*" >> "$NPM_LOG"',
+      'exit "${NPM_INSTALL_RC:-0}"',
+      '',
+    ].join('\n'));
+    writeFileSync(join(dir, 'bin', 'sleep'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(dir, 'bin', 'npm'), 0o755);
+    chmodSync(join(dir, 'bin', 'sleep'), 0o755);
+
+    const repo = join(dir, 'repo');
+    mkdirSync(repo);
+    writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'stonyx' }));
+    writeFileSync(join(repo, 'README.md'), [
+      '```js',
+      "import Orm from '@stonyx/orm';",
+      "import Typo from '@stonyx/rest-servr';",
+      '```',
+    ].join('\n'));
+    symlinkSync(TOOLING, join(repo, '.stonyx-workflows'), 'dir');
+  });
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  function runStep(env, repo = join(dir, 'repo')) {
+    const log = join(dir, `npm-${Math.random().toString(36).slice(2)}.log`);
+    const viewLog = `${log}.view`;
+    writeFileSync(log, '');
+    writeFileSync(viewLog, '');
+    const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', body], {
+      cwd: repo,
+      encoding: 'utf8',
+      env: {
+        PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+        RUNNER_TEMP: join(dir, 'runner-temp'),
+        NPM_LOG: log,
+        NPM_VIEW_LOG: viewLog,
+        ...env,
+      },
+    });
+    const installs = readFileSync(log, 'utf8').split('\n').filter(Boolean);
+    const viewCwds = readFileSync(viewLog, 'utf8').split('\n').filter(Boolean);
+    return { ...r, installs, viewCwds, out: r.stdout + r.stderr };
+  }
+
+  test('an unpublished name is skipped, not retried; the published one is still installed', () => {
+    const r = runStep({ NPM_404: '@stonyx/rest-servr' });
+    assert.equal(r.status, 0, r.out);
+    assert.equal(r.installs.length, 1, r.out);
+    assert.match(r.installs[0], /@stonyx\/orm@beta/);
+    assert.doesNotMatch(r.installs[0], /rest-servr/);
+    assert.match(r.stdout, /@stonyx\/rest-servr is not published/);
+  });
+
+  // npm reads a project .npmrc from its cwd: a consumer .npmrc pointing
+  // `registry=` elsewhere would steer every lookup if `npm view` ran in the
+  // consumer's tree (measured with a real npm). The install is covered by
+  // --prefix; the lookups only by running from the temp dir.
+  test('every npm view runs from the registry temp dir, never the consumer tree', () => {
+    const r = runStep({});
+    assert.equal(r.status, 0, r.out);
+    assert.equal(r.viewCwds.length, 2, r.out);
+    const expected = realpathSync(join(dir, 'runner-temp', 'stonyx-doc-registry'));
+    for (const cwd of r.viewCwds) assert.equal(cwd, expected);
+  });
+
+  test('a non-404 npm view failure does not skip the name: it reaches the install', () => {
+    const r = runStep({ NPM_DOWN: '@stonyx/rest-servr' });
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.installs[0], /@stonyx\/rest-servr@beta/);
+  });
+
+  test('every name unpublished: nothing installed, exit 0 (the check reports each at its doc line)', () => {
+    const r = runStep({ NPM_404: '@stonyx/orm @stonyx/rest-servr' });
+    assert.equal(r.status, 0, r.out);
+    assert.deepEqual(r.installs, []);
+  });
+
+  test('an install that keeps failing fails the step after 3 attempts', () => {
+    const r = runStep({ NPM_INSTALL_RC: '1' });
+    assert.equal(r.status, 1, r.out);
+    assert.equal(r.installs.length, 3, r.out);
+    assert.match(r.stdout, /^::error::Could not install /m);
+  });
+
+  test('a failing name helper fails the step, not an empty install list', () => {
+    const bad = join(dir, 'bad-repo');
+    mkdirSync(bad, { recursive: true });
+    writeFileSync(join(bad, 'package.json'), '{ not json');
+    symlinkSync(TOOLING, join(bad, '.stonyx-workflows'), 'dir');
+    const r = runStep({}, bad);
+    assert.notEqual(r.status, 0, r.out);
+    assert.doesNotMatch(r.stdout, /No undeclared stonyx packages/);
   });
 });

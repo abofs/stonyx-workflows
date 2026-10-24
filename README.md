@@ -30,7 +30,53 @@ Shared GitHub Actions workflows for Stonyx framework packages.
 
 ### `ci.yml`
 
-Reusable workflow for running tests on pull requests.
+Reusable workflow for running tests on pull requests. After `pnpm install
+--frozen-lockfile` and `pnpm test` it runs the
+[docs-import check](#scriptscheck-doc-importsmjs) on the repo's `README.md`
+and `docs/**/*.md`, so a stonyx import a consumer copies out of the docs that
+does not resolve against the package's real `exports` fails CI
+([abofs/stonyx#122](https://github.com/abofs/stonyx/issues/122)).
+
+**Steps after `pnpm test`:**
+
+1. `pnpm run --if-present build`. The repo's own package resolves by
+   self-reference to `dist/`, and not every `pnpm test` builds.
+2. Check this repo out at `${{ job.workflow_sha }}` (the commit your `uses:`
+   line resolved to) into `.stonyx-workflows`, with
+   `persist-credentials: false`. An empty `job.workflow_sha` fails the job
+   rather than falling back to a moving ref.
+3. Install that tree's pinned `typescript` inside it (`pnpm install
+   --frozen-lockfile --ignore-scripts --ignore-workspace`). The script loads
+   only a `typescript` whose realpath is inside this tree; the consumer's
+   `node_modules` above it is refused with exit 2, never loaded.
+4. List the stonyx packages the docs import but the repo neither is nor
+   declares (`scripts/doc-registry-packages.mjs`), and install them at `@beta`
+   into `$RUNNER_TEMP/stonyx-doc-registry` with `npm install
+   --ignore-scripts`, retried up to 3 times 30s apart (a publish moves a beta
+   dist-tag before every registry mirror serves it). Each name is first
+   looked up with `npm view`; a name npm answers with `E404` (a misspelt
+   package in a doc) is skipped without a retry, so the next step reports it
+   as `TS2307` at its doc `file:line` and the other names still install. Any
+   other `npm view` failure keeps the name for the install. A published
+   package with no `beta` dist-tag still fails this step. Today only stonyx
+   core needs this step; `node scripts/doc-registry-packages.mjs --repo
+   <repo>` prints the names it looks up, so this README does not list them.
+   The repo's own package and its declared dependencies are never resolved
+   from this directory, even though it holds a published `stonyx` (every
+   module depends on it).
+5. `node .stonyx-workflows/scripts/check-doc-imports.mjs --repo .
+   --resolve-from "$RUNNER_TEMP/stonyx-doc-registry"`.
+
+The job holds no secrets: no `NPM_TOKEN`, no `CASCADE_PAT`. Its read-only
+`GITHUB_TOKEN` reaches only the `actions/checkout` and setup actions, as their
+default `token:` input. No checkout persists it (`persist-credentials:
+false`), and no `run:` step has it in its environment. The check is
+deliberately not in `npm-publish.yml` or `cascade.yml`, and
+`test/workflows-test.js` reds if it appears there.
+
+Registry mode is not deterministic: a module publish can turn stonyx core's
+CI red with no core change. That is the drift the check exists to surface;
+each failure names the resolved `<pkg>@<version>`.
 
 **Usage:**
 
@@ -405,8 +451,10 @@ Runs `pnpm install --frozen-lockfile` then `pnpm test` on Node `24.13.0`.
 ## Development
 
 This repo has an executable surface: a private root `package.json`, a test
-suite, and two scripts. There is one dependency, the pinned `typescript`
-devDependency that `scripts/check-doc-imports.mjs` type-checks with. Everything
+suite, and the scripts the workflows run (`derive-version.mjs`,
+`check-doc-imports.mjs`, `doc-registry-packages.mjs`). There is one
+dependency, the pinned `typescript` devDependency that
+`scripts/check-doc-imports.mjs` type-checks with. Everything
 else uses Node core modules only (`node:test`, `node:assert`, and for the
 executed workflow cases `node:child_process`, `node:crypto`, `node:fs`,
 `node:module`, `node:os`, `node:path`, `node:url`, `node:vm`). `pnpm test`
@@ -457,9 +505,8 @@ default branch.
 
 Checks that every stonyx import a consumer can copy out of a repo's docs
 resolves against the package's real `exports` and names members that exist
-([abofs/stonyx#122](https://github.com/abofs/stonyx/issues/122)). **Not wired
-into any workflow yet**: the docs it fails on are fixed first, then a later
-change adds it as a step in `ci.yml`.
+([abofs/stonyx#122](https://github.com/abofs/stonyx/issues/122)). Run by
+[`ci.yml`](#ciyml) for every repo that calls it.
 
 ```bash
 pnpm run --if-present build          # the repo's own package resolves by self-reference to dist/
@@ -499,11 +546,11 @@ node path/to/check-doc-imports.mjs --repo . [--resolve-from <dir>]... [--file <d
   commented-out stonyx import is `UNEXTRACTED` too: delete it or move it to
   prose.
 - **`--resolve-from <dir>`:** a directory holding a `node_modules/`, tried
-  for any import the repo cannot resolve. stonyx core's docs import modules
-  that are not core dependencies; those are installed there (with
-  `--ignore-scripts`) rather than added to core's devDependencies, which
-  `loadModules` would boot. Every TypeScript failure names the resolved
-  `<pkg>@<version>`.
+  for any import of a package the repo neither is nor declares.
+  stonyx core's docs import modules that are not core dependencies;
+  those are installed there (with `--ignore-scripts`) rather than
+  added to core's devDependencies, which `loadModules` would boot.
+  Every TypeScript failure names the resolved `<pkg>@<version>`.
 - **Output:** one `file:line: CODE message` per failure, then
   `check-doc-imports: files= checked= failed= skipped-anonymous-default=
   members-unchecked= typescript=`. For a missing member the message names the
@@ -514,16 +561,42 @@ node path/to/check-doc-imports.mjs --repo . [--resolve-from <dir>]... [--file <d
   same when invoked through a symlinked path.
 - **No opt-out marker.** No intentionally bad fenced example exists today.
 
-The script uses this repo's pinned `typescript` devDependency (the checked
-repo's own is the fallback), so the result does not depend on the checked
-repo's TypeScript version.
+The script uses only this repo's pinned `typescript` devDependency, loaded from
+next to the script. There is no fallback to the checked repo's TypeScript: in
+CI that copy is consumer-controlled code, and the verdict must not depend on
+it. `ci.yml` nests this tree inside the consumer's, so Node's lookup would
+reach the consumer's `node_modules`; a `typescript` whose realpath is outside
+this tree is refused before it is loaded. If this tree is not installed the
+script exits 2.
+
+A package found in a `--resolve-from` directory is used only for names the
+repo neither is nor declares. The repo's own name resolves from its build and
+its declared dependencies from its install, so a published copy sitting in
+`--resolve-from` (as a transitive dependency) cannot stand in for them.
+
+### `scripts/doc-registry-packages.mjs`
+
+```bash
+node path/to/doc-registry-packages.mjs --repo .
+```
+
+Prints, one per line, the stonyx packages that the repo's `README.md` and
+`docs/**/*.md` import in fenced code but that the repo neither is nor lists in
+`dependencies`, `devDependencies`, `peerDependencies` or
+`optionalDependencies`. `ci.yml` installs these at `@beta` for
+`--resolve-from`. The names come from docs, so they count as consumer text:
+only names matching `stonyx` or `@stonyx/<lowercase-name>` are printed.
+Anything else is left for the check to fail as unresolved and never reaches
+npm. A well-formed name that is not published does reach `npm view`, which
+`ci.yml` uses to skip it, so the check reports it at its doc line. Exit 0, or
+2 on a usage error.
 
 ### Tests
 
 | File | Covers |
 |------|--------|
 | `test/derive-version-test.js` | Characterization of `deriveVersion` against a committed, read-only capture of the `@stonyx/oauth` registry state (`test/fixtures/oauth-registry-state.json`) |
-| `test/workflows-test.js` | That `npm-publish.yml` calls the script and retains no inline version arithmetic, and that `self-ci.yml` retains both a push and a pull_request trigger |
+| `test/workflows-test.js` | That `npm-publish.yml` calls the script and retains no inline version arithmetic, and that `self-ci.yml` retains both a push and a pull_request trigger. For `ci.yml` and the docs-import check (abofs/stonyx#122): the steps exist once each and in order after install; the build step; the `job.workflow_sha` ref step that fails on empty; the tooling checkout's exact `with:` (`repository`, `ref`, `path`, `persist-credentials: false`); `--ignore-scripts` on both installs, and the registry install into `$RUNNER_TEMP` at `@beta`; the exact check invocation; no `if:` or `continue-on-error:` on any docs-import step, no `continue-on-error` in `ci.yml` and no `if:` on the job; the registry step ends in `exit 1` and no docs-import step swallows a status; the registry step's real body run under bash with a stubbed `npm` (an `E404` name skipped and not retried, a non-404 failure kept, 3 failed installs exit 1, a failing name helper fails the step, and every `npm view` lookup runs from the registry temp dir, never the consumer tree); no `secrets.` and no credential names in `ci.yml`, `contents: read` with no job-level override; and that `npm-publish.yml`, `cascade.yml`, `security-audit.yml` and `self-ci.yml` do not run it |
 | `test/publish-glue-test.js` | Executes each derivation step's real `run:` body offline against a stubbed `npm`, and pins the checkout step's `ref:` and `if:` |
 | `test/lift-equivalence-test.js` | Differential proof that `deriveVersion` matches the `main@692d122` heredocs it was lifted from, across 864 input pairs. Those heredocs are read from `test/fixtures/npm-publish-692d122.yml`, a frozen copy of the pre-lift workflow pinned by blob SHA -- **do not refresh it**, it is the text the equivalence is measured against |
 | `test/injection-test.js` | That no consumer-controlled string reaches program text or a shell string in `npm-publish.yml` or `cascade.yml`. Executes the real `run:` bodies against a stubbed `npm`/`pnpm`/`git` and the real `cascade.yml` `script:` body against a stubbed `github` client; pins the npm-name and semver grammars and their duplicated copies; **runs the raw `${{ }}` guarantee** over every file in `.github/workflows/`; and runs the diagnostic sweeps below over the same files, asserting each reports nothing |
@@ -535,7 +608,7 @@ repo's TypeScript version.
 | `test/helpers/expression-allowlist.js` | The named exceptions the guarantee reads: one entry per `(context, line, expression)` triple, each pinning the exact source line, the key that line is written under, the expression, an occurrence count and a reason. The counts are derived from the files rather than snapshotted, so an entry added with its expression does not require bumping a literal. An entry whose `why` is shorter than 60 characters, or which names none of its own expression's references, is refused -- a reason that could be pasted onto any entry is not a reason |
 | `test/helpers/interpolation-sweep.js` | The **diagnostic** `${{ }}` sweep as a pure function of `(file, text)`, plus the step-scoped `ALLOWLIST` and `NON_BODY_KEY_LINES`. Names which step and which sink an expression sits in, and pins the `run:`/`script:` body population so the executed tests cannot go vacuous. Returns problem strings rather than asserting, **which is the point**: `injection-test.js` asserts the array is empty for the real workflows and `sweep-bypass-test.js` asserts it is non-empty for broken ones. Same code, both directions |
 | `test/helpers/workflow-yaml.js` | **Diagnostics only** -- no guarantee depends on it. Minimal reader for the workflow YAML shapes the tests assert on: a step's `run:` body, `env:` mapping and `with: script:` body, a workflow's trigger keys, `${{ }}` expression extraction, and the raw-text `run:`/`script:` key-line count. Every step list item is a step, named or not; the name-taking wrappers **throw** on an ambiguous name rather than returning the first match; a list item in a shape it cannot resolve **throws, never skips**; and a step with no such key raises a typed `MissingStepKeyError` (`code === 'MISSING_STEP_KEY'`) so callers can tell "has none" from "could not read the one it has" without matching on message text |
-| `test/doc-imports-test.js` | `scripts/check-doc-imports.mjs` against the committed fixture packages in `test/fixtures/doc-imports/` (copied to a temp dir first, so a parent directory's `node_modules` cannot resolve what a fixture means to leave unresolved). Each red case asserts the exact `file:line: CODE` line, not only a non-zero exit, so a crash cannot pass them: missing member, unexported subpath, an unresolvable side-effect import, default-name mismatch on an import and a re-export, type as value, a fenced (commented-out) import that extracts to 0, one extracted import next to one that is not, an import in a non-JS fence, a trailing-slash spec, wildcard exports to a missing file (typed and untyped), untyped subpath not in exports, an unbuilt package, and a `--resolve-from` failure naming its version. Greens: correct imports, anonymous default skipped and counted, `checked=0` for a doc with no stonyx imports, default file discovery, core self-reference plus `--resolve-from`, untyped wildcard. CLI: run through a symlinked directory and a symlinked file it still checks (exit 1 on a red fixture, not a silent 0), a realpath `--file` under a symlinked `--repo` is reported repo-relative, and a missing `--repo` exits 2. Extraction units cover comments inside and around imports and specs outside the name grammar. Also asserts that no workflow references the script yet |
+| `test/doc-imports-test.js` | `scripts/check-doc-imports.mjs` against the committed fixture packages in `test/fixtures/doc-imports/` (copied to a temp dir first, so a parent directory's `node_modules` cannot resolve what a fixture means to leave unresolved). Each red case asserts the exact `file:line: CODE` line, not only a non-zero exit, so a crash cannot pass them: missing member, unexported subpath, an unresolvable side-effect import, default-name mismatch on an import and a re-export, type as value, a fenced (commented-out) import that extracts to 0, one extracted import next to one that is not, an import in a non-JS fence, a trailing-slash spec, wildcard exports to a missing file (typed and untyped), untyped subpath not in exports, an unbuilt package, a `--resolve-from` failure naming its version, the repo's own subpath missing from its exports while a published copy in `--resolve-from` has it, and a declared but uninstalled dependency that `--resolve-from` holds (typed and untyped; control: the same untyped package undeclared does resolve from it). Greens: correct imports, anonymous default skipped and counted, `checked=0` for a doc with no stonyx imports, default file discovery, core self-reference plus `--resolve-from`, untyped wildcard. CLI: run through a symlinked directory and a symlinked file it still checks (exit 1 on a red fixture, not a silent 0), a realpath `--file` under a symlinked `--repo` is reported repo-relative, and a missing `--repo` exits 2. Extraction units cover comments inside and around imports and specs outside the name grammar. Also asserts that `ci.yml` runs the script and the credentialed workflows do not; that with the script nested inside a consumer the way `ci.yml` nests it (`<repo>/.stonyx-workflows/scripts/`) and no TypeScript in the tooling tree, the run exits 2 even though the consumer has one, and a consumer-planted `typescript` is never executed, nor is one in a sibling directory that shares the tooling tree's name as a prefix (control: the same run passes with the tooling TypeScript); and `doc-registry-packages.mjs` (self and every declared dependency field excluded, names outside the grammar such as `@stonyx/$(touch pwned)` dropped, CLI exit codes) |
 | `test/fixtures/doc-imports/` | Minimal fixture packages (`discord`, `core` named `stonyx`, untyped `dashboard`, `unbuilt`) with hand-written `.d.ts`, and `registry/node_modules/`, which is committed through a `.gitignore` exception because a `--resolve-from` directory must hold a `node_modules/` |
 | `test/fixtures/security-audit-e07e185.yml` | A frozen copy of `security-audit.yml` at `e07e185`, pinned by blob SHA, with a local copy of its allowlist entry. **Do not refresh it.** #34 will delete both the live sink and the live entry; these mutations are measured against the text they were measured against, and re-pointing them at the live file is what destroys the test |
 
