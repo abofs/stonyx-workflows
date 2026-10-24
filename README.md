@@ -72,10 +72,10 @@ jobs:
 Reusable workflow for publishing npm packages with alpha/beta/stable release stages and cascade support.
 
 **Features:**
-- **Alpha** (PR): Dynamic version calculation from npm, no commit to PR branch, no tag/release
-- **Beta** (merge to main or cascade): Dynamic version calculation, commits to main, creates tag + GitHub release
-- **Stable** (manual dispatch): Patch/minor/major bump, creates tag + GitHub release
-- **Cascade mode**: When triggered via `cascade-source`, updates all `@stonyx/*` dependencies to latest from npm before publishing
+- **Alpha** (PR): Dynamic version calculation from npm, no commit to PR branch, no tag/release. Comments the published version and its `pnpm add` install command on the PR (`Comment on PR with alpha version` step)
+- **Beta** (push to any branch other than `main`, i.e. a merge to `dev`, or cascade): Dynamic version calculation, commits the bump to the pushed branch, creates tag + GitHub release
+- **Stable** (push to `main`): `pnpm version patch` (drops the prerelease suffix), commits to `main`, creates tag + GitHub release. Manual dispatch with `patch`/`minor`/`major` or `custom-version` also publishes a non-prerelease version, but dispatch is frozen
+- **Cascade mode**: When triggered via `cascade-source`, updates all `@stonyx/*` dependencies to latest from npm before publishing, and installs with `--no-frozen-lockfile` instead of `--frozen-lockfile` so the updated ranges can resolve
 
 **Note for consumers:** on the alpha and beta paths this workflow checks
 `abofs/stonyx-workflows` out into `.stonyx-workflows/` in your workspace to
@@ -258,7 +258,7 @@ guard never got as far as packing.
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `CASCADE_PAT` | No | PAT with `repo` scope. Required when `cascade-source` is set (used for checkout token to push back to main) |
+| `CASCADE_PAT` | No | PAT with `repo` scope. Required when `cascade-source` is set (used as the checkout token, and to push the beta bump back to the checked-out branch: the dispatch's `github.ref`, which is the repo's default branch) |
 
 **Outputs:**
 
@@ -271,10 +271,10 @@ guard never got as far as packing.
 **Version Progression:**
 
 ```
-PR pushes:     0.2.3-alpha.0 → 0.2.3-alpha.1 → 0.2.3-alpha.2
-Merge to main: 0.2.3-beta.0
-Another merge: 0.2.3-beta.1
-Manual stable: 0.2.3
+PR pushes:          0.2.3-alpha.0 → 0.2.3-alpha.1 → 0.2.3-alpha.2
+Merge to dev:       0.2.3-beta.0
+Another merge:      0.2.3-beta.1
+Merge dev to main:  0.2.3
 ```
 
 ---
@@ -864,7 +864,9 @@ patterns** is the rule the checks themselves are built to:
 }
 ```
 
-To add a new package or dependency relationship, edit `dependency-map.json` and submit a PR.
+The map is not derived from any `package.json`: nothing detects a new package or a changed dependency, so it must be edited by hand. To add a new package or dependency relationship, edit `dependency-map.json` and submit a PR.
+
+`cascade.yml` deduplicates `dependents` by `repo` before dispatching, so a repo listed under both `dependencies` and `devDependencies` receives one `repository_dispatch`, not two.
 
 ---
 
@@ -892,9 +894,9 @@ on:
         type: string
   pull_request:
     types: [opened, synchronize, reopened]
-    branches: [main]
+    branches: [dev, main]
   push:
-    branches: [main]
+    branches: [dev, main]
   repository_dispatch:
     types: [cascade-publish]
 
@@ -943,7 +945,7 @@ Create a GitHub PAT (or fine-grained token) with `repo` scope and store it as an
 
 This token is used for:
 1. **`cascade.yml`** — `repos.createDispatchEvent()` API calls to trigger downstream repos
-2. **`npm-publish.yml`** — checkout token during cascade mode, enabling `git push` back to `main`
+2. **`npm-publish.yml`** — checkout token during cascade mode, enabling `git push` back to the checked-out branch (the repo's default branch, since a `repository_dispatch` runs on it)
 
 Child repos pass it via `secrets: inherit` (org secrets are automatically available).
 

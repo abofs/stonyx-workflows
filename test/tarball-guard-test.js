@@ -1064,10 +1064,9 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     // stayed 344/344 green with `continue-on-error: true` on the guard.
     //
     // Not a hypothetical idiom. It is THIS repo's established one for making a
-    // step advisory -- `security-audit.yml:45` uses it, and two agent-facing
-    // docs here (`docs/agents/qa-test-engineer.md:44`,
-    // `docs/agents/validation-loop-team.md:41`) plus `README.md:293` name it as
-    // the way to do that. The guard invokes each consumer's full build and test
+    // step advisory -- the `Run security audit` step in `security-audit.yml`
+    // uses it, and the README's `security-audit.yml` section names it as the
+    // way to do that. The guard invokes each consumer's full build and test
     // suite via prepublishOnly, which is exactly the step someone marks
     // advisory the first time it flakes.
     //

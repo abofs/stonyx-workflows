@@ -4,23 +4,23 @@ This document is the canonical release reference for all `@stonyx/*` packages. I
 
 ## Release pipeline
 
-All Stonyx packages follow a 3-stage pipeline:
+All Stonyx packages follow a 3-stage pipeline. PRs target `dev`; `dev` merges to `main`.
 
 | Stage | Trigger | npm tag | Example version |
 |---|---|---|---|
-| Alpha | PR push | `alpha` | `0.x.y-alpha.N` |
-| Beta | Merge to main | `beta` | `0.x.y-beta.N` |
-| Stable | Manual workflow dispatch (**currently frozen** -- see [No rehearsal path](#no-rehearsal-path)) | `latest` | `0.x.y` |
+| Alpha | PR push (PRs into `dev` or `main`) | `alpha` | `0.x.y-alpha.N` |
+| Beta | Push to `dev` (a PR merge), or a cascade dispatch | `beta` | `0.x.y-beta.N` |
+| Stable | Push to `main` (a `dev` → `main` merge) | `latest` | `0.x.y` |
 
-> **Target state (pending [stonyx-workflows#5](https://github.com/abofs/stonyx-workflows/issues/5)):** PRs will target `dev` (beta on merge), and `dev` merges to `main` (stable on merge). This replaces manual dispatch for stable releases.
+The channel is chosen by the `Determine version bump type` step in `.github/workflows/npm-publish.yml`, whose `if`/`elif` chain tests, in this order: a non-empty `cascade-source` gives beta, a `pull_request` event gives alpha, a push to `refs/heads/main` gives stable, any other push gives beta. A stable run bumps with `pnpm version patch` in the `Bump version (stable)` step, which turns `0.x.y-beta.N` into `0.x.y`. A manual `workflow_dispatch` (`patch`/`minor`/`major` or `custom-version`) is a second, non-prerelease path; it is **currently frozen** (see [No rehearsal path](#no-rehearsal-path)).
 
 Beta and stable releases also create a GitHub release.
 
 ## How it works
 
 - **Versioning is automatic** -- managed by CI workflows defined in this repo (`stonyx-workflows`). No manual version bumps needed.
-- **PR-based workflow** -- open a PR, push commits, and alpha builds publish automatically. Merge to main for beta.
-- **Stable releases** -- nominally triggered via manual workflow dispatch in GitHub Actions (pending migration to branch-based per [stonyx-workflows#5](https://github.com/abofs/stonyx-workflows/issues/5)). `workflow_dispatch` on `abofs/stonyx*` is **frozen at present**, so the manual path documented above and in the pipeline table cannot currently be executed. This matters beyond release planning, but it does **not** mean the input validators are unreachable. Dispatch is the only trigger that reaches `custom-version`, so that input's validator genuinely cannot be exercised in production today. `version-type` is different: dispatch is its only *intended* trigger, but a malformed `repository_dispatch` carrying no `source_package` reaches it too. Measured against the real `Determine version bump type` body -- `cascade-source` empty, event neither `push` nor `pull_request`, `custom-version` empty -- every branch falls through to the final `else` and the job exits 1 with `::error::version-type must be one of patch, minor, major (got: )`. That validator is live in production today, on the one path that matters, and it is where a malformed cascade dispatch now stops instead of publishing an unbumped version. See the README's *Eight observable behaviour changes*, item 6.
+- **PR-based workflow** -- open a PR into `dev`, push commits, and alpha builds publish automatically. Merge to `dev` for beta.
+- **Stable releases** -- publish on every push to `main` (the `refs/heads/main` arm of `Determine version bump type`), that is, when `dev` is merged to `main`. The branch-based channels of [stonyx-workflows#5](https://github.com/abofs/stonyx-workflows/issues/5) (closed) are what the workflow implements today. The manual `workflow_dispatch` path still exists, but `workflow_dispatch` on `abofs/stonyx*` is **frozen at present**, so it cannot currently be executed. This matters beyond release planning, but it does **not** mean the input validators are unreachable. Dispatch is the only trigger that reaches `custom-version`, so that input's validator genuinely cannot be exercised in production today. `version-type` is different: dispatch is its only *intended* trigger, but a malformed `repository_dispatch` carrying no `source_package` reaches it too. Measured against the real `Determine version bump type` body -- `cascade-source` empty, event neither `push` nor `pull_request`, `custom-version` empty -- every branch falls through to the final `else` and the job exits 1 with `::error::version-type must be one of patch, minor, major (got: )`. That validator is live in production today, on the one path that matters, and it is where a malformed cascade dispatch now stops instead of publishing an unbumped version. See the README's *Eight observable behaviour changes*, item 6.
 
 ## Cascade publishing
 
@@ -118,7 +118,7 @@ The npm identity is bound. The GitHub identity is not. Do not reason about one f
 | `pnpm version` | `preversion`, `version`, `postversion` | 5 |
 | `pnpm publish` | `prepublishOnly`, `prepack`, `prepare` | 3 |
 
-Any of them could read `.git/config`. The issue was originally filed naming only the first two; refinement widened it to the rest, and that is what rules out the "just split the job" fix -- `pnpm publish` **is** consumer code, so a split still stands the PAT next to lifecycle scripts. Push access to any one of the **twelve** `abofs/stonyx*` repos therefore yielded a credential reaching all of them, including repos the actor could not push to. Twelve, not eleven: the count that gets re-derived here is the ten published packages plus this repo, which omits the private `abofs/stonyx-dashboard`. It publishes nothing, so it is easy to miss, but it consumes `ci.yml@main` and `security-audit.yml@main` and so is inside the blast radius like everything else. (It declares no git-protocol dependencies either, so the consumer-impact assessment below holds for it unchanged.) No injection was required; that was the workflow operating exactly as designed ([stonyx-workflows#35](https://github.com/abofs/stonyx-workflows/issues/35)).
+Any of them could read `.git/config`. The issue was originally filed naming only the first two; it was later widened to the rest, and that is what rules out the "just split the job" fix -- `pnpm publish` **is** consumer code, so a split still stands the PAT next to lifecycle scripts. Push access to any one of the **twelve** `abofs/stonyx*` repos therefore yielded a credential reaching all of them, including repos the actor could not push to. Twelve, not eleven: the count that gets re-derived here is the ten published packages plus this repo, which omits the private `abofs/stonyx-dashboard`. It publishes nothing, so it is easy to miss, but it consumes `ci.yml@main` and `security-audit.yml@main` and so is inside the blast radius like everything else. (It declares no git-protocol dependencies either, so the consumer-impact assessment below holds for it unchanged.) No injection was required; that was the workflow operating exactly as designed ([stonyx-workflows#35](https://github.com/abofs/stonyx-workflows/issues/35)).
 
 **It had already happened.** 21 published `@stonyx/cron` versions (`0.2.1-alpha.0`, `0.2.1-beta.0` through `beta.19`) shipped `package/.git/config` containing a real credential to the **public npm registry** -- four distinct tokens, all since revoked.
 
@@ -230,7 +230,7 @@ There is **no staging path for these workflows**. Every consumer references `@ma
 
 Nor can a change be rehearsed before it lands: `workflow_dispatch` on `abofs/stonyx*` is frozen, and the `stonyx-canary` npm org does not exist, so there is no way to drive a real publish against a candidate revision.
 
-**`self-ci.yml`'s `node:test` suite is therefore the only gate.** A change that is not covered by an executed test in `test/` is not covered at all -- and the rollback for a bad merge is a revert PR, after the fact, with whatever published in between already on the registry. Weigh new workflow behaviour accordingly.
+**`self-ci.yml`'s `node:test` suite is therefore the only gate.** A change that is not covered by an executed test in `test/` is not covered at all, and three surfaces need a real runner and a consumer repo, so the suite cannot reach them: OIDC publishing, `repository_dispatch` delivery, and a cascade end to end -- and the rollback for a bad merge is a revert PR, after the fact, with whatever published in between already on the registry. Weigh new workflow behaviour accordingly.
 
 ### The publish workflow fetches a script into your workspace
 
