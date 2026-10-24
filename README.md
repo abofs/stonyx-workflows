@@ -405,11 +405,12 @@ Runs `pnpm install --frozen-lockfile` then `pnpm test` on Node `24.13.0`.
 ## Development
 
 This repo has an executable surface: a private root `package.json`, a test
-suite, and one extracted script. There are no dependencies -- tests use Node
-core modules only (`node:test`, `node:assert`, and for the executed workflow
-cases `node:child_process`, `node:crypto`, `node:fs`, `node:module`, `node:os`,
-`node:path`, `node:url`, `node:vm`),
-and `pnpm test` runs with no `node_modules` present.
+suite, and two scripts. There is one dependency, the pinned `typescript`
+devDependency that `scripts/check-doc-imports.mjs` type-checks with. Everything
+else uses Node core modules only (`node:test`, `node:assert`, and for the
+executed workflow cases `node:child_process`, `node:crypto`, `node:fs`,
+`node:module`, `node:os`, `node:path`, `node:url`, `node:vm`). `pnpm test`
+needs `pnpm install` first for the docs-import tests; the workflow tests do not.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -452,6 +453,60 @@ reusable workflow; the preceding `Resolve stonyx-workflows ref` step fails the
 job if it is ever empty rather than letting `actions/checkout` fall back to the
 default branch.
 
+### `scripts/check-doc-imports.mjs`
+
+Checks that every stonyx import a consumer can copy out of a repo's docs
+resolves against the package's real `exports` and names members that exist
+([abofs/stonyx#122](https://github.com/abofs/stonyx/issues/122)). **Not wired
+into any workflow yet**: the docs it fails on are fixed first, then a later
+change adds it as a step in `ci.yml`.
+
+```bash
+pnpm run --if-present build          # the repo's own package resolves by self-reference to dist/
+node path/to/check-doc-imports.mjs --repo . [--resolve-from <dir>]... [--file <doc.md>]...
+```
+
+- **Scope:** `README.md` and `docs/**/*.md`; fences tagged `js`,
+  `javascript`, `mjs`, `cjs`, `jsx`, `ts`, `typescript`, `mts`, `cts`, `tsx`,
+  `gjs`, `gts`, or untagged; `import ... from`, `export ... from` and
+  side-effect `import '...'` of `stonyx`, `stonyx/<subpath>`, `@stonyx/<pkg>`
+  and `@stonyx/<pkg>/<subpath>`.
+- **Out of scope:** dynamic `import('...')` (four occurrences in the
+  `deprecation-remediation.md` files of stonyx-cron and stonyx-events),
+  `require(...)`, prose and inline code, indented code blocks.
+- **Mechanism:** each statement becomes a one-statement `.mts` probe, held in
+  memory (nothing is written into the repo), placed at the repo root and
+  type-checked with `module`/`moduleResolution: NodeNext`,
+  `verbatimModuleSyntax` and `noUncheckedSideEffectImports`. The failure
+  codes are TS2307 (unexported subpath or unresolvable package), TS2614/TS2305
+  (no such member) and TS1484 (a type imported as a value). An unbuilt repo
+  fails closed with TS2307.
+- **On top of TypeScript:** `DEFAULT-NAME` (a default import's binding must
+  equal the default export's declared name; anonymous `_default` exports are
+  skipped and counted), `WILDCARD-NO-FILE` (a wildcard `exports` key must map
+  to a file that exists), `NOT-EXPORTED` (for packages that ship no types,
+  such as `@stonyx/dashboard`, which are checked by `exports` match and file
+  existence only, and counted as `members-unchecked`), and `UNEXTRACTED` (a
+  stonyx import inside any fence that was not extracted as a statement, so the
+  check cannot pass by not seeing an import).
+- **`--resolve-from <dir>`:** a directory holding a `node_modules/`, tried
+  for any import the repo cannot resolve. stonyx core's docs import modules
+  that are not core dependencies; those are installed there (with
+  `--ignore-scripts`) rather than added to core's devDependencies, which
+  `loadModules` would boot. Every TypeScript failure names the resolved
+  `<pkg>@<version>`.
+- **Output:** one `file:line: CODE message` per failure, then
+  `check-doc-imports: files= checked= failed= skipped-anonymous-default=
+  members-unchecked= typescript=`. For a missing member the message names the
+  subpath that does export it, in place of TypeScript's own suggestion (which
+  for `{ Command } from '@stonyx/discord'` is the wrong fix). Exit status 0
+  is clean, 1 means failures, 2 means a usage error.
+- **No opt-out marker.** No intentionally bad fenced example exists today.
+
+The script uses this repo's pinned `typescript` devDependency (the checked
+repo's own is the fallback), so the result does not depend on the checked
+repo's TypeScript version.
+
 ### Tests
 
 | File | Covers |
@@ -469,6 +524,8 @@ default branch.
 | `test/helpers/expression-allowlist.js` | The named exceptions the guarantee reads: one entry per `(context, line, expression)` triple, each pinning the exact source line, the key that line is written under, the expression, an occurrence count and a reason. The counts are derived from the files rather than snapshotted, so an entry added with its expression does not require bumping a literal. An entry whose `why` is shorter than 60 characters, or which names none of its own expression's references, is refused -- a reason that could be pasted onto any entry is not a reason |
 | `test/helpers/interpolation-sweep.js` | The **diagnostic** `${{ }}` sweep as a pure function of `(file, text)`, plus the step-scoped `ALLOWLIST` and `NON_BODY_KEY_LINES`. Names which step and which sink an expression sits in, and pins the `run:`/`script:` body population so the executed tests cannot go vacuous. Returns problem strings rather than asserting, **which is the point**: `injection-test.js` asserts the array is empty for the real workflows and `sweep-bypass-test.js` asserts it is non-empty for broken ones. Same code, both directions |
 | `test/helpers/workflow-yaml.js` | **Diagnostics only** -- no guarantee depends on it. Minimal reader for the workflow YAML shapes the tests assert on: a step's `run:` body, `env:` mapping and `with: script:` body, a workflow's trigger keys, `${{ }}` expression extraction, and the raw-text `run:`/`script:` key-line count. Every step list item is a step, named or not; the name-taking wrappers **throw** on an ambiguous name rather than returning the first match; a list item in a shape it cannot resolve **throws, never skips**; and a step with no such key raises a typed `MissingStepKeyError` (`code === 'MISSING_STEP_KEY'`) so callers can tell "has none" from "could not read the one it has" without matching on message text |
+| `test/doc-imports-test.js` | `scripts/check-doc-imports.mjs` against the committed fixture packages in `test/fixtures/doc-imports/` (copied to a temp dir first, so a parent directory's `node_modules` cannot resolve what a fixture means to leave unresolved). Each red case asserts the exact `file:line: CODE` line, not only a non-zero exit, so a crash cannot pass them: missing member, unexported subpath, an unresolvable side-effect import, default-name mismatch on an import and a re-export, type as value, a fenced import that extracts to 0, one extracted import next to one that is not, an import in a non-JS fence, wildcard exports to a missing file (typed and untyped), untyped subpath not in exports, an unbuilt package, and a `--resolve-from` failure naming its version. Greens: correct imports, anonymous default skipped and counted, `checked=0` for a doc with no stonyx imports, default file discovery, core self-reference plus `--resolve-from`, untyped wildcard. Also asserts that no workflow references the script yet |
+| `test/fixtures/doc-imports/` | Minimal fixture packages (`discord`, `core` named `stonyx`, untyped `dashboard`, `unbuilt`) with hand-written `.d.ts`, and `registry/node_modules/`, which is committed through a `.gitignore` exception because a `--resolve-from` directory must hold a `node_modules/` |
 | `test/fixtures/security-audit-e07e185.yml` | A frozen copy of `security-audit.yml` at `e07e185`, pinned by blob SHA, with a local copy of its allowlist entry. **Do not refresh it.** #34 will delete both the live sink and the live entry; these mutations are measured against the text they were measured against, and re-pointing them at the live file is what destroys the test |
 
 Test files are named `*-test.js`, matching the convention every `@stonyx/*`
