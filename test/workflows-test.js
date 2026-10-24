@@ -2,7 +2,7 @@ import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -354,11 +354,12 @@ describe('ci.yml registry step, executed with a stub npm', () => {
     dir = mkdtempSync(join(tmpdir(), 's95-registry-step-'));
     mkdirSync(join(dir, 'bin'));
     // Stub npm. `view <name>`: E404 for names in NPM_404, another error for
-    // names in NPM_DOWN, else success. `install`: logs its argv, then exits
-    // NPM_INSTALL_RC.
+    // names in NPM_DOWN, else success; every view logs its cwd to
+    // NPM_VIEW_LOG. `install`: logs its argv, then exits NPM_INSTALL_RC.
     writeFileSync(join(dir, 'bin', 'npm'), [
       '#!/bin/sh',
       'if [ "$1" = view ]; then',
+      '  pwd -P >> "$NPM_VIEW_LOG"',
       '  case " $NPM_404 " in *" $2 "*) echo "npm error code E404" >&2; exit 1;; esac',
       '  case " $NPM_DOWN " in *" $2 "*) echo "npm error code ECONNRESET" >&2; exit 1;; esac',
       '  echo "$2"; exit 0',
@@ -386,7 +387,9 @@ describe('ci.yml registry step, executed with a stub npm', () => {
 
   function runStep(env, repo = join(dir, 'repo')) {
     const log = join(dir, `npm-${Math.random().toString(36).slice(2)}.log`);
+    const viewLog = `${log}.view`;
     writeFileSync(log, '');
+    writeFileSync(viewLog, '');
     const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', body], {
       cwd: repo,
       encoding: 'utf8',
@@ -394,11 +397,13 @@ describe('ci.yml registry step, executed with a stub npm', () => {
         PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
         RUNNER_TEMP: join(dir, 'runner-temp'),
         NPM_LOG: log,
+        NPM_VIEW_LOG: viewLog,
         ...env,
       },
     });
     const installs = readFileSync(log, 'utf8').split('\n').filter(Boolean);
-    return { ...r, installs, out: r.stdout + r.stderr };
+    const viewCwds = readFileSync(viewLog, 'utf8').split('\n').filter(Boolean);
+    return { ...r, installs, viewCwds, out: r.stdout + r.stderr };
   }
 
   test('an unpublished name is skipped, not retried; the published one is still installed', () => {
@@ -408,6 +413,18 @@ describe('ci.yml registry step, executed with a stub npm', () => {
     assert.match(r.installs[0], /@stonyx\/orm@beta/);
     assert.doesNotMatch(r.installs[0], /rest-servr/);
     assert.match(r.stdout, /@stonyx\/rest-servr is not published/);
+  });
+
+  // npm reads a project .npmrc from its cwd: a consumer .npmrc pointing
+  // `registry=` elsewhere would steer every lookup if `npm view` ran in the
+  // consumer's tree (measured with a real npm). The install is covered by
+  // --prefix; the lookups only by running from the temp dir.
+  test('every npm view runs from the registry temp dir, never the consumer tree', () => {
+    const r = runStep({});
+    assert.equal(r.status, 0, r.out);
+    assert.equal(r.viewCwds.length, 2, r.out);
+    const expected = realpathSync(join(dir, 'runner-temp', 'stonyx-doc-registry'));
+    for (const cwd of r.viewCwds) assert.equal(cwd, expected);
   });
 
   test('a non-404 npm view failure does not skip the name: it reaches the install', () => {

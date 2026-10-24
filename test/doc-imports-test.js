@@ -386,7 +386,7 @@ describe('TypeScript comes from the tooling tree only, never the checked repo', 
   const nestedScript = (repo) => join(lone, repo, '.stonyx-workflows', 'scripts', 'check-doc-imports.mjs');
   before(() => {
     lone = mkdtempSync(join(tmpdir(), 's95-doc-imports-lone-'));
-    for (const repo of ['repo', 'planted']) {
+    for (const repo of ['repo', 'planted', 'sibling']) {
       cpSync(join(FIXTURES, 'discord'), join(lone, repo), { recursive: true });
       mkdirSync(dirname(nestedScript(repo)), { recursive: true });
       cpSync(SCRIPT, nestedScript(repo));
@@ -400,6 +400,14 @@ describe('TypeScript comes from the tooling tree only, never the checked repo', 
     mkdirSync(fake);
     writeFileSync(join(fake, 'package.json'), JSON.stringify({ name: 'typescript', version: '0.0.0-planted', main: 'index.js' }));
     writeFileSync(join(fake, 'index.js'), `require('node:fs').writeFileSync(${JSON.stringify(join(lone, 'PLANTED-RAN'))}, '1');\n`);
+    // A consumer typescript whose realpath is in a SIBLING of the tooling tree
+    // that shares its name as a prefix (<consumer>/.stonyx-workflows-x): the
+    // inside-the-tree test must compare whole path segments, not a prefix.
+    const siblingTs = join(lone, 'sibling', '.stonyx-workflows-x', 'node_modules', 'typescript');
+    mkdirSync(siblingTs, { recursive: true });
+    writeFileSync(join(siblingTs, 'package.json'), JSON.stringify({ name: 'typescript', version: '0.0.0-sibling', main: 'index.js' }));
+    writeFileSync(join(siblingTs, 'index.js'), `require('node:fs').writeFileSync(${JSON.stringify(join(lone, 'SIBLING-RAN'))}, '1');\n`);
+    symlinkSync(siblingTs, join(lone, 'sibling', 'node_modules', 'typescript'), 'dir');
   });
   after(() => rmSync(lone, { recursive: true, force: true }));
 
@@ -414,6 +422,13 @@ describe('TypeScript comes from the tooling tree only, never the checked repo', 
     const r = runCli(nestedScript('planted'), join(lone, 'planted'), '--file', 'cases/green-subpath.md');
     assert.equal(r.status, 2, r.stdout + r.stderr);
     assert.ok(!existsSync(join(lone, 'PLANTED-RAN')), 'the consumer\'s node_modules/typescript ran');
+  });
+
+  test('a typescript in a sibling dir sharing the tooling tree\'s name as a prefix is refused, not loaded', () => {
+    const r = runCli(nestedScript('sibling'), join(lone, 'sibling'), '--file', 'cases/green-subpath.md');
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stderr, /refusing .*\.stonyx-workflows-x.*, which is outside /);
+    assert.ok(!existsSync(join(lone, 'SIBLING-RAN')), 'the sibling-prefix typescript ran');
   });
 
   test('control: the same repo and doc pass with the tooling TypeScript', () => {
