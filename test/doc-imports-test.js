@@ -128,6 +128,10 @@ describe('red fixtures (each must name file:line and the code)', () => {
     assertRed(run('discord', '--file', 'cases/red-unexported-subpath.md'), 'cases/red-unexported-subpath.md', 4, 'TS2307');
   });
 
+  test('side-effect import of an unexported subpath: TS2307 (noUncheckedSideEffectImports)', () => {
+    assertRed(run('discord', '--file', 'cases/red-side-effect.md'), 'cases/red-side-effect.md', 4, 'TS2307');
+  });
+
   test('default-name mismatch: TS\'s own suggested fix binds Discord as Command', () => {
     const r = run('discord', '--file', 'cases/red-default-name.md');
     assertRed(r, 'cases/red-default-name.md', 4, 'DEFAULT-NAME');
