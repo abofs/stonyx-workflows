@@ -263,14 +263,17 @@ describe('red fixtures (each must name file:line and the code)', () => {
     const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ ...pkg, dependencies: { '@stonyx/legacy': '*' } }));
     const r = run('core-declares-legacy', '--file', 'cases/red-declared-untyped-not-installed.md', '--resolve-from', join(root, 'registry'));
+    // Checked before assertRed so it is the assertion that fires if the
+    // package is rescued: the rescued path prints this note (see the control).
+    assert.doesNotMatch(r.stdout, /ships no types/);
     assertRed(r, 'cases/red-declared-untyped-not-installed.md', 4, 'TS2307');
-    assert.doesNotMatch(r.stdout, /1\.0\.0-registry-fixture/);
   });
 
   test('control: the same untyped package, undeclared, does resolve from --resolve-from', () => {
     const r = run('core', '--file', 'cases/red-declared-untyped-not-installed.md', '--resolve-from', join(root, 'registry'));
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.equal(r.summary.unchecked, 1, r.stdout);
+    assert.match(r.stdout, /ships no types/);
   });
 });
 
