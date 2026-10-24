@@ -10,5 +10,8 @@
   },
   "scripts": {
     "test": "node scripts/run-tests.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
   }
 }
