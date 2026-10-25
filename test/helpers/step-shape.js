@@ -1,15 +1,15 @@
-// The shape allowlist for workflow steps (#61, round 4).
+// The shape allowlist for workflow steps (#61, introduced in the round-3 fix set).
 //
 // The #39/#60 publish-implies-guard check and the #60 job simulator read `if:`,
 // `id:`, `env:` and `run:` through `workflow-yaml.js`, a hand-written reader.
-// Three review rounds each found one more YAML shape that reader read
-// differently from GitHub -- a plain `if:` continued onto the next line, a
+// Review rounds on #61 found four YAML shapes that reader read differently
+// from GitHub -- a plain `if:` continued onto the next line, a
 // `>-` block whose body is a quoted string, an unclosed quoted `name:` that
 // swallows the `if:` line, a duplicate `if:` -- and in every case the check
 // evaluated a condition GitHub never runs. Patching the reader one shape at a
 // time does not end that, so this file removes the shapes instead: a workflow
-// step may only be written in the few forms the live files already use, and
-// anything else is a red that names the step, the key and the rule.
+// step may only be written in the few value shapes the live files already
+// use, and anything else is a red that names the step, the key and the rule.
 //
 // Inside a step, every own key (`name`, `id`, `if`, `uses`, `run`, ...) and
 // every key under `env:` and `with:` must be:
@@ -17,8 +17,18 @@
 //     closed on that line, with nothing after it -- or
 //   - for `run:` (and `script:` under `with:`) only, a `|` or `|-` block.
 // `env:` and `with:` may open a one-level mapping. `if:` must be a
-// single-line plain or double-quoted value with no backslash. A key may appear
-// once per step (and once per mapping). Any other line in a step is refused.
+// single-line plain or double-quoted value with no backslash, and not a plain
+// value YAML resolves to null, a boolean or a number. A key may appear once per
+// step (and once per mapping), and a case variant of a step key (`If:`) is
+// refused. The steps must be indented under `steps:`; a compact sequence (`- `
+// at the `steps:` column) is refused. Blank lines and `#` comment lines are
+// skipped; any other line in a step is refused.
+//
+// File-wide, outside `run:`/`script:` block bodies, it also refuses every form
+// that can spell a `steps` key, or a whole job, on a line it would not walk: a
+// flow collection (`{` or `[`, except a one-line `[word, word]` list), a quoted
+// key, an explicit `? key`, a tag, anchor or alias on a key or value, and a
+// quoted value not closed on its line.
 //
 // THIS FILE SHARES NO CODE WITH `workflow-yaml.js` AND LOADS NOTHING. If it
 // were fed by that reader, a shape the reader mis-tokenises would be
@@ -35,6 +45,10 @@ const ANY_STEPS = /^\s*(?:-\s+)?["']?steps["']?\s*:/;
 const KEY_LINE = /^([A-Za-z_][A-Za-z0-9_-]*):(?: +(.*))?$/;
 const BLOCK = new Set(['|', '|-']);
 const FLOW_WORDS = /^\[[\w.*/-]+(?:, [\w.*/-]+)*\]$/;
+// The step keys GitHub reads. A key that matches one of them case-insensitively
+// but not exactly (`If:`) is refused: the check would not read it as the key.
+const STEP_KEYS = ['name', 'id', 'if', 'uses', 'run', 'shell', 'with', 'env', 'working-directory',
+  'continue-on-error', 'timeout-minutes'];
 // A plain `if:` YAML resolves to something other than a string: null, a
 // boolean (YAML 1.2 true/false in any case, and the YAML 1.1 yes/no/on/off),
 // or a number (YAML 1.2 and 1.1 forms, including 1.1's `1:20`). The evaluator reads these as JavaScript values; GitHub coerces
@@ -156,6 +170,9 @@ export function stepShapes(text, file = '<workflow>') {
       }
       const [, key] = m;
       const value = (m[2] ?? '').trimEnd();
+      if (!STEP_KEYS.includes(key) && STEP_KEYS.includes(key.toLowerCase())) {
+        refuse(i, key, `a case variant of ${key.toLowerCase()}: is refused; keys are matched exactly`);
+      }
       if (step.keys.has(key)) refuse(i, key, 'the key appears twice in this step; YAML readers disagree on which one wins');
       step.keys.add(key);
       if (key === 'name') step.name = value;
