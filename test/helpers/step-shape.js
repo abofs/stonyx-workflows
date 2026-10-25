@@ -34,6 +34,7 @@ const STRUCTURAL_STEPS = /^( *)steps:\s*$/;
 const ANY_STEPS = /^\s*(?:-\s+)?["']?steps["']?\s*:/;
 const KEY_LINE = /^([A-Za-z_][A-Za-z0-9_-]*):(?: +(.*))?$/;
 const BLOCK = new Set(['|', '|-']);
+const FLOW_WORDS = /^\[[\w.*/-]+(?:, [\w.*/-]+)*\]$/;
 
 const spaces = (line) => line.match(/^ */)[0].length;
 
@@ -85,6 +86,46 @@ export function stepShapes(text, file = '<workflow>') {
     }
   });
   if (found.length > 0) return { steps, violations: found.map((v) => format(file, v)) };
+
+  // File-wide, outside `run:`/`script:` block bodies: the YAML forms that can
+  // spell a `steps` key, or a whole job, on a line `ANY_STEPS` and
+  // `STRUCTURAL_STEPS` never see -- `{runs-on: x, steps: [...]}`, `"ste\x70s":`,
+  // `? steps`, `!!str steps:`, `&a steps:` -- and the unclosed quote that could
+  // hide a `run: |` header from the body skip below. None of them is in a live
+  // file; the one flow collection that is (`branches: [main]`) is admitted in
+  // exactly that form.
+  let fileBody = null;
+  lines.forEach((line, i) => {
+    if (line.trim() === '') return;
+    const ind = spaces(line);
+    if (fileBody !== null) {
+      if (ind > fileBody) return;
+      fileBody = null;
+    }
+    const content = line.slice(ind);
+    if (content.startsWith('#')) return;
+    const dashes = content.match(/^(?:-(?: +|$))*/)[0];
+    const node = content.slice(dashes.length);
+    if (/^(?:run|script): +\|-?$/.test(node)) { fileBody = ind + dashes.length; return; }
+    if (/^\?(\s|$)/.test(node)) { fileLevel(i, 'an explicit "? key" is refused'); return; }
+    if (/^["']/.test(node)) {
+      if (/^(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*')\s*:(\s|$)/.test(node)) fileLevel(i, 'a quoted key is refused');
+      else if (!scalarShape(node).shape) fileLevel(i, scalarShape(node).why);
+      return;
+    }
+    if (/^[{[]/.test(node)) { fileLevel(i, 'a flow collection ({ or [) is refused'); return; }
+    if (/^[!&*]/.test(node)) { fileLevel(i, 'a tag, anchor or alias on a key or list item is refused'); return; }
+    const kv = node.match(/^[^\s:#][^:]*?: +(\S.*)$/);
+    if (!kv) return;
+    const value = kv[1].trimEnd();
+    if (/^[{[]/.test(value) && !FLOW_WORDS.test(value)) {
+      fileLevel(i, 'a flow collection ({ or [) is refused; only a one-line [word, word] list is read');
+    } else if (/^[!&*]/.test(value)) {
+      fileLevel(i, 'a tag, anchor or alias on a value is refused');
+    } else if (/^["']/.test(value) && !scalarShape(value).shape) {
+      fileLevel(i, scalarShape(value).why);
+    }
+  });
 
   lines.forEach((line, s) => {
     const opener = line.match(STRUCTURAL_STEPS);
