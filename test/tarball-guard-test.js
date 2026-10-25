@@ -1195,14 +1195,15 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
   // lines stayed 571/571 green (#61, Convention round 2). Each shape below is
   // applied to the real workflow text and must either be refused by the reader
   // or produce a witness -- never pass.
-  const BETA_IF = "        if: steps.release-gate.outputs.release == 'true' && contains(steps.package-version.outputs.version, 'beta')\n"
-    + '        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta';
+  // The beta publish step's one-line `if:` is REPLACED, whatever it says, so
+  // these cases keep testing the reader when the live condition changes.
+  const BETA_IF = /^( {6}- name: Publish to NPM \(beta\)\n) {8}if: [^\n]*\n/m;
   const GATE_BETA = "steps.release-gate.outputs.release == 'true' && contains(steps.package-version.outputs.version, 'beta')";
-  const BETA_RUN = '        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta';
   const BYPASS = "|| github.event_name == 'workflow_dispatch'";
   const withBetaIf = (ifLines) => {
-    assert.equal(npmPublish.split(BETA_IF).length, 2, 'the beta publish if:/run: pair must occur exactly once');
-    return npmPublish.replace(BETA_IF, `${ifLines}\n${BETA_RUN}`);
+    assert.equal(npmPublish.match(new RegExp(BETA_IF.source, 'gm'))?.length, 1,
+      'the beta publish step must open with a one-line if: exactly once');
+    return npmPublish.replace(BETA_IF, (_, nameLine) => `${nameLine}${ifLines}\n`);
   };
   const refusedOrWitnessed = (text, label) => {
     let found;
