@@ -120,6 +120,8 @@ describe('workflow step shape allowlist (#61)', () => {
     'if: with its value on the next lines': [BETA_IF, `        if:\n          ${GATE_BETA}\n          ${BYPASS}`, 'if', /no inline value/, 'beta'],
     'duplicate env: key': [BETA_IF, `${BETA_IF}\n        env:\n          A: one\n          A: two`, 'env.A', /appears twice under env:/, 'beta'],
     'env: value as a block': [BETA_IF, `${BETA_IF}\n        env:\n          A: |\n            x`, 'env.A', /block is allowed on run: and with: script: only/, 'beta'],
+    'plain value carrying ": "': [BETA_IF, `${BETA_IF}\n        id: a: b`, 'id', /": " inside a plain value/, 'beta'],
+    'single-quoted value not closed': [BETA_IF, `${BETA_IF}\n        id: 'a`, 'id', /single-quoted value must close/, 'beta'],
     'env: nested mapping': [BETA_IF, `${BETA_IF}\n        env:\n          A:\n            B: c`, 'env.A', /nested mapping/, 'beta'],
     'flow-mapping step': [/^ {6}- name: Publish to NPM \(beta\)$/, `      - {name: x, run: npm publish}\n${BETA_NAME}`, null, /not a "key: value" line/, 'none'],
   };
