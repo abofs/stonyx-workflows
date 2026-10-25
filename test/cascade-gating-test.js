@@ -312,6 +312,21 @@ const NEW = { publish: NEW_PUBLISH, cascade: NEW_CASCADE };
 
 const PUBLISH_STEPS = ['Publish to NPM (alpha)', 'Publish to NPM (beta)', 'Publish to NPM (stable)'];
 const PUSH_STEPS = ['Commit version bump and create tag (beta)', 'Commit version bump and create tag (stable)'];
+const STABLE_TRIO = ['Publish to NPM (stable)', 'Commit version bump and create tag (stable)', 'Create GitHub Release (stable)'];
+const BETA_TRIO = ['Publish to NPM (beta)', 'Commit version bump and create tag (beta)', 'Create GitHub Release (beta)'];
+const DERIVATION_STEPS = ['Resolve stonyx-workflows ref', 'Checkout stonyx-workflows (for version derivation script)'];
+
+/**
+ * Absolute anchors: what must and must not run, independent of the main@7fb718b
+ * baseline. The old-vs-new comparisons cannot see an evaluator bug -- it moves
+ * both sides alike -- so each scenario also states its expected steps outright
+ * (#61, Test Coverage HIGH 2). Asserted on BOTH sides, so a fixture or
+ * evaluator that lost a step reds here, not only in the differential.
+ */
+function assertRanAndSkipped(run, { ran, skipped }, label) {
+  for (const name of ran) assert.ok(run.ran.includes(name), `${label}: ${name} must run`);
+  for (const name of skipped) assert.ok(!run.ran.includes(name), `${label}: ${name} must not run`);
+}
 
 /** The fields "behaves exactly as today" is measured on. */
 function behaviour(run, onlySteps) {
@@ -372,6 +387,69 @@ describe('#60 harness controls -- the simulation can see the defect it is used t
   });
 });
 
+// The evaluator's answers, in absolute terms. Every old-vs-new comparison in
+// this file runs both workflows through the same evaluator, so an evaluator
+// bug changes both sides alike and cancels out; before this table, removing
+// `!` or making `||` always return its right side left the suite 500/500 green
+// (#61, Test Coverage S6/S8). Values are GitHub's documented semantics:
+// https://docs.github.com/en/actions/learn-github-actions/expressions
+describe('#60 harness controls -- the expression evaluator computes GitHub\'s answers', () => {
+  const ctx = {
+    github: { event_name: 'push', ref_name: 'Main' },
+    steps: { gate: { outputs: { release: 'true', empty: '' } } },
+    inputs: {},
+  };
+  const TABLE = [
+    // `!` -- falsy is false, null, '', 0; the STRING 'false' is truthy.
+    ["!''", true], ["!'x'", false], ['!null', true], ['!true', false], ['!false', true], ["!'false'", false],
+    ['!steps.gate.outputs.missing', true], ["!!'x'", true],
+    // `&&` and `||` return an operand, not a boolean.
+    ["'a' && 'b'", 'b'], ["'' && 'b'", ''], ["null && 'b'", null], ["'a' && ''", ''],
+    ["'a' || 'b'", 'a'], ["'' || 'b'", 'b'], ["null || ''", ''], ["'' || null", null],
+    // Precedence: ! over == over && over ||.
+    ["'' && 'x' || 'y'", 'y'], ["'a' || 'b' && ''", 'a'], ["!'' && 'z'", 'z'], ["!'a' == false", true],
+    ["('' || 'a') && 'b'", 'b'], ["'' && ('x' || 'y')", ''],
+    // `==` / `!=` -- case-insensitive strings, null equals ''.
+    ["'ABC' == 'abc'", true], ["'a' == 'b'", false], ["'a' != 'b'", true], ["'a' != 'A'", false],
+    ["null == ''", true], ["null == 'x'", false], ['null == null', true], ['true == true', true], ['true != false', true],
+    ["github.ref_name == 'main'", true], ["github.event_name != 'push'", false],
+    ["steps.gate.outputs.release == 'true'", true], ["steps.gate.outputs.empty == 'true'", false],
+    ["steps.nope.outputs.release == 'true'", false], ["steps.nope.outputs.release == ''", true],
+    // contains() -- case-insensitive substring, null is ''.
+    ["contains('Hello', 'ELL')", true], ["contains('abc', 'd')", false], ["contains(null, 'a')", false],
+    ["contains('', '')", true], ["contains(github.ref_name, 'AI')", true],
+    ["!contains('0.2.1', 'alpha') && !contains('0.2.1', 'beta')", true],
+    ["!contains('0.2.1-beta.3', 'alpha') && !contains('0.2.1-beta.3', 'beta')", false],
+    // The real workflow's `(alpha || beta)` shape.
+    ["'x' == 'y' || 'beta' == 'beta'", true], ["'x' == 'y' || 'a' == 'b'", false],
+  ];
+  for (const [src, expected] of TABLE) {
+    test(`${src}  =>  ${JSON.stringify(expected)}`, () => {
+      assert.deepEqual(evaluate(src, ctx), expected);
+    });
+  }
+
+  // Inputs GitHub rejects, or answers by a number coercion this evaluator does
+  // not implement. Each must THROW: an answer here would be a guess.
+  for (const [src, pattern] of [
+    ["contains('a' 'b')", /expected \)/],
+    ["contains('abc', 'b', 'zzz')", /takes 2 argument/],
+    ["contains('abc')", /takes 2 argument/],
+    ["always('junk')", /takes 0 argument/],
+    ["'a' 'b'", /trailing tokens/],
+    ["('a'", /expected \)/],
+    ["'a' ==", /unexpected end/],
+    ["'' == false", /number coercion/],
+    ["'true' == true", /number coercion/],
+    ["null == '0'", /number coercion/],
+    ['contains(true, \'t\')', /does not implement contains/],
+  ]) {
+    test(`refuses ${src}`, () => {
+      assert.throws(() => evaluate(src, ctx), pattern);
+    });
+  }
+});
+
 describe('#60 AC1 -- an alpha (pull_request) publish dispatches to no dependent', () => {
   test('the alpha still bumps, publishes and comments exactly as main@7fb718b did, and nothing is pushed', async () => {
     const before = await simulateRun(OLD, 'alpha');
@@ -387,6 +465,12 @@ describe('#60 AC1 -- an alpha (pull_request) publish dispatches to no dependent'
       assert.ok(!after.ran.includes(name), `${name} must not run on an alpha`);
     }
     assert.equal(after.outputs['version-channel'], 'alpha');
+    for (const [label, run] of [['main@7fb718b', before], ['head', after]]) {
+      assertRanAndSkipped(run, {
+        ran: [...DERIVATION_STEPS, 'Calculate next alpha version', 'Publish to NPM (alpha)'],
+        skipped: [...STABLE_TRIO, ...BETA_TRIO, 'Calculate next beta version'],
+      }, `alpha, ${label}`);
+    }
   });
 
   test('the job hands cascade.yml the no-cascade token, which dispatches nothing and does not fail', async () => {
@@ -405,6 +489,12 @@ describe('#60 AC2 -- a push to dev (beta) dispatches exactly as before', () => {
     assert.deepEqual(behaviour(after, OLD_STEP_NAMES), behaviour(before));
     assert.deepEqual(after.dispatch.repos, ['abofs/stonyx-orm']);
     assert.match(after.outputs['published-version'], /^0\.2\.1-beta\.\d+$/);
+    for (const [label, run] of [['main@7fb718b', before], ['head', after]]) {
+      assertRanAndSkipped(run, {
+        ran: [...DERIVATION_STEPS, 'Calculate next beta version', ...BETA_TRIO],
+        skipped: [...STABLE_TRIO, 'Publish to NPM (alpha)', 'Calculate next alpha version', 'Comment on PR with alpha version'],
+      }, `dev push, ${label}`);
+    }
   });
 });
 
@@ -416,6 +506,12 @@ describe('#60 AC2 (stable) -- a push to main is unchanged', () => {
     assert.deepEqual(behaviour(after, OLD_STEP_NAMES), behaviour(before));
     assert.deepEqual(after.dispatch.repos, ['abofs/stonyx-orm']);
     assert.equal(after.outputs['published-version'], '0.2.1');
+    for (const [label, run] of [['main@7fb718b', before], ['head', after]]) {
+      assertRanAndSkipped(run, {
+        ran: ['Bump version (stable)', ...STABLE_TRIO],
+        skipped: [...BETA_TRIO, ...DERIVATION_STEPS, 'Publish to NPM (alpha)', 'Comment on PR with alpha version'],
+      }, `main push, ${label}`);
+    }
   });
 });
 
