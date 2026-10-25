@@ -63,18 +63,14 @@ const FUNCTIONS = {
 
 export const truthy = (v) => !(v === false || v === null || v === undefined || v === '' || v === 0);
 
-// A JSON-number-shaped string: what GitHub would coerce to a real number.
-const NUMERIC = /^\s*-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][-+]?\d+)?\s*$|^\s*0x[0-9a-f]+\s*$/i;
+// A string GitHub MIGHT coerce to a number. The runner trims, then reads a
+// whitespace-only string as 0 and parses the rest with .NET's Double.TryParse
+// (leading sign, decimal point, exponent) plus 0x/0o prefixes -- so ' ', '00',
+// '+0', '.0', '0.' and '0o0' are all 0 there, which a JSON-number regex
+// answered as NaN (#61, Framework round 2). This over-approximates on purpose:
+// anything blank or opening like a number is refused, never answered.
+const MAYBE_NUMERIC = (str) => str.trim() === '' || /^[0-9+\-.]/.test(str.trim());
 
-/**
- * `==` as GitHub evaluates it, for the cases this evaluator commits to:
- * string/string (case-insensitive), boolean/boolean, null/null, and
- * null/string where the string is not numeric (null is 0, '' is 0, any other
- * non-numeric string is NaN). Every other mixed-type comparison goes through
- * GitHub's number coercion (`'' == false` is true there, `'true' == true` is
- * false), which this evaluator does not implement -- so it THROWS instead of
- * answering.
- */
 function loosely(a, b, src) {
   const kind = (v) => (v === null || v === undefined ? 'null' : typeof v);
   const [ka, kb] = [kind(a), kind(b)];
@@ -84,7 +80,7 @@ function loosely(a, b, src) {
   if ((ka === 'null' && kb === 'string') || (ka === 'string' && kb === 'null')) {
     const str = ka === 'string' ? a : b;
     if (str === '') return true;
-    if (!NUMERIC.test(str)) return false;
+    if (!MAYBE_NUMERIC(str)) return false;
   }
   throw new Error(
     `the test evaluator does not implement GitHub's number coercion for ${JSON.stringify(a)} == ${JSON.stringify(b)} `
@@ -167,8 +163,21 @@ function lookup(path, ctx, src) {
   if (!ROOTS.has(root)) throw new Error(`unknown context root ${root} in: ${src}`);
   let value = ctx[root];
   for (const key of rest) {
-    if (value === null || value === undefined) return null;
-    value = Object.prototype.hasOwnProperty.call(value, key) ? value[key] : null;
+    // Dereferencing a non-object is null in the runner (Operators/Index.cs);
+    // reading a JS own property made `<string>.length` a number (#61,
+    // Framework round 2).
+    if (value === null || value === undefined || typeof value !== 'object' || Array.isArray(value)) return null;
+    if (!Object.prototype.hasOwnProperty.call(value, key)) {
+      // The runner's context keys are case-insensitive. Rather than guess which
+      // of several case variants it would pick, a key that matches only
+      // case-insensitively is refused.
+      const variant = Object.keys(value).find((k) => k.toLowerCase() === key.toLowerCase());
+      if (variant !== undefined) {
+        throw new Error(`the test evaluator does not resolve ${key} to ${variant} case-insensitively (in: ${src})`);
+      }
+      return null;
+    }
+    value = value[key];
   }
   return value ?? null;
 }
