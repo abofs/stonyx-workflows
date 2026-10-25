@@ -917,7 +917,16 @@ jobs:
             exit 1
           fi
           case "$CHANNEL" in
-            alpha|beta|stable|custom|patch|minor|major)
+            alpha)
+              # A PR's alpha is published and commented on as before, but no
+              # dependent reads it: their update step resolves only
+              # dist-tags.beta and dist-tags.latest. Dispatching made every
+              # dependent publish an identical beta and push a release commit
+              # to its dev (utils PR#56: one alpha, eight repos).
+              echo "::notice::Alpha publish: no dependent is dispatched."
+              echo "version=no-cascade" >> "$GITHUB_OUTPUT"
+              ;;
+            beta|stable|custom|patch|minor|major)
               # Already proven a semver string by `Get package version`, so it
               # cannot forge a second output line.
               if [ -z "$PUBLISHED_VERSION" ]; then

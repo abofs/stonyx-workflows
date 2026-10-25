@@ -534,8 +534,28 @@ describe('#60 harness controls -- the simulation can see the defect it is used t
 });
 
 describe('#60 AC1 -- an alpha (pull_request) publish dispatches to no dependent', () => {
-  test.todo('the alpha still publishes and comments as before');
-  test.todo('cascade.yml dispatches nothing and does not fail');
+  test('the alpha still bumps, publishes and comments exactly as main@7fb718b did, and nothing is pushed', async () => {
+    const before = await simulateRun(OLD, 'alpha');
+    const after = await simulateRun(NEW, 'alpha');
+    assert.equal(after.failure, null, after.failure && after.failure.stderr);
+    const { publishedVersion: _a, dispatched: _b, ...afterRest } = behaviour(after, OLD_STEP_NAMES);
+    const { publishedVersion: _c, dispatched: _d, ...beforeRest } = behaviour(before);
+    assert.deepEqual(afterRest, beforeRest);
+    for (const name of ['Publish to NPM (alpha)', 'Comment on PR with alpha version']) {
+      assert.ok(after.ran.includes(name), `${name} must still run`);
+    }
+    for (const name of [...PUSH_STEPS, 'Publish to NPM (beta)', 'Publish to NPM (stable)']) {
+      assert.ok(!after.ran.includes(name), `${name} must not run on an alpha`);
+    }
+    assert.equal(after.outputs['version-channel'], 'alpha');
+  });
+
+  test('the job hands cascade.yml the no-cascade token, which dispatches nothing and does not fail', async () => {
+    const run = await simulateRun(NEW, 'alpha');
+    assert.equal(run.outputs['published-version'], 'no-cascade');
+    assert.equal(run.dispatch.error, null, run.dispatch.error && run.dispatch.error.message);
+    assert.deepEqual(run.dispatch.dispatched, []);
+  });
 });
 
 describe('#60 AC2 -- a push to dev (beta) dispatches exactly as before', () => {
