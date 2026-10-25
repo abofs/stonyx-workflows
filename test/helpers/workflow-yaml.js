@@ -8,7 +8,7 @@
 // (test/cascade-gating-test.js) reads `if:`, `id:`, `run:` and `env:` through
 // this file. For those, a wrong answer here IS a hole: a condition read
 // stricter than the one GitHub runs makes the check pass with nothing behind
-// it. Three review rounds on #61 each found one: a plain `if:` continued onto
+// it. Review rounds on #61 found four: a plain `if:` continued onto
 // the next line (571/571 green), a `>-` block whose body is one quoted literal
 // to GitHub but the gated condition here (588/588 green), an unclosed quoted
 // `name:` swallowing the `if:` line, a duplicate `if:` read first-wins.
@@ -366,17 +366,23 @@ function blockScalarBody(lines, headerIdx, describe) {
  */
 const KEY_PROBE = (key) => new RegExp(`^\\s*(['"]?)${key}\\1\\s*:(\\s|$)`);
 
+// The value on a key line, with the (possibly quoted) key and trailing space
+// stripped; and the value starts that are a block header, a tag, an anchor or
+// an alias. Shared by `stepScalar` and `stepScalarOf` so the two cannot drift.
+const keyLineValue = (line, key) => line.replace(new RegExp(`^\\s*(['"]?)${key}\\1\\s*:\\s*`), '').replace(/\s+$/, '');
+const NOT_ONE_LINE_VALUE = /^[|>&*!]/;
+
 function stepScalar(step, key) {
   const lines = step.body.split('\n');
   const idx = structuralLineIdxs(lines).find((i) => KEY_PROBE(key).test(lines[i])) ?? -1;
   if (idx === -1) throw new MissingStepKeyError(step, key);
 
-  const value = lines[idx].replace(new RegExp(`^\\s*(['"]?)${key}\\1\\s*:\\s*`), '').replace(/\s+$/, '');
+  const value = keyLineValue(lines[idx], key);
   const where = `step ${JSON.stringify(step.name)} ${key}: block`;
 
   if (value === '' || BLOCK_SCALAR_HEADER.test(value)) return blockScalarBody(lines, idx, where);
 
-  if (/^[|>&*!]/.test(value)) {
+  if (NOT_ONE_LINE_VALUE.test(value)) {
     throw new Error(
       `unrecognised ${key}: scalar header in step ${JSON.stringify(step.name)}: ${JSON.stringify(value)}. `
       + 'This helper does not understand it, and returning it as the body would put whatever it introduces '
@@ -468,8 +474,8 @@ export function stepScalarOf(step, key, { optional = false } = {}) {
   }
   const where = `${key}: in step ${JSON.stringify(step.name)}`;
   if (idxs.length > 1) refuseInline(where, `the key appears ${idxs.length} times, and YAML readers disagree on which one wins`);
-  const value = lines[idxs[0]].replace(new RegExp(`^\\s*(['"]?)${key}\\1\\s*:\\s*`), '').replace(/\s+$/, '');
-  if (value === '' || /^[|>&*!]/.test(value)) {
+  const value = keyLineValue(lines[idxs[0]], key);
+  if (value === '' || NOT_ONE_LINE_VALUE.test(value)) {
     refuseInline(where, `${JSON.stringify(value)} is not a one-line value (a block scalar, a next-line value, a tag, an anchor or an alias)`);
   }
   if (key === 'if' && value.startsWith("'")) refuseInline(where, 'a single-quoted if: is not read; write it plain or double-quoted');

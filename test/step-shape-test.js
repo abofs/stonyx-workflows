@@ -5,7 +5,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { stepShapes } from './helpers/step-shape.js';
 import { parseSteps } from './helpers/workflow-yaml.js';
 
-// abofs/stonyx-workflows#61, round 4. The evaluated #39/#60 publish-implies-
+// abofs/stonyx-workflows#61, round-3 fix set. The evaluated #39/#60 publish-implies-
 // guard check is only as true as the `if:` it is handed, and three rounds each
 // found a YAML shape the hand-written reader read differently from GitHub. The
 // fix is not a fourth reader patch: `test/helpers/step-shape.js` refuses every
@@ -142,6 +142,8 @@ describe('workflow step shape allowlist (#61)', () => {
     // SM9: env: children are held to the same one-line shapes.
     'unclosed quote under env: absorbs the if: line': [BETA_IF,
       `        env:\n          NOTE: "x\n${BETA_IF}\n          x: y"`, 'env.NOTE', /double-quoted value must close/, 'beta'],
+    // Convention r4 NIT: a case variant of a key the check reads.
+    'If: case variant': [BETA_IF, `${BETA_IF}\n        If: always()`, 'If', /case variant of if:/, 'beta'],
   };
 
   test('every bypass shape from rounds 2 to 4 is refused, naming the step, the key and the rule', () => {
@@ -172,7 +174,7 @@ describe('workflow step shape allowlist (#61)', () => {
     }
   });
 
-  // Round 4: each job below is appended to the live npm-publish.yml, and
+  // Round-4 reviews: each job below is appended to the live npm-publish.yml, and
   // libyaml (Ruby psych) reads every one of them as a job whose steps run an
   // unguarded publish. parseSteps sees none of them, so the population
   // cross-check agrees with the omission; the allowlist must refuse each
