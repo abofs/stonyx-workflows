@@ -163,6 +163,22 @@ describe('workflow step shape allowlist (#61)', () => {
     const SNEAK = {
       'compact sequence (Test Coverage W1, Framework W1)': ['  sneaky:\n    runs-on: ubuntu-latest\n    steps:\n'
         + '    - name: Publish elsewhere\n      run: pnpm publish --access public --no-git-checks\n', /compact sequence/],
+      'one-line flow job (Security W1, Framework W2)': ['  sneak: {runs-on: ubuntu-latest, steps: '
+        + '[{run: pnpm publish --access public, if: true}]}\n', /flow collection/],
+      'double-quoted escaped key (Framework W2)': ['  sneak:\n    runs-on: ubuntu-latest\n    "ste\\x70s":\n'
+        + '      - run: pnpm publish --access public\n', /quoted key/],
+      'explicit ? key (Framework W2)': ['  sneak:\n    runs-on: ubuntu-latest\n    ? steps\n'
+        + '    : - run: pnpm publish --access public\n', /explicit "\? key"/],
+      'tagged key': ['  sneak:\n    runs-on: ubuntu-latest\n    !!str steps:\n      - run: pnpm publish --access public\n',
+        /tag, anchor or alias on a key/],
+      'anchored key': ['  sneak:\n    runs-on: ubuntu-latest\n    &s steps:\n      - run: pnpm publish --access public\n',
+        /tag, anchor or alias on a key/],
+      'tagged flow job': ['  sneak: !!map {runs-on: ubuntu-latest, steps: [{run: pnpm publish --access public}]}\n',
+        /tag, anchor or alias on a value/],
+      // The body skip trusts a run: | header; one inside an unclosed quote is
+      // not a header, and the flow job after it is structure, not payload.
+      'flow job after a run: | header inside an unclosed quote': ['  a: "x\n run: |\n  "\n'
+        + '  sneak: {runs-on: ubuntu-latest, steps: [{run: pnpm publish --access public}]}\n', /must close on its own line/],
     };
     assert.ok(npmPublish.endsWith('\n'), 'the appended job must start on its own line');
     for (const [label, [job, rule]] of Object.entries(SNEAK)) {
@@ -171,6 +187,15 @@ describe('workflow step shape allowlist (#61)', () => {
         `${label}: parseSteps must not see the appended step, or this case does not test the blind spot`);
       const { violations } = stepShapes(text, 'npm-publish.yml');
       assert.ok(violations.some((v) => rule.test(v)), `${label}: ${JSON.stringify(violations)}`);
+    }
+  });
+
+  test('file-wide, a flow collection other than a one-line [word, word] list is refused', () => {
+    const wf = (v) => `on:\n  push:\n    branches: ${v}\njobs:\n  j:\n    steps:\n      - run: echo\n`;
+    assert.deepEqual(stepShapes(wf('[main]')).violations, []);
+    assert.deepEqual(stepShapes(wf('[main, release/*, v1-x]')).violations, []);
+    for (const v of ['[main, "x"]', '[{a: b}]', '[main,dev]', '[main', '{a: b}', '[ main ]']) {
+      assert.ok(stepShapes(wf(v)).violations.some((m) => /flow collection/.test(m)), v);
     }
   });
 
@@ -211,10 +236,22 @@ describe('workflow step shape allowlist (#61)', () => {
       '          script: |',
       '            const if_ = 1; // if: a',
       '              name: b',
+      '            const o = { a: [1, 2], "k": \'v\' };',
+      '            ? x',
+      '            [a, b]',
+      "            'q': null",
+      '      - run: |',
+      '          echo {a,b} [c] "d: e" \'f\'',
+      '          ? key',
+      '          - [x]',
+      '          - {y: z}',
+      '          "quoted": key',
+      '          if: null',
+      '          x: ~',
       '',
     ].join('\n');
     const { steps, violations } = stepShapes(wf, 'synthetic.yml');
     assert.deepEqual(violations, []);
-    assert.deepEqual(steps.map((s) => s.name), ['plain', '"double-quoted: with a colon"', 'wide dash', null]);
+    assert.deepEqual(steps.map((s) => s.name), ['plain', '"double-quoted: with a colon"', 'wide dash', null, null]);
   });
 });
