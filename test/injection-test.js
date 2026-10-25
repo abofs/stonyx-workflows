@@ -2,7 +2,6 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Script } from 'node:vm';
@@ -18,6 +17,7 @@ import {
   stepRunBody,
   stepScriptBody,
 } from './helpers/workflow-yaml.js';
+import { DISPATCH_STEP, dedent, runDispatch as runCascadeDispatch } from './helpers/cascade-dispatch.js';
 import { ESCAPE_ALLOWLIST, EXPRESSION_ALLOWLIST } from './helpers/expression-allowlist.js';
 import { rawSweepProblems, readWorkflowFile, workflowFileNames } from './helpers/raw-expression-scan.js';
 import {
@@ -109,7 +109,6 @@ const NAME_STEP = 'Get package name';
 const VERSION_STEP = 'Get package version';
 const CUSTOM_STEP = 'Bump version (custom)';
 const COMMENT_STEP = 'Comment on PR with alpha version';
-const DISPATCH_STEP = 'Dispatch to downstream dependents';
 
 // The payloads refinement executed against the pre-fix file. They are kept
 // verbatim so this suite is the same experiment, not a paraphrase of it.
@@ -140,14 +139,6 @@ const ILLEGAL_NAMES = {
 // repos that actually use this workflow would be a production incident on
 // every one of them.
 const LEGAL_NAMES = ['@stonyx/oauth', '@stonyx/rest-server', 'stonyx', '@stonyx/logs', 'some.pkg', 'a'];
-
-/** Strip the YAML block-scalar indentation without assuming a fixed depth. */
-function dedent(body) {
-  const lines = body.split('\n');
-  const widths = lines.filter((l) => l.trim() !== '').map((l) => l.match(/^(\s*)/)[1].length);
-  const strip = widths.length ? Math.min(...widths) : 0;
-  return lines.map((l) => l.slice(strip)).join('\n');
-}
 
 /**
  * A fake `npm` that answers only from an explicit table.
@@ -582,58 +573,13 @@ describe('AC5 -- S3/S5: no expression reaches either github-script body (#32)', 
 // here -- the real `script:` text, a stubbed `github` client that records
 // rather than dispatches, zero dependencies, no network, nothing published.
 describe('AC5 -- S5: cascade.yml refuses hostile input before it dispatches (#32, executed)', () => {
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  const nodeRequire = createRequire(import.meta.url);
-  const DEP_MAP_URL = new URL('../dependency-map.json', import.meta.url);
-
   /**
-   * Run the real dispatch script the way `actions/github-script` runs it.
-   *
-   * `require` is shimmed for one reason only: the script reads
-   * `dependency-map.json` by a path relative to the runner's checkout root, and
-   * this keeps the case independent of the test process's cwd. Everything else
-   * is the real module.
+   * Run the real dispatch script the way `actions/github-script` runs it. The
+   * harness lives in test/helpers/cascade-dispatch.js, shared with #60's
+   * cascade-gating suite.
    */
-  async function runDispatch({ packageName, publishedVersion = '0.1.1-beta.128' }) {
-    const script = dedent(stepScriptBody(cascade, DISPATCH_STEP));
-    const dispatched = [];
-    const logged = [];
-
-    const github = {
-      rest: {
-        repos: {
-          createDispatchEvent: async (args) => { dispatched.push(args); return { status: 204 }; },
-        },
-      },
-    };
-    const scriptRequire = (id) => {
-      const mod = nodeRequire(id);
-      if (id !== 'fs' && id !== 'node:fs') return mod;
-      return {
-        ...mod,
-        readFileSync: (path, ...rest) => mod.readFileSync(path === 'dependency-map.json' ? DEP_MAP_URL : path, ...rest),
-      };
-    };
-    const consoleStub = { log: (...args) => logged.push(args.join(' ')), error: (...args) => logged.push(args.join(' ')) };
-
-    const previous = { PACKAGE_NAME: process.env.PACKAGE_NAME, PUBLISHED_VERSION: process.env.PUBLISHED_VERSION };
-    const apply = (key, value) => { if (value === undefined) delete process.env[key]; else process.env[key] = value; };
-    apply('PACKAGE_NAME', packageName);
-    apply('PUBLISHED_VERSION', publishedVersion);
-
-    let error = null;
-    try {
-      const fn = new AsyncFunction('require', 'github', 'context', 'core', 'console', script);
-      await fn(scriptRequire, github, {}, {}, consoleStub);
-    } catch (e) {
-      error = e;
-    } finally {
-      apply('PACKAGE_NAME', previous.PACKAGE_NAME);
-      apply('PUBLISHED_VERSION', previous.PUBLISHED_VERSION);
-    }
-
-    return { error, dispatched, logged, repos: dispatched.map((d) => `${d.owner}/${d.repo}`) };
-  }
+  const runDispatch = ({ packageName, publishedVersion = '0.1.1-beta.128' }) =>
+    runCascadeDispatch(cascade, { packageName, publishedVersion });
 
   // The happy path first, so every hostile case below is known to be running
   // against a harness that CAN dispatch. Without this the whole block could

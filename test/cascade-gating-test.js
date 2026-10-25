@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { envOf, parseSteps, readWorkflow, runBodyOf, stepScriptBody } from './helpers/workflow-yaml.js';
+import { conditionSource, evaluate, interpolate, truthy } from './helpers/actions-expression.js';
+import { dedent, runDispatch } from './helpers/cascade-dispatch.js';
+import { envOf, parseSteps, readWorkflow, runBodyOf, stepScalarOf } from './helpers/workflow-yaml.js';
 
 // Cascade gating, for abofs/stonyx-workflows#60.
 //
@@ -17,13 +18,12 @@ import { envOf, parseSteps, readWorkflow, runBodyOf, stepScriptBody } from './he
 // steps run, which do not, and what the job hands to the consumer's `cascade`
 // job -- and they live mostly in step `if:` conditions. Those are GitHub
 // Actions expressions, which have no offline engine. A regex over the `if:`
-// text would pin spellings, not behaviour. So this file carries a deliberately
-// small evaluator for the expression subset the two workflows actually use
-// (`==`, `!=`, `!`, `&&`, `||`, parentheses, string literals, context paths,
-// `contains()`, `always()`, `success()`), and it THROWS on anything outside that
-// subset rather than guessing. Adding a construct to a workflow `if:` that the
-// evaluator does not know reds this file -- extend the evaluator, do not
-// delete the case.
+// text would pin spellings, not behaviour. So test/helpers/actions-expression.js
+// carries a deliberately small evaluator for the expression subset the two
+// workflows actually use, and it THROWS on anything outside that subset rather
+// than guessing. Its truth table is pinned below, in absolute terms, because
+// every old-vs-new comparison in this file runs both sides through the same
+// evaluator and would cancel an evaluator bug out (#61, Test Coverage HIGH 2).
 //
 // With that, `simulateJob` walks the real `publish` job of a real
 // `npm-publish.yml` text step by step:
@@ -39,8 +39,9 @@ import { envOf, parseSteps, readWorkflow, runBodyOf, stepScriptBody } from './he
 //     so "it was selected to run" is the observable;
 //   - the job's `outputs:` are evaluated, and the consumer's `cascade` job is
 //     reproduced by running the real `cascade.yml` dispatch `script:` with a
-//     stub `github` client that records instead of dispatching -- the same
-//     harness shape test/injection-test.js uses for #32 S5.
+//     stub `github` client that records instead of dispatching -- the
+//     test/helpers/cascade-dispatch.js harness test/injection-test.js uses for
+//     #32 S5.
 //
 // What it does NOT model, stated rather than implied: a step failing for an
 // environmental reason (a real `pnpm publish` refusing), GitHub's
@@ -74,184 +75,29 @@ const fixtureBytes = (name) => readFileSync(new URL(`./fixtures/${name}`, import
 const OLD_PUBLISH = fixtureBytes('npm-publish-7fb718b.yml').toString('utf8');
 const OLD_CASCADE = fixtureBytes('cascade-7fb718b.yml').toString('utf8');
 
-const DISPATCH_STEP = 'Dispatch to downstream dependents';
-
-// ---------------------------------------------------------------------------
-// The expression evaluator.
-// ---------------------------------------------------------------------------
-
-function tokenize(src) {
-  const tokens = [];
-  let i = 0;
-  while (i < src.length) {
-    const c = src[i];
-    if (/\s/.test(c)) { i++; continue; }
-    if (c === "'") {
-      let j = i + 1;
-      let value = '';
-      for (;;) {
-        if (j >= src.length) throw new Error(`unterminated string literal in expression: ${src}`);
-        if (src[j] === "'") {
-          if (src[j + 1] === "'") { value += "'"; j += 2; continue; }
-          break;
-        }
-        value += src[j++];
-      }
-      tokens.push({ type: 'str', value });
-      i = j + 1;
-      continue;
-    }
-    const two = src.slice(i, i + 2);
-    if (['==', '!=', '&&', '||'].includes(two)) { tokens.push({ type: 'op', value: two }); i += 2; continue; }
-    if ('()!,'.includes(c)) { tokens.push({ type: 'op', value: c }); i++; continue; }
-    const ident = src.slice(i).match(/^[A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)*/);
-    if (ident) { tokens.push({ type: 'ident', value: ident[0] }); i += ident[0].length; continue; }
-    throw new Error(`the test evaluator does not understand ${JSON.stringify(src.slice(i))} in expression: ${src}`);
-  }
-  return tokens;
-}
-
-const FUNCTIONS = {
-  contains: (haystack, needle) => String(haystack ?? '').toLowerCase().includes(String(needle ?? '').toLowerCase()),
-  // The simulation only ever continues past a step that succeeded, so the
-  // status functions are constants here.
-  always: () => true,
-  success: () => true,
-};
-
-const truthy = (v) => !(v === false || v === null || v === undefined || v === '' || v === 0);
-const loosely = (a, b) => (typeof a === 'boolean' || typeof b === 'boolean')
-  ? a === b
-  : String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase();
-
-function evaluate(src, ctx) {
-  const tokens = tokenize(src);
-  let pos = 0;
-  const peek = () => tokens[pos];
-  const take = (value) => {
-    const t = tokens[pos];
-    if (!t || (value !== undefined && t.value !== value)) throw new Error(`expected ${value} at token ${pos} in: ${src}`);
-    pos++;
-    return t;
-  };
-
-  function primary() {
-    const t = peek();
-    if (!t) throw new Error(`unexpected end of expression: ${src}`);
-    if (t.type === 'op' && t.value === '(') { take('('); const v = or(); take(')'); return v; }
-    if (t.type === 'op' && t.value === '!') { take('!'); return !truthy(primary()); }
-    if (t.type === 'str') { pos++; return t.value; }
-    if (t.type === 'ident') {
-      pos++;
-      if (t.value === 'true') return true;
-      if (t.value === 'false') return false;
-      if (t.value === 'null') return null;
-      if (peek() && peek().value === '(') {
-        const fn = FUNCTIONS[t.value];
-        if (!fn) throw new Error(`the test evaluator does not implement ${t.value}() (in: ${src})`);
-        take('(');
-        const args = [];
-        while (peek() && peek().value !== ')') {
-          args.push(or());
-          if (peek() && peek().value === ',') take(',');
-        }
-        take(')');
-        return fn(...args);
-      }
-      return lookup(t.value, ctx, src);
-    }
-    throw new Error(`unexpected token ${JSON.stringify(t.value)} in: ${src}`);
-  }
-  function equality() {
-    let left = primary();
-    while (peek() && (peek().value === '==' || peek().value === '!=')) {
-      const op = take().value;
-      const right = primary();
-      left = op === '==' ? loosely(left, right) : !loosely(left, right);
-    }
-    return left;
-  }
-  function and() {
-    let left = equality();
-    while (peek() && peek().value === '&&') { take(); const right = equality(); left = truthy(left) ? right : left; }
-    return left;
-  }
-  function or() {
-    let left = and();
-    while (peek() && peek().value === '||') { take(); const right = and(); left = truthy(left) ? left : right; }
-    return left;
-  }
-
-  const value = or();
-  if (pos !== tokens.length) throw new Error(`trailing tokens in expression: ${src}`);
-  return value;
-}
-
-const ROOTS = new Set(['github', 'inputs', 'steps', 'secrets', 'job', 'jobs', 'needs']);
-
-function lookup(path, ctx, src) {
-  const [root, ...rest] = path.split('.');
-  if (!ROOTS.has(root)) throw new Error(`unknown context root ${root} in: ${src}`);
-  let value = ctx[root];
-  for (const key of rest) {
-    if (value === null || value === undefined) return null;
-    value = Object.prototype.hasOwnProperty.call(value, key) ? value[key] : null;
-  }
-  return value ?? null;
-}
-
-/** An `if:` value as written in YAML, with the optional `${{ }}` and quotes removed. */
-function conditionSource(raw) {
-  let s = raw.trim();
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) s = s.slice(1, -1);
-  const wrapped = s.match(/^\$\{\{([\s\S]*)\}\}$/);
-  return (wrapped ? wrapped[1] : s).trim();
-}
-
-/** A scalar with `${{ }}` templates in it, as the runner substitutes it. */
-function interpolate(raw, ctx) {
-  let s = raw.trim();
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) s = s.slice(1, -1);
-  return s.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, expr) => {
-    const v = evaluate(expr, ctx);
-    return v === null || v === undefined ? '' : String(v);
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Step metadata.
 // ---------------------------------------------------------------------------
-
-const indentOf = (line) => line.match(/^(\s*)/)[1].length;
-
-function stepKey(step, key) {
-  const lines = step.body.split('\n').filter((l) => l.trim() !== '');
-  const keyIndent = Math.min(...lines.map(indentOf));
-  const line = lines.find((l) => indentOf(l) === keyIndent && new RegExp(`^\\s*${key}:(\\s|$)`).test(l));
-  return line ? line.replace(new RegExp(`^\\s*${key}:\\s*`), '') : null;
-}
 
 function hasRun(step) {
   try { runBodyOf(step); return true; } catch { return false; }
 }
 
-/** The `outputs:` mapping of the `publish` job, raw. */
+/**
+ * The `outputs:` mapping of the `publish` job, raw. Keys may be quoted, as
+ * workflow-yaml.js's KEY_PROBE allows; a line that is not `key: value` throws
+ * rather than being dropped.
+ */
 function jobOutputs(text) {
   const job = text.indexOf('\njobs:\n  publish:\n');
   if (job === -1) throw new Error('could not find jobs: > publish:');
   const m = text.slice(job).match(/^ {4}outputs:\n((?: {6}.*\n)+)/m);
   if (!m) throw new Error('could not find the publish job outputs: mapping');
   return Object.fromEntries(m[1].trimEnd().split('\n').map((l) => {
-    const kv = l.trim().match(/^([\w-]+):\s*(.*)$/);
-    return [kv[1], kv[2]];
+    const kv = l.trim().match(/^(['"]?)([\w-]+)\1\s*:\s*(.*)$/);
+    if (!kv) throw new Error(`unreadable publish job output line: ${JSON.stringify(l)}`);
+    return [kv[2], kv[3]];
   }));
-}
-
-function dedent(body) {
-  const lines = body.split('\n');
-  const widths = lines.filter((l) => l.trim() !== '').map((l) => l.match(/^(\s*)/)[1].length);
-  const strip = widths.length ? Math.min(...widths) : 0;
-  return lines.map((l) => l.slice(strip)).join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -396,12 +242,12 @@ function simulateJob(workflowText, scenario) {
     let failure = null;
 
     for (const step of parseSteps(workflowText).filter((s) => s.job === 'publish')) {
-      const rawIf = stepKey(step, 'if');
+      const rawIf = stepScalarOf(step, 'if', { optional: true });
       const runs = rawIf === null ? true : truthy(evaluate(conditionSource(rawIf), ctx));
       if (!runs) continue;
       ran.push(step.name);
 
-      const id = stepKey(step, 'id');
+      const id = stepScalarOf(step, 'id', { optional: true });
       const execute = hasRun(step) && (id !== null || EXECUTED_BY_NAME.test(step.name));
       const outputs = {};
       if (execute) {
@@ -451,38 +297,6 @@ function simulateJob(workflowText, scenario) {
 // ---------------------------------------------------------------------------
 // The consumer's `cascade` job: the real dispatch script, stub github client.
 // ---------------------------------------------------------------------------
-
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const nodeRequire = createRequire(import.meta.url);
-const DEP_MAP_URL = new URL('../dependency-map.json', import.meta.url);
-
-async function runDispatch(cascadeText, { packageName, publishedVersion }) {
-  const script = dedent(stepScriptBody(cascadeText, DISPATCH_STEP));
-  const dispatched = [];
-  const logged = [];
-  const github = { rest: { repos: { createDispatchEvent: async (args) => { dispatched.push(args); return { status: 204 }; } } } };
-  const scriptRequire = (id) => {
-    const mod = nodeRequire(id);
-    if (id !== 'fs' && id !== 'node:fs') return mod;
-    return { ...mod, readFileSync: (p, ...rest) => mod.readFileSync(p === 'dependency-map.json' ? DEP_MAP_URL : p, ...rest) };
-  };
-  const consoleStub = { log: (...a) => logged.push(a.join(' ')), error: (...a) => logged.push(a.join(' ')) };
-
-  const previous = { PACKAGE_NAME: process.env.PACKAGE_NAME, PUBLISHED_VERSION: process.env.PUBLISHED_VERSION };
-  const apply = (k, v) => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
-  apply('PACKAGE_NAME', packageName);
-  apply('PUBLISHED_VERSION', publishedVersion);
-  let error = null;
-  try {
-    await new AsyncFunction('require', 'github', 'context', 'core', 'console', script)(scriptRequire, github, {}, {}, consoleStub);
-  } catch (e) {
-    error = e;
-  } finally {
-    apply('PACKAGE_NAME', previous.PACKAGE_NAME);
-    apply('PUBLISHED_VERSION', previous.PUBLISHED_VERSION);
-  }
-  return { error, dispatched, logged, repos: dispatched.map((d) => `${d.owner}/${d.repo}`) };
-}
 
 /** The whole consumer `publish.yml`: the publish job, then `cascade: needs: publish`. */
 async function simulateRun({ publish, cascade }, scenarioName) {
