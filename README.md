@@ -118,10 +118,10 @@ jobs:
 Reusable workflow for publishing npm packages with alpha/beta/stable release stages and cascade support.
 
 **Features:**
-- **Alpha** (PR): Dynamic version calculation from npm, no commit to PR branch, no tag/release. Comments the published version and its `pnpm add` install command on the PR (`Comment on PR with alpha version` step)
+- **Alpha** (PR): Dynamic version calculation from npm, no commit to PR branch, no tag/release. Comments the published version and its `pnpm add` install command on the PR (`Comment on PR with alpha version` step). Dispatches no dependent (abofs/stonyx-workflows#60)
 - **Beta** (push to any branch other than `main`, i.e. a merge to `dev`, or cascade): Dynamic version calculation, commits the bump to the pushed branch, creates tag + GitHub release
 - **Stable** (push to `main`): `pnpm version patch` (drops the prerelease suffix), commits to `main`, creates tag + GitHub release. Manual dispatch with `patch`/`minor`/`major` or `custom-version` also publishes a non-prerelease version, but dispatch is frozen
-- **Cascade mode**: When triggered via `cascade-source`, updates all `@stonyx/*` dependencies to latest from npm before publishing, and installs with `--no-frozen-lockfile` instead of `--frozen-lockfile` so the updated ranges can resolve
+- **Cascade mode**: When triggered via `cascade-source`, updates all `@stonyx/*` dependencies to latest from npm before publishing, and installs with `--no-frozen-lockfile` instead of `--frozen-lockfile` so the updated ranges can resolve. If no range moved, the run stops green after the update: no bump, publish, commit, tag or further cascade (abofs/stonyx-workflows#60)
 
 **Note for consumers:** on the alpha and beta paths this workflow checks
 `abofs/stonyx-workflows` out into `.stonyx-workflows/` in your workspace to
@@ -310,7 +310,7 @@ guard never got as far as packing.
 
 | Output | Description |
 |--------|-------------|
-| `published-version` | The version that was published (e.g., `0.2.3-beta.1`) |
+| `published-version` | The version dependents are dispatched for (e.g., `0.2.3-beta.1`), or the literal `no-cascade` on an alpha and on a cascade that moved no dependency range (abofs/stonyx-workflows#60; see [docs/release.md](docs/release.md#when-a-cascade-dispatches-and-when-it-does-not)) |
 | `package-name` | The name of the published package (e.g., `@stonyx/utils`) |
 | `version-channel` | The release channel: `alpha`, `beta`, `stable`, `patch`, `minor`, `major`, or `custom`. `stable` is emitted on a push to `main`, and the child-repo template below gates its cascade job on it |
 
@@ -334,7 +334,7 @@ Reusable workflow that dispatches `repository_dispatch` events to downstream dep
 | Input | Description |
 |-------|-------------|
 | `package-name` | Name of the package that was just published (e.g., `@stonyx/utils`). **Validated against the npm name grammar** -- see below |
-| `published-version` | Version that was just published (e.g., `0.2.3-beta.1`). **Validated as a semver version**, with an optional leading `v` accepted -- see below |
+| `published-version` | Version that was just published (e.g., `0.2.3-beta.1`). **Validated as a semver version**, with an optional leading `v` accepted -- see below. The exact value `no-cascade` dispatches nothing and succeeds (abofs/stonyx-workflows#60); the empty string is still invalid |
 
 **Two new hard failures (abofs/stonyx-workflows#32).** Both inputs are
 validated at the top of the dispatch script, **before `dependency-map.json` is
