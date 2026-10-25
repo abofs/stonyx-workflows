@@ -1042,15 +1042,45 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     }
   });
 
-  test('the guard is unconditional', () => {
+  // This was 'the guard is unconditional' until abofs/stonyx-workflows#60. A
+  // cascade that moved no dependency range now skips EVERY step after the
+  // release gate, install included -- and the guard runs the consumer's
+  // prepublishOnly build, which cannot succeed without node_modules. So the
+  // guard now carries exactly one condition, the release gate, and the property
+  // the old pin protected is restated as the one that actually matters: a
+  // publish step can run only when the guard ran. That holds iff the guard's
+  // condition is the gate and nothing else, and every publish step's condition
+  // is the gate AND something. A guard condition that is anything more than the
+  // gate is still a bypass and still reds here.
+  const RELEASE_GATE = "steps.release-gate.outputs.release == 'true'";
+  const ifOf = (step) => {
+    const lines = step.body.split('\n');
+    const keyIndent = Math.min(...lines.filter((l) => l.trim() !== '').map(indentOf));
+    const line = lines.find((l) => indentOf(l) === keyIndent && /^\s*if:/.test(l));
+    return line ? line.replace(/^\s*if:\s*/, '').trim().replace(/^"(.*)"$/, '$1') : null;
+  };
+
+  test('the guard carries no condition but the release gate (#60)', () => {
     const [guard] = stepsNamed(npmPublish, GUARD_STEP);
     assert.ok(guard, `no step named ${JSON.stringify(GUARD_STEP)}`);
-    const keys = stepKeys(guard);
-    assert.ok(
-      !keys.includes('if'),
-      `the guard carries an if: (${JSON.stringify(keys)}). Any condition on it is a bypass -- one that would be `
-      + 'evaluated from consumer-influenced outputs, and one nobody would notice going false',
+    assert.equal(stepKeys(guard).filter((k) => k === 'if').length, 1, 'the guard must carry exactly one if:');
+    assert.equal(
+      ifOf(guard),
+      RELEASE_GATE,
+      'the guard carries a condition other than the release gate. Any further condition on it is a bypass -- one '
+      + 'that would be evaluated from consumer-influenced outputs, and one nobody would notice going false',
     );
+  });
+
+  test('every publish step requires the same release gate, so no publish runs where the guard did not (#60)', () => {
+    for (const step of publishSteps(npmPublish)) {
+      const condition = ifOf(step);
+      assert.ok(
+        condition && condition.startsWith(`${RELEASE_GATE} && `),
+        `publish step ${JSON.stringify(step.name)} has condition ${JSON.stringify(condition)}, which does not `
+        + 'require the release gate the guard requires -- it could run on a path where the guard was skipped',
+      );
+    }
   });
 
   test('neither the guard nor any publish step is advisory', () => {

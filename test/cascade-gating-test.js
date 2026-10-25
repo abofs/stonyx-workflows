@@ -573,13 +573,120 @@ describe('#60 AC3 -- a cascade that changes a Stonyx range behaves exactly as be
   });
 });
 
+/** One step's real `run:` body, alone, with the given env. */
+function runBody(stepName, env) {
+  const step = parseSteps(NEW_PUBLISH).find((st) => st.name === stepName);
+  assert.ok(step, `no step named ${stepName}`);
+  const dir = mkdtempSync(join(tmpdir(), 'wf60-step-'));
+  try {
+    const out = join(dir, 'github-output');
+    writeFileSync(out, '');
+    writeFileSync(join(dir, 'step.sh'), dedent(runBodyOf(step)) + '\n');
+    const r = spawnSync('bash', ['--noprofile', '--norc', '-e', join(dir, 'step.sh')], {
+      cwd: dir, encoding: 'utf8', env: { PATH: process.env.PATH, GITHUB_OUTPUT: out, ...env },
+    });
+    return { status: r.status, stderr: r.stderr, outputKeys: readFileSync(out, 'utf8').split('\n').filter(Boolean) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const RELEASE_GATE_STEP = 'Decide whether this run releases';
+const CASCADE_GATE_STEP = 'Decide whether to cascade';
+
 describe('#60 AC4 -- a cascade that changes no Stonyx range releases nothing and ends green', () => {
-  test.todo('no bump, publish, commit, tag, release or dispatch step runs');
-  test.todo('the release gate fails loudly when the update step reported nothing');
+  test('only the steps up to the release gate, the cleanup and the cascade gate run; both jobs end green', async () => {
+    const run = await simulateRun(NEW, 'cascadeUnchanged');
+
+    assert.equal(run.failure, null, `the publish job must conclude success: ${run.failure && run.failure.stderr}`);
+    // The EXACT list, so a step added later without the gate reds here rather
+    // than quietly running on a no-op cascade.
+    assert.deepEqual(run.ran, [
+      'Checkout code',
+      'Setup pnpm',
+      'Set up Node.js',
+      'Get package name',
+      'Update all Stonyx dependencies to latest',
+      RELEASE_GATE_STEP,
+      'Remove stonyx-workflows checkout',
+      CASCADE_GATE_STEP,
+    ]);
+    for (const name of [...PUBLISH_STEPS, ...PUSH_STEPS, 'Create GitHub Release (beta)', 'Create GitHub Release (stable)']) {
+      assert.ok(!run.ran.includes(name), `${name} must not run`);
+    }
+    assert.deepEqual(run.pnpmCalls, [], 'nothing installed, tested, bumped, packed or published');
+    assert.deepEqual(run.packageJson, CRON_PACKAGE, 'package.json is untouched');
+    assert.equal(run.outputs['published-version'], 'no-cascade');
+
+    assert.equal(run.dispatch.error, null, `the cascade job must conclude success: ${run.dispatch.error && run.dispatch.error.message}`);
+    assert.deepEqual(run.dispatch.dispatched, [], 'no dependent is dispatched');
+  });
+
+  // Inverse of the above: a moved range still releases. AC3's differential is
+  // the full statement; this is the gate's own output, read directly.
+  test('the release gate opens for a changed cascade and for every non-cascade run', () => {
+    assert.deepEqual(runBody(RELEASE_GATE_STEP, { CASCADE_SOURCE: '@stonyx/utils', DEPS_CHANGED: 'true' }).outputKeys, ['release=true']);
+    assert.deepEqual(runBody(RELEASE_GATE_STEP, { CASCADE_SOURCE: '@stonyx/utils', DEPS_CHANGED: 'false' }).outputKeys, ['release=false']);
+    assert.deepEqual(runBody(RELEASE_GATE_STEP, { CASCADE_SOURCE: '', DEPS_CHANGED: '' }).outputKeys, ['release=true']);
+  });
+
+  // A missing report is not "nothing changed". Treating it as such would make
+  // a broken update step a green run that never releases.
+  for (const changed of ['', 'TRUE', 'yes', 'false\nrelease=true']) {
+    test(`the release gate fails, rather than guessing, when the update step reported ${JSON.stringify(changed)}`, () => {
+      const run = runBody(RELEASE_GATE_STEP, { CASCADE_SOURCE: '@stonyx/utils', DEPS_CHANGED: changed });
+      assert.notEqual(run.status, 0);
+      assert.match(run.stderr, /Refusing to guess whether this run should release/);
+      assert.deepEqual(run.outputKeys, []);
+    });
+  }
+
+  for (const [label, env, pattern] of [
+    ['an unreported release decision', { RELEASE: '', CHANNEL: 'beta', PUBLISHED_VERSION: '0.2.1-beta.174' }, /expected true or false/],
+    ['an unknown channel', { RELEASE: 'true', CHANNEL: 'nightly', PUBLISHED_VERSION: '0.2.1-nightly.1' }, /unknown release channel/],
+    ['a release with no recorded version', { RELEASE: 'true', CHANNEL: 'beta', PUBLISHED_VERSION: '' }, /no version was recorded/],
+  ]) {
+    test(`the cascade gate fails, rather than emitting a value, on ${label}`, () => {
+      const run = runBody(CASCADE_GATE_STEP, env);
+      assert.notEqual(run.status, 0);
+      assert.match(run.stderr, pattern);
+      assert.deepEqual(run.outputKeys, []);
+    });
+  }
 });
 
 describe('#60 AC5 -- cascade.yml input validation is not weakened', () => {
-  test.todo('the no-cascade signal is distinct from an invalid version');
-  test.todo('an invalid package name is still refused alongside the no-cascade signal');
-});
+  test('the no-cascade token, with a valid name, dispatches nothing and does not throw', async () => {
+    const run = await runDispatch(NEW_CASCADE, { packageName: '@stonyx/cron', publishedVersion: 'no-cascade' });
+    assert.equal(run.error, null);
+    assert.deepEqual(run.dispatched, []);
+    assert.ok(run.logged.some((l) => /Nothing to cascade for @stonyx\/cron/.test(l)), JSON.stringify(run.logged));
+  });
 
+  // The name guard still runs first: the token does not carry an invalid name
+  // past it.
+  test('an invalid package name is still refused when the version is the no-cascade token', async () => {
+    const run = await runDispatch(NEW_CASCADE, { packageName: '@stonyx/x`id`', publishedVersion: 'no-cascade' });
+    assert.notEqual(run.error, null);
+    assert.match(run.error.message, /is not a valid npm package name/);
+  });
+
+  // Strict equality, not a pattern. Empty is the important one: it is what an
+  // output nobody wrote looks like, and it stays an invalid version
+  // (test/injection-test.js "a published-version that is empty" pins the same
+  // for the guard in isolation).
+  for (const near of ['', ' no-cascade', 'no-cascade ', 'NO-CASCADE', 'no-cascade\nmalicious=1', 'no_cascade']) {
+    test(`${JSON.stringify(near)} is an invalid version, not the no-cascade token`, async () => {
+      const run = await runDispatch(NEW_CASCADE, { packageName: '@stonyx/cron', publishedVersion: near });
+      assert.notEqual(run.error, null, `${JSON.stringify(near)} must be refused`);
+      assert.match(run.error.message, /is not a valid semver version/);
+      assert.deepEqual(run.dispatched, []);
+    });
+  }
+
+  test('a valid version with a valid name still dispatches', async () => {
+    const run = await runDispatch(NEW_CASCADE, { packageName: '@stonyx/cron', publishedVersion: '0.2.1-beta.174' });
+    assert.equal(run.error, null);
+    assert.deepEqual(run.repos, ['abofs/stonyx-orm']);
+  });
+});

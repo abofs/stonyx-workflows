@@ -63,6 +63,19 @@ jobs:
                 !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(packageName)) {
               throw new Error(`Refusing to cascade: ${JSON.stringify(packageName)} is not a valid npm package name`);
             }
+
+            // abofs/stonyx-workflows#60: npm-publish.yml hands over this exact
+            // token when it decided dependents must not be dispatched -- a
+            // cascade that moved no dependency range and so published nothing,
+            // or an alpha that no dependent reads. It is a deliberate signal,
+            // checked by strict equality AFTER the name guard above and BEFORE
+            // the version guard below, so it does not loosen either: every
+            // other value, the empty string included, still has to be a valid
+            // version or this step throws.
+            if (publishedVersion === 'no-cascade') {
+              console.log(`Nothing to cascade for ${packageName}: the publish job dispatches no dependent for this run.`);
+              return;
+            }
             if (typeof publishedVersion !== 'string' ||
                 !/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(publishedVersion)) {
               throw new Error(`Refusing to cascade: ${JSON.stringify(publishedVersion)} is not a valid semver version`);
