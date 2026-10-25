@@ -1098,8 +1098,8 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
   //     `null == ''`, both falsy, `contains()` reads both as '');
   //   - each literal itself;
   //   - for every subset S of the literals, INCLUDING the empty one, a value
-  //     that contains exactly S and equals no literal: a \u0001-style pad, then
-  //     S joined by NUL. Round 2 had only the unpadded join, so "contains
+  //     that contains exactly S and equals no literal: a private-use pad
+  //     character (never whitespace, never numeric), then S joined by NUL. Round 2 had only the unpadded join, so "contains
   //     'beta', is not 'beta', contains no other literal" had no value, and
   //     `... || contains(github.ref,'beta') && github.ref != 'beta' &&
   //     !contains(github.ref,'true')` passed (#61, Test Coverage N1);
@@ -1177,10 +1177,10 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     const domain = [null, ...lits];
     for (let pad = 1; pad <= Math.max(1, pathList.length); pad++) {
       for (let mask = 0; mask < (1 << lits.length); mask++) {
-        domain.push(String.fromCharCode(pad) + lits.filter((_, i) => mask & (1 << i)).join('\u0000'));
+        domain.push(String.fromCharCode(0xE000 + pad) + lits.filter((_, i) => mask & (1 << i)).join('\u0000'));
       }
     }
-    assert.ok(lits.every((l) => !/[\u0000-\u001f]/.test(l)), 'a literal carries a NUL or pad character; the domain cannot realise it');
+    assert.ok(lits.every((l) => !/[\u0000\uE000-\uF8FF]/.test(l)), 'a literal carries a NUL or private-use pad character; the domain cannot realise it');
     assert.ok(domain.length ** pathList.length <= ASSIGNMENTS_CAP,
       `${domain.length}^${pathList.length} assignments exceeds the cap; narrow the domain rather than sampling it`);
 
