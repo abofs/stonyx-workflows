@@ -35,6 +35,12 @@ const ANY_STEPS = /^\s*(?:-\s+)?["']?steps["']?\s*:/;
 const KEY_LINE = /^([A-Za-z_][A-Za-z0-9_-]*):(?: +(.*))?$/;
 const BLOCK = new Set(['|', '|-']);
 const FLOW_WORDS = /^\[[\w.*/-]+(?:, [\w.*/-]+)*\]$/;
+// A plain `if:` YAML resolves to something other than a string: null, a
+// boolean (YAML 1.2 true/false in any case, and the YAML 1.1 yes/no/on/off),
+// or a number (YAML 1.2 and 1.1 forms, including 1.1's `1:20`). The evaluator reads these as JavaScript values; GitHub coerces
+// them, and a null coerced to "" may run as success().
+const NON_STRING_IF = new RegExp('^(?:null|~|true|false|yes|no|on|off|[-+]?\\.inf|\\.nan|0x[0-9a-f_]+|0o[0-7_]+|0b[01_]+'
+  + '|[-+]?(?:[0-9][0-9_:]*(?:\\.[0-9_]*)?|\\.[0-9_]+)(?:e[-+]?[0-9]+)?)$', 'i');
 
 const spaces = (line) => line.match(/^ */)[0].length;
 
@@ -172,6 +178,9 @@ export function stepShapes(text, file = '<workflow>') {
       if (!shape.shape) { refuse(i, key, shape.why); return; }
       if (key === 'if' && shape.shape === 'single') refuse(i, key, 'if: must be plain or double-quoted; single-quoted is refused');
       if (key === 'if' && value.includes('\\')) refuse(i, key, 'if: may not carry a backslash');
+      if (key === 'if' && shape.shape === 'plain' && NON_STRING_IF.test(value)) {
+        refuse(i, key, 'if: resolves to a YAML null, boolean or number, not an expression string');
+      }
     };
 
     const childKey = (i, content) => {
