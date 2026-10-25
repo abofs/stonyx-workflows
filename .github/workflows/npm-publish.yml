@@ -205,7 +205,7 @@ jobs:
             }
 
             // The release gate below reads this, and only this. It is the
-            // same `changed` that decided whether package.json was rewritten
+            // same "changed" that decided whether package.json was rewritten
             // one statement up, so "a range moved" and "this run releases"
             // cannot disagree (abofs/stonyx-workflows#60).
             fs.appendFileSync(process.env.GITHUB_OUTPUT, "changed=" + (changed ? "true" : "false") + "\n");
@@ -264,8 +264,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Determine version bump type
-        if: steps.release-gate.outputs.release == 'true'
         id: version-type
+        if: steps.release-gate.outputs.release == 'true'
         env:
           CASCADE_SOURCE: ${{ inputs.cascade-source }}
           CUSTOM_VERSION: ${{ inputs.custom-version }}
@@ -485,8 +485,8 @@ jobs:
         run: pnpm version "$VERSION_TYPE" --no-git-tag-version
 
       - name: Get package version
-        if: steps.release-gate.outputs.release == 'true'
         id: package-version
+        if: steps.release-gate.outputs.release == 'true'
         run: |
           # Same shape as the package-name step: a newline in the value would
           # otherwise forge additional $GITHUB_OUTPUT keys, and this output
