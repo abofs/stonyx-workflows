@@ -108,6 +108,9 @@ describe('workflow step shape allowlist (#61)', () => {
     'if: key indented one column deeper': [BETA_IF, ` ${BETA_IF}`, null, /column 9 is not one of the step's own keys/, 'beta'],
     'run: folded': ['        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta',
       '        run: >\n          pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta', 'run', /YAML indicator/, 'beta'],
+    'if: with its value on the next lines': [BETA_IF, `        if:\n          ${GATE_BETA}\n          ${BYPASS}`, 'if', /no inline value/, 'beta'],
+    'duplicate env: key': [BETA_IF, `${BETA_IF}\n        env:\n          A: one\n          A: two`, 'env.A', /appears twice under env:/, 'beta'],
+    'env: value as a block': [BETA_IF, `${BETA_IF}\n        env:\n          A: |\n            x`, 'env.A', /block is allowed on run: and with: script: only/, 'beta'],
     'env: nested mapping': [BETA_IF, `${BETA_IF}\n        env:\n          A:\n            B: c`, 'env.A', /nested mapping/, 'beta'],
     'flow-mapping step': [`${BETA_NAME}\n`, `      - {name: x, run: npm publish}\n${BETA_NAME}\n`, null, /not a "key: value" line/, 'none'],
   };
