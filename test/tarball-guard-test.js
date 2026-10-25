@@ -1341,7 +1341,7 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
         + "&& !contains(github.base_ref, 'true') && !contains(github.head_ref, 'beta') && !contains(github.base_ref, 'beta')",
       RELEASE_GATE],
       // N2 -- needs a truthy value containing no literal: the padded EMPTY subset.
-      ["github.ref && !contains(github.ref, 'true')", RELEASE_GATE],
+      ["github.ref && !contains(github.ref, 'true') && !contains(github.ref, 'beta')", RELEASE_GATE],
       // N4 -- a truthy value equal to no literal.
       ["steps.release-gate.outputs.release && steps.release-gate.outputs.release != 'true'", RELEASE_GATE],
     ].map(([bypass, guard]) => [`${RELEASE_GATE} && ${beta} || ${bypass}`, guard]);
