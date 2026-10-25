@@ -596,6 +596,32 @@ describe('#60 AC4 -- a cascade that changes no Stonyx range releases nothing and
     });
   }
 
+  // Every arm of the channel case, read off the gate's own output. The
+  // simulator reaches only alpha/beta/stable; custom/patch/minor/major are the
+  // `workflow_dispatch` channels and were untested (#61, Test Coverage S4).
+  for (const channel of ['beta', 'stable', 'custom', 'patch', 'minor', 'major']) {
+    test(`the cascade gate hands a ${channel} release's version to cascade.yml`, () => {
+      const run = runBody(CASCADE_GATE_STEP, { RELEASE: 'true', CHANNEL: channel, PUBLISHED_VERSION: '0.2.2' });
+      assert.equal(run.status, 0, run.stderr);
+      assert.deepEqual(run.outputKeys, ['version=0.2.2']);
+    });
+  }
+  test('the cascade gate hands an alpha release the no-cascade token', () => {
+    const run = runBody(CASCADE_GATE_STEP, { RELEASE: 'true', CHANNEL: 'alpha', PUBLISHED_VERSION: '0.2.1-alpha.12' });
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(run.outputKeys, ['version=no-cascade']);
+  });
+  // No release means no channel was decided (`Determine version bump type` is
+  // skipped), so an empty CHANNEL is the real case; the others show the
+  // release decision wins over any channel.
+  for (const channel of ['', 'beta', 'stable', 'patch']) {
+    test(`the cascade gate hands the no-cascade token when nothing released (channel ${JSON.stringify(channel)})`, () => {
+      const run = runBody(CASCADE_GATE_STEP, { RELEASE: 'false', CHANNEL: channel, PUBLISHED_VERSION: '' });
+      assert.equal(run.status, 0, run.stderr);
+      assert.deepEqual(run.outputKeys, ['version=no-cascade']);
+    });
+  }
+
   for (const [label, env, pattern] of [
     ['an unreported release decision', { RELEASE: '', CHANNEL: 'beta', PUBLISHED_VERSION: '0.2.1-beta.174' }, /expected true or false/],
     ['an unknown channel', { RELEASE: 'true', CHANNEL: 'nightly', PUBLISHED_VERSION: '0.2.1-nightly.1' }, /unknown release channel/],
