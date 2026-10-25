@@ -1,0 +1,837 @@
+name: Reusable NPM Publish
+
+on:
+  workflow_call:
+    inputs:
+      version-type:
+        description: 'Version type for manual dispatch (patch/minor/major)'
+        type: string
+        required: false
+      custom-version:
+        description: 'Custom version (overrides version-type)'
+        type: string
+        required: false
+      cascade-source:
+        description: 'Source package that triggered cascade (non-empty enables cascade mode)'
+        type: string
+        required: false
+        default: ''
+      node-version:
+        description: 'Node.js version'
+        type: string
+        default: '24.13.0'
+      pnpm-version:
+        description: 'pnpm version'
+        type: string
+        default: '9'
+    secrets:
+      CASCADE_PAT:
+        required: false
+    outputs:
+      published-version:
+        description: 'The version that was published'
+        value: ${{ jobs.publish.outputs.published-version }}
+      package-name:
+        description: 'The name of the published package'
+        value: ${{ jobs.publish.outputs.package-name }}
+      version-channel:
+        description: 'The release channel (alpha/beta/stable)'
+        value: ${{ jobs.publish.outputs.version-channel }}
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    outputs:
+      published-version: ${{ steps.package-version.outputs.version }}
+      package-name: ${{ steps.package-name.outputs.name }}
+      version-channel: ${{ steps.version-type.outputs.type }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
+          token: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}
+          # In cascade mode the token above is the ORG-WIDE CASCADE_PAT, and
+          # actions/checkout defaults `persist-credentials: true` -- which
+          # writes it into .git/config as an `http.<host>/.extraheader`
+          # Authorization entry. THE CONSUMER'S OWN CODE then runs in this same
+          # job: `pnpm install` (preinstall/install/postinstall), `pnpm test`,
+          # `pnpm version` (preversion/version/postversion, five sites) and
+          # `pnpm publish` (prepublishOnly/prepack/prepare, three sites). Any of
+          # them can read that file, and push access to any one of the twelve
+          # abofs/stonyx* repos would then yield a credential reaching all of
+          # them.
+          #
+          # Not hypothetical: 21 published @stonyx/cron versions shipped
+          # `package/.git/config` carrying a live credential to the public npm
+          # registry (four distinct tokens, all since revoked). What stopped
+          # the other packages was a packlist accident, not a control anyone
+          # chose -- see docs/release.md.
+          #
+          # The two steps that genuinely need a credential -- the beta and
+          # stable commit/tag/push steps -- are handed it explicitly at their
+          # point of use instead (abofs/stonyx-workflows#35).
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Get package name
+        id: package-name
+        run: |
+          # The name is consumer-controlled. Validating it here is what keeps a
+          # newline in it from forging additional `key=value` lines in
+          # $GITHUB_OUTPUT, and it is the single point every later consumer of
+          # steps.package-name.outputs.name relies on (abofs/stonyx-workflows#32).
+          PKG_NAME=$(node -e '
+            const name = require("./package.json").name;
+            if (typeof name !== "string" || name.length === 0 || name.length > 214 ||
+                !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(name)) {
+              console.error("::error::package.json name is not a valid npm package name: " + JSON.stringify(name));
+              process.exit(1);
+            }
+            process.stdout.write(name);
+          ')
+          echo "name=$PKG_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Update all Stonyx dependencies to latest
+        if: inputs.cascade-source != ''
+        run: |
+          node -e '
+            const { execFileSync } = require("child_process");
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+
+            // A dependency KEY is consumer-controlled, and it used to be
+            // concatenated into a shell command line. It is validated here and
+            // then only ever passed as a single argv element
+            // (abofs/stonyx-workflows#32).
+            function assertPackageName(value, label) {
+              if (typeof value !== "string" || value.length === 0 || value.length > 214 ||
+                  !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(value)) {
+                console.error("::error::" + label + " is not a valid npm package name: " + JSON.stringify(value));
+                process.exit(1);
+              }
+            }
+
+            // Returns the tag value, "" when the package has no such tag, or
+            // null when the package is genuinely absent from the registry.
+            // Anything else -- a network failure, an auth failure, a 5xx --
+            // fails the job. Swallowing it made a transient outage look
+            // identical to "not published" and silently skipped the update.
+            function npmView(depName, field) {
+              try {
+                return execFileSync("npm", ["view", depName, field], {
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "pipe"],
+                }).trim();
+              } catch (e) {
+                const stderr = String(e.stderr || "");
+                if (/E404|404 Not Found/.test(stderr)) return null;
+                console.error("::error::npm view " + depName + " " + field + " failed: " + (stderr.trim() || e.message));
+                process.exit(1);
+              }
+            }
+
+            function getLatestVersion(depName) {
+              const beta = npmView(depName, "dist-tags.beta");
+              const latest = npmView(depName, "dist-tags.latest");
+
+              if (!beta && !latest) return null;
+              if (!beta) return { version: latest, isPrerelease: false };
+              if (!latest) return { version: beta, isPrerelease: true };
+
+              // Compare versions: pick the higher one
+              const parseSemver = (v) => {
+                const [core, pre] = v.split("-");
+                const [maj, min, pat] = core.split(".").map(Number);
+                return { maj, min, pat, pre: pre || null };
+              };
+              const b = parseSemver(beta);
+              const l = parseSemver(latest);
+
+              if (b.maj !== l.maj) return b.maj > l.maj ? { version: beta, isPrerelease: true } : { version: latest, isPrerelease: false };
+              if (b.min !== l.min) return b.min > l.min ? { version: beta, isPrerelease: true } : { version: latest, isPrerelease: false };
+              if (b.pat !== l.pat) return b.pat > l.pat ? { version: beta, isPrerelease: true } : { version: latest, isPrerelease: false };
+              // Same core version: latest (stable) wins since it is the release of the same version
+              return { version: latest, isPrerelease: false };
+            }
+
+            let changed = false;
+            for (const section of ["dependencies", "devDependencies"]) {
+              if (!pkg[section]) continue;
+              for (const [dep, currentRange] of Object.entries(pkg[section])) {
+                if (dep !== "stonyx" && !dep.startsWith("@stonyx/")) continue;
+                assertPackageName(dep, "dependency key in " + section);
+                const result = getLatestVersion(dep);
+                if (!result) {
+                  console.log("  [skip] " + dep + ": not found on npm");
+                  continue;
+                }
+                const newRange = result.isPrerelease ? result.version : "^" + result.version;
+                if (currentRange !== newRange) {
+                  console.log("  [update] " + dep + ": " + currentRange + " -> " + newRange);
+                  pkg[section][dep] = newRange;
+                  changed = true;
+                } else {
+                  console.log("  [ok] " + dep + ": " + currentRange);
+                }
+              }
+            }
+
+            if (changed) {
+              fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+              console.log("package.json updated.");
+            } else {
+              console.log("All Stonyx dependencies already up to date.");
+            }
+          '
+
+      - name: Install dependencies
+        run: pnpm install ${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine version bump type
+        id: version-type
+        env:
+          CASCADE_SOURCE: ${{ inputs.cascade-source }}
+          CUSTOM_VERSION: ${{ inputs.custom-version }}
+          VERSION_TYPE: ${{ inputs.version-type }}
+          EVENT_NAME: ${{ github.event_name }}
+          GIT_REF: ${{ github.ref }}
+        run: |
+          # S6's defect family, found while closing S6 and not in the issue's
+          # inventory: `cascade-source`, `custom-version` and `version-type` are
+          # consumer workflow_call inputs and were interpolated straight into
+          # this shell source. They are quoted variable expansions now, which
+          # the shell never re-parses (abofs/stonyx-workflows#32).
+          if [ -n "$CASCADE_SOURCE" ]; then
+            echo "type=beta" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "type=alpha" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "push" ] && [ "$GIT_REF" = "refs/heads/main" ]; then
+            echo "type=stable" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            echo "type=beta" >> "$GITHUB_OUTPUT"
+          elif [ -n "$CUSTOM_VERSION" ]; then
+            echo "type=custom" >> "$GITHUB_OUTPUT"
+          else
+            # The only values the bump steps below can act on. Anything else
+            # used to be written through to the output, match no bump step, and
+            # publish the unbumped version; and a newline in it forged extra
+            # output keys the same way S4 did.
+            case "$VERSION_TYPE" in
+              patch|minor|major)
+                echo "type=$VERSION_TYPE" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                echo "::error::version-type must be one of patch, minor, major (got: $VERSION_TYPE)" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+      - name: Bump version (custom)
+        if: steps.version-type.outputs.type == 'custom'
+        env:
+          CUSTOM_VERSION: ${{ inputs.custom-version }}
+        run: |
+          # `custom-version` is a consumer dispatch input. It reaches the shell
+          # only as a quoted variable expansion, never as shell source, and only
+          # after it is proven to be a version (abofs/stonyx-workflows#32).
+          node -e '
+            const value = process.env.CUSTOM_VERSION;
+            const KEYWORDS = ["patch", "minor", "major", "prepatch", "preminor", "premajor", "prerelease", "from-git"];
+            const SEMVER = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+            if (typeof value !== "string" || (!KEYWORDS.includes(value) && !SEMVER.test(value))) {
+              console.error("::error::custom-version is not a valid semver version or npm version keyword: " + JSON.stringify(value));
+              process.exit(1);
+            }
+          '
+          pnpm version "$CUSTOM_VERSION" --no-git-tag-version
+
+      - name: Resolve stonyx-workflows ref
+        id: workflows-ref
+        if: steps.version-type.outputs.type == 'alpha' || steps.version-type.outputs.type == 'beta'
+        env:
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_sha is empty. Refusing to fall back to a moving ref for the version derivation script."
+            exit 1
+          fi
+          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout stonyx-workflows (for version derivation script)
+        if: steps.version-type.outputs.type == 'alpha' || steps.version-type.outputs.type == 'beta'
+        uses: actions/checkout@v4
+        with:
+          repository: abofs/stonyx-workflows
+          ref: ${{ steps.workflows-ref.outputs.sha }}
+          path: .stonyx-workflows
+          # Nothing reads git credentials out of this tree -- the steps below
+          # only execute scripts/derive-version.mjs off disk -- and the tree
+          # sits inside the consumer's workspace while the consumer's own
+          # lifecycle scripts run. An ambient GITHUB_TOKEN left in
+          # .stonyx-workflows/.git/config is a live credential next to consumer
+          # code for no benefit (abofs/stonyx-workflows#35).
+          persist-credentials: false
+
+      - name: Calculate next alpha version
+        id: alpha-version
+        if: steps.version-type.outputs.type == 'alpha'
+        env:
+          PKG_NAME: ${{ steps.package-name.outputs.name }}
+        run: |
+          NEXT_VERSION=$(node -e '
+            const { execFileSync } = require("child_process");
+
+            // The package name arrives through the step env and is read here,
+            // never spliced into this program text and never concatenated into
+            // a shell command line (abofs/stonyx-workflows#32).
+            const pkg = process.env.PKG_NAME;
+            if (typeof pkg !== "string" || pkg.length === 0 || pkg.length > 214 ||
+                !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(pkg)) {
+              console.error("::error::PKG_NAME is not a valid npm package name: " + JSON.stringify(pkg));
+              process.exit(1);
+            }
+
+            // null means the package is genuinely absent from the registry.
+            // Any other failure fails the job rather than silently restarting
+            // the prerelease counter from a stale local version.
+            function npmView(args) {
+              try {
+                return execFileSync("npm", ["view", pkg, ...args], {
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "pipe"],
+                }).trim();
+              } catch (e) {
+                const stderr = String(e.stderr || "");
+                if (/E404|404 Not Found/.test(stderr)) return null;
+                console.error("::error::npm view " + pkg + " " + args.join(" ") + " failed: " + (stderr.trim() || e.message));
+                process.exit(1);
+              }
+            }
+
+            const latestRaw = npmView(["dist-tags.latest"]);
+            const versionsRaw = latestRaw === null ? null : npmView(["versions", "--json"]);
+
+            let latestStable, allVersions;
+            if (latestRaw === null || versionsRaw === null) {
+              latestStable = require("./package.json").version;
+              allVersions = [];
+            } else {
+              latestStable = latestRaw;
+              try {
+                allVersions = JSON.parse(versionsRaw);
+              } catch (e) {
+                console.error("::error::npm view " + pkg + " versions --json returned unparseable output");
+                process.exit(1);
+              }
+            }
+
+            import("./.stonyx-workflows/scripts/derive-version.mjs").then(({ deriveVersion }) => {
+              console.log(deriveVersion({ channel: "alpha", latestStable, allVersions }));
+            });
+          ')
+          echo "version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          pnpm version "$NEXT_VERSION" --no-git-tag-version
+
+      - name: Calculate next beta version
+        id: beta-version
+        if: steps.version-type.outputs.type == 'beta'
+        env:
+          PKG_NAME: ${{ steps.package-name.outputs.name }}
+        run: |
+          NEXT_VERSION=$(node -e '
+            const { execFileSync } = require("child_process");
+
+            // The package name arrives through the step env and is read here,
+            // never spliced into this program text and never concatenated into
+            // a shell command line (abofs/stonyx-workflows#32).
+            const pkg = process.env.PKG_NAME;
+            if (typeof pkg !== "string" || pkg.length === 0 || pkg.length > 214 ||
+                !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(pkg)) {
+              console.error("::error::PKG_NAME is not a valid npm package name: " + JSON.stringify(pkg));
+              process.exit(1);
+            }
+
+            // null means the package is genuinely absent from the registry.
+            // Any other failure fails the job rather than silently restarting
+            // the prerelease counter from a stale local version.
+            function npmView(args) {
+              try {
+                return execFileSync("npm", ["view", pkg, ...args], {
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "pipe"],
+                }).trim();
+              } catch (e) {
+                const stderr = String(e.stderr || "");
+                if (/E404|404 Not Found/.test(stderr)) return null;
+                console.error("::error::npm view " + pkg + " " + args.join(" ") + " failed: " + (stderr.trim() || e.message));
+                process.exit(1);
+              }
+            }
+
+            const latestRaw = npmView(["dist-tags.latest"]);
+            const versionsRaw = latestRaw === null ? null : npmView(["versions", "--json"]);
+
+            let latestStable, allVersions;
+            if (latestRaw === null || versionsRaw === null) {
+              latestStable = require("./package.json").version;
+              allVersions = [];
+            } else {
+              latestStable = latestRaw;
+              try {
+                allVersions = JSON.parse(versionsRaw);
+              } catch (e) {
+                console.error("::error::npm view " + pkg + " versions --json returned unparseable output");
+                process.exit(1);
+              }
+            }
+
+            import("./.stonyx-workflows/scripts/derive-version.mjs").then(({ deriveVersion }) => {
+              console.log(deriveVersion({ channel: "beta", latestStable, allVersions }));
+            });
+          ')
+          echo "version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          pnpm version "$NEXT_VERSION" --no-git-tag-version
+
+      - name: Remove stonyx-workflows checkout
+        if: always()
+        run: rm -rf .stonyx-workflows
+
+      - name: Bump version (stable)
+        if: steps.version-type.outputs.type == 'stable'
+        run: pnpm version patch --no-git-tag-version
+
+      - name: Bump version (patch/minor/major)
+        if: steps.version-type.outputs.type == 'patch' || steps.version-type.outputs.type == 'minor' || steps.version-type.outputs.type == 'major'
+        env:
+          VERSION_TYPE: ${{ steps.version-type.outputs.type }}
+        run: pnpm version "$VERSION_TYPE" --no-git-tag-version
+
+      - name: Get package version
+        id: package-version
+        run: |
+          # Same shape as the package-name step: a newline in the value would
+          # otherwise forge additional $GITHUB_OUTPUT keys, and this output
+          # gates every publish step below (abofs/stonyx-workflows#32).
+          PKG_VERSION=$(node -e '
+            const version = require("./package.json").version;
+            if (typeof version !== "string" ||
+                !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
+              console.error("::error::package.json version is not a valid semver version: " + JSON.stringify(version));
+              process.exit(1);
+            }
+            process.stdout.write(version);
+          ')
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Pack and guard the release artifact
+        # abofs/stonyx-workflows#39. Twenty-three published @stonyx/* tarballs
+        # carried a checked-out .git/config to the public registry, and nothing in
+        # this pipeline looked at what it was uploading. npm has no unpublish past
+        # 72 hours, so a wrong tarball is permanent and public.
+        #
+        # The property this step buys is narrower than "the tarball is safe": it
+        # is that THE BYTES ASSERTED ON ARE THE BYTES UPLOADED. It packs once, to
+        # a deterministic path outside the package root, reads that file, and the
+        # three publish steps below take that same path as their argument. Two
+        # packs of the same tree would not have this property, which is the
+        # original defect one level down.
+        #
+        # Self-contained on purpose. The .stonyx-workflows checkout is
+        # alpha/beta-only and has already been removed above, so a guard importing
+        # from scripts/ would silently not exist on the stable channel -- the one
+        # where a leak sits under `latest` indefinitely.
+        #
+        # No bypass input. A skip flag reachable through workflow_call from ten
+        # consumer repos is the guard deleting itself.
+        run: |
+          set -euo pipefail
+
+          # `set -u` catches an UNSET RUNNER_TEMP. It does not catch an EMPTY
+          # one, and empty is the case that defeats the invariant below rather
+          # than tripping it: PACK_DIR becomes `/stonyx-pack`, and the pattern
+          # `"$RUNNER_TEMP"/*` becomes `/*`, which matches every absolute path.
+          # Measured -- the `case` reports PASSES on an empty RUNNER_TEMP. The
+          # step still exited non-zero, but only because `mkdir -p /stonyx-pack`
+          # hit a non-writable root; that is the ambient filesystem refusing,
+          # not this guard checking. Under a `container:` job running as root it
+          # would succeed and `rm -rf` would run against the container root.
+          if [ -z "${RUNNER_TEMP:-}" ]; then
+            echo "::error::RUNNER_TEMP is empty. Every path this guard writes, reads and publishes is derived from it, and an empty value silently relocates all of them to the filesystem root" >&2
+            exit 1
+          fi
+
+          PACK_DIR="$RUNNER_TEMP/stonyx-pack"
+          TARBALL="$RUNNER_TEMP/stonyx-release.tgz"
+          ENTRIES="$RUNNER_TEMP/stonyx-release-entries.txt"
+          OFFENDERS="$RUNNER_TEMP/stonyx-release-offenders.txt"
+
+          # The destination is checked, not merely written down. A pack
+          # directory inside the package root is absorbed by the next pack and
+          # leaves the worktree dirty for the `git pull --rebase --autostash` in
+          # the tag steps below, and neither of those shows up as a failure
+          # here -- the guard would still pass, having quietly broken the two
+          # steps that follow it.
+          #
+          # This runs BEFORE the `rm -rf` below, and the order is the point. The
+          # `case` exists to catch a future edit that points PACK_DIR somewhere
+          # it should not be -- but `rm -rf "$PACK_DIR"` running first means
+          # that on exactly that edit the delete happens and the invariant then
+          # objects to what it failed to prevent. Measured with PACK_DIR
+          # repointed at a populated directory: the step printed
+          # `is not under` and exited 1, and the directory's contents were
+          # already gone.
+          case "$PACK_DIR" in
+            "$RUNNER_TEMP"/*) ;;
+            *)
+              echo "::error::the pack destination $PACK_DIR is not under $RUNNER_TEMP" >&2
+              exit 1
+              ;;
+          esac
+
+          # A prior attempt in the same job must never be what gets inspected or
+          # uploaded. Everything this step reads later is created below.
+          rm -rf "$PACK_DIR"
+          rm -f "$TARBALL" "$ENTRIES" "$OFFENDERS"
+          mkdir -p "$PACK_DIR"
+
+          # `pnpm pack` runs prepack and prepare -- NOT prepublishOnly. Four of
+          # the ten consumers build there (stonyx, stonyx-discord, stonyx-events,
+          # stonyx-logs, measured), and stonyx-events and stonyx-logs declare
+          # files: ["dist","README.md"], so packing without it would inspect a
+          # near-empty tarball and pass vacuously while the real upload came
+          # from a post-build tree.
+          #
+          # Publishing a tarball runs zero lifecycle scripts, so this invocation
+          # is the only thing that runs it. It is not optional and it is not
+          # swallowed: set -e fails the step if the build fails.
+          # No `unresolved` sentinel. Both branches assign before the value is
+          # read, so a check for it could never fire -- a check that cannot fail,
+          # inside the step whose entire thesis is that such checks are how a
+          # guard reports success without having inspected anything. Removed
+          # rather than kept as belt and braces: the belt was painted on.
+          PREPUBLISH_DECLARED=$(pnpm pkg get scripts.prepublishOnly)
+          if [ "$PREPUBLISH_DECLARED" = "{}" ]; then
+            PREPUBLISH_STATE=absent
+            echo "package.json declares no prepublishOnly script"
+          else
+            pnpm run prepublishOnly
+            PREPUBLISH_STATE=ran
+          fi
+          echo "prepublishOnly: $PREPUBLISH_STATE"
+
+          # --pack-destination rather than --out: pnpm 9.15.9, the version this
+          # workflow pins by default, rejects --out with `Unknown option: out`.
+          # The destination is a directory outside the package root, so no .tgz
+          # ever lands where the next pack would absorb it or where it would
+          # perturb the `git pull --rebase --autostash` in the tag steps below.
+          pnpm pack --pack-destination "$PACK_DIR"
+
+          # The filename pnpm chooses is name-and-version derived, so the file
+          # is resolved by counting a directory this step created empty rather
+          # than by globbing. A glob is how a guard ends up reading a stale
+          # tarball, or handing `tar` two paths and silently listing only the
+          # first while the second is read as a member name.
+          PACKED=$(find "$PACK_DIR" -maxdepth 1 -type f -name "*.tgz" | wc -l | tr -d " ")
+          if [ "$PACKED" != "1" ]; then
+            echo "::error::expected exactly one tarball in $PACK_DIR, found $PACKED. Refusing to guess which one would be released." >&2
+            find "$PACK_DIR" -maxdepth 1 >&2
+            exit 1
+          fi
+          mv "$(find "$PACK_DIR" -maxdepth 1 -type f -name "*.tgz")" "$TARBALL"
+          rm -rf "$PACK_DIR"
+
+          STRAY=$(find . -maxdepth 1 -type f -name "*.tgz" | wc -l | tr -d " ")
+          if [ "$STRAY" != "0" ]; then
+            echo "::error::$STRAY .tgz file(s) in the package root. They are absorbed by the next pack and they perturb the rebase in the tag steps below:" >&2
+            find . -maxdepth 1 -type f -name "*.tgz" >&2
+            exit 1
+          fi
+
+          # Read the artifact, not the report the packer prints. No pipeline here:
+          # $? after `tar ... | grep` is the status of grep, which is how a tar error
+          # becomes a green step.
+          #
+          # The status is read explicitly rather than left to `set -e`, because the
+          # interesting failure is not the one `set -e` reports usefully. A tar that
+          # dies PARTWAY -- a truncated artifact, which is what an interrupted
+          # upload, a half-written cache entry or a full disk produces -- exits
+          # non-zero AFTER having already written every entry it managed to read.
+          # Measured on GNU tar 1.35 (ubuntu-latest's tar) and on bsdtar, same
+          # result: a 32-entry archive truncated to half its bytes exits non-zero
+          # and still lists ~15 entries, `package/package.json` among them.
+          #
+          # A partial listing therefore clears both anti-vacuity checks below on
+          # its own merits, while every entry past the truncation point is simply
+          # absent from what the denylist scans -- and `.git` sorts late in a real
+          # pack. Measured with `|| true` appended to the tar line: the step printed
+          # `passed the content guard: 16 entries, 0 denied` for an artifact
+          # carrying `package/.git/config`. That is this guard's own defect,
+          # reported as a clean pass, so the status gets its own ::error:: rather
+          # than surfacing as a bare tar message: it is the one failure here that
+          # means the guard's INPUT was incomplete rather than wrong.
+          set +e
+          tar -tzf "$TARBALL" > "$ENTRIES"
+          TAR_STATUS=$?
+          set -e
+          if [ "$TAR_STATUS" != "0" ]; then
+            echo "::error::reading the release artifact's entry list failed with status $TAR_STATUS. A tar that stops partway still writes the entries it got to, so every check below would scan a PARTIAL listing and a denied path past the truncation point would be invisible to it." >&2
+            exit 1
+          fi
+
+          ENTRY_COUNT=$(wc -l < "$ENTRIES" | tr -d " ")
+          if [ "$ENTRY_COUNT" -lt 2 ]; then
+            echo "::error::the release artifact lists $ENTRY_COUNT entries. A guard that inspected nothing must not report success." >&2
+            exit 1
+          fi
+          if ! grep -q '^package/package\.json$' "$ENTRIES"; then
+            echo "::error::the release artifact has no package/package.json, so it is not a packed npm package and a denylist over its entries would pass vacuously:" >&2
+            cat "$ENTRIES" >&2
+            exit 1
+          fi
+
+          # Single-quoted patterns. `$)` inside a double-quoted string survives
+          # only because bash leaves a `$` that cannot open an expansion alone,
+          # which is an accident of the character that follows the anchor rather
+          # than something to rely on.
+          #
+          # Three parts, each load-bearing:
+          #
+          #   ^package/     the tarball prefix, so this reads entries of a packed
+          #                 artifact rather than arbitrary paths. The manifest
+          #                 check above establishes the prefix is really there.
+          #   (.*/)?        ANY depth, not just the package root. Anchored at the
+          #                 root only, `files: ["vendor/**"]` with a
+          #                 `vendor/lib/.git/config` carrying a credential
+          #                 shipped and this step exited 0 -- measured. It is the
+          #                 same file the guard is named for, one directory down.
+          #   \.git(/|$)    both branches. `/` is a checked-out .git DIRECTORY;
+          #                 `$` is a git worktree or submodule gitlink, where
+          #                 .git is a FILE holding a `gitdir:` pointer and lists
+          #                 with no trailing slash.
+          #
+          # The `(/|$)` is also what keeps this off `.gitignore`,
+          # `.gitattributes`, `.gitkeep` and `.github/` at every depth, not just
+          # at the root -- abofs/stonyx-workflows#41's false-positive shapes.
+          #
+          # grep exits 1 on no-match and >1 on error, and the difference is the
+          # whole guarantee. `|| true` would erase it.
+          set +e
+          grep -E '^package/(.*/)?\.git(/|$)' "$ENTRIES" > "$OFFENDERS"
+          GREP_STATUS=$?
+          set -e
+          # This branch is deliberately NOT covered by a test, and that is a
+          # disclosed gap rather than an oversight. Reaching it means making grep
+          # exit >1 on a readable regular file, which no fixture can arrange --
+          # only a grep stub can. A stub on PATH also intercepts the `grep -q`
+          # manifest check eight lines up, so it would change which check rejects
+          # the fixture; a stub that discriminates on argv to avoid that is a test
+          # of the stub's argv matcher, not of this branch. The tar status above is
+          # the analogous check that a fixture CAN reach, and it is pinned.
+          if [ "$GREP_STATUS" -gt 1 ]; then
+            echo "::error::scanning the release artifact entry list failed with status $GREP_STATUS" >&2
+            exit 1
+          fi
+
+          OFFENDER_COUNT=$(wc -l < "$OFFENDERS" | tr -d " ")
+          if [ "$OFFENDER_COUNT" != "0" ]; then
+            echo "::error::$OFFENDER_COUNT denied path(s) in the release artifact:" >&2
+            cat "$OFFENDERS" >&2
+            echo "::error::refusing to release. A .git directory inside a tarball on the public registry is permanent -- npm cannot unpublish it after 72 hours. Remove it from the files field in package.json, or add .git to .npmignore." >&2
+            exit 1
+          fi
+
+          echo "release artifact $TARBALL passed the content guard: $ENTRY_COUNT entries, 0 denied"
+
+      - name: Publish to NPM (alpha)
+        # The tarball the guard step above asserted on, by path, rather than
+        # this directory. A directory publish re-packs the tree, so the bytes
+        # inspected and the bytes uploaded would be two different objects built
+        # from the same source -- which is abofs/stonyx-workflows#39 one level
+        # down. Provenance is unaffected: pnpm never publishes a directory, both
+        # of its branches hand `npm publish <a .tgz>` to the npm CLI, and
+        # libnpmpublish rebuilds the spec from the manifest rather than from the
+        # CLI argument. All ten @stonyx/* packages are tarball publishes today,
+        # so this changes WHICH tarball, not the mode.
+        #
+        # Not all ten are attested, and the difference matters to anyone reading
+        # this to decide whether a provenance change is safe: @stonyx/discord
+        # has never produced an attestation in 109 versions, published through
+        # this same workflow with a green job (abofs/stonyx-workflows#43). A
+        # green publish job is not evidence that provenance was produced.
+        if: contains(steps.package-version.outputs.version, 'alpha')
+        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag alpha --access public --no-git-checks
+
+      - name: Publish to NPM (beta)
+        if: contains(steps.package-version.outputs.version, 'beta')
+        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta --access public --no-git-checks
+
+      - name: Publish to NPM (stable)
+        if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
+        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --access public --no-git-checks
+
+      - name: Commit version bump and create tag (beta)
+        if: contains(steps.package-version.outputs.version, 'beta')
+        env:
+          # A branch name may contain a double quote, so interpolating
+          # github.ref_name into this shell source was a push-access injection
+          # in every consumer repo (abofs/stonyx-workflows#32).
+          BRANCH: ${{ github.ref_name }}
+          PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}
+          # The checkout no longer leaves a credential in .git/config
+          # (abofs/stonyx-workflows#35), so the two commands below that reach
+          # the remote are handed one HERE. Same expression the checkout used,
+          # so the identity that pushes is unchanged.
+          GIT_REMOTE_TOKEN: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}
+        run: |
+          git add package.json pnpm-lock.yaml
+          git commit -m "chore: release v$PUBLISHED_VERSION [skip ci]"
+          git tag "v$PUBLISHED_VERSION"
+          # GIT_CONFIG_* rather than a remote URL or a `git config` write:
+          # nothing lands on disk, nothing outlives these two processes, and
+          # the credential never appears in a process argv.
+          #
+          # It is applied per command rather than exported, but do NOT read
+          # that as containment of the local commands. GIT_REMOTE_TOKEN is a
+          # step-level `env:`, so the RAW PAT is in the environment of all five
+          # `git` processes in this step -- `add`, `commit` and `tag` included.
+          # What the per-command form withholds from those three is only
+          # GIT_CONFIG_VALUE_0, a base64 ENCODING of the same token. A consumer
+          # that repoints core.hooksPath reads the plaintext from a pre-commit
+          # hook just as well as from a pre-push one. Measured, and asserted as
+          # a CONTROL in test/checkout-credentials-test.js.
+          #
+          # The per-command form is still the right shape -- it is what keeps
+          # the credential out of .git/config and out of every argv -- but the
+          # residual is the whole step, not the two remote calls. Taking the
+          # long-lived org PAT out of the job is abofs/stonyx-workflows#36.
+          AUTH_B64=$(printf 'x-access-token:%s' "$GIT_REMOTE_TOKEN" | base64 | tr -d '\n')
+          # ::add-mask:: knows the raw secret, not this encoding of it. Same
+          # reason actions/checkout calls core.setSecret on its own basic
+          # credential before using it.
+          echo "::add-mask::$AUTH_B64"
+          GIT_AUTH_KEY="http.${GITHUB_SERVER_URL:-https://github.com}/.extraheader"
+          GIT_AUTH_VALUE="AUTHORIZATION: basic $AUTH_B64"
+          authed_git() {
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="$GIT_AUTH_KEY" GIT_CONFIG_VALUE_0="$GIT_AUTH_VALUE" git "$@"
+          }
+          # `--end-of-options` because quoting alone leaves argv residue: git
+          # permits a ref named `--force` (porcelain refuses it, `update-ref`
+          # does not), and `git push origin "--force" --tags` consumes it as a
+          # FLAG rather than as a refspec. `--tags` moves ahead of the remote
+          # so it is not swallowed as a positional after the terminator; the
+          # ref set pushed is unchanged (abofs/stonyx-workflows#32).
+          authed_git pull --rebase --autostash origin --end-of-options "$BRANCH"
+          authed_git push --tags origin --end-of-options "$BRANCH"
+
+      - name: Create GitHub Release (beta)
+        if: contains(steps.package-version.outputs.version, 'beta')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.package-version.outputs.version }}
+          name: v${{ steps.package-version.outputs.version }}
+          prerelease: false
+          generate_release_notes: false
+
+      - name: Commit version bump and create tag (stable)
+        if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
+        env:
+          PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}
+          # The checkout no longer leaves a credential in .git/config
+          # (abofs/stonyx-workflows#35), so the two commands below that reach
+          # the remote are handed one HERE. Same expression the checkout used,
+          # so the identity that pushes is unchanged.
+          GIT_REMOTE_TOKEN: ${{ (inputs.cascade-source != '' && secrets.CASCADE_PAT) || github.token }}
+        run: |
+          git add package.json pnpm-lock.yaml
+          git commit -m "chore: release v$PUBLISHED_VERSION [skip ci]"
+          git tag "v$PUBLISHED_VERSION"
+          # GIT_CONFIG_* rather than a remote URL or a `git config` write:
+          # nothing lands on disk, nothing outlives these two processes, and
+          # the credential never appears in a process argv.
+          #
+          # It is applied per command rather than exported, but do NOT read
+          # that as containment of the local commands. GIT_REMOTE_TOKEN is a
+          # step-level `env:`, so the RAW PAT is in the environment of all five
+          # `git` processes in this step -- `add`, `commit` and `tag` included.
+          # What the per-command form withholds from those three is only
+          # GIT_CONFIG_VALUE_0, a base64 ENCODING of the same token. A consumer
+          # that repoints core.hooksPath reads the plaintext from a pre-commit
+          # hook just as well as from a pre-push one. Measured, and asserted as
+          # a CONTROL in test/checkout-credentials-test.js.
+          #
+          # The per-command form is still the right shape -- it is what keeps
+          # the credential out of .git/config and out of every argv -- but the
+          # residual is the whole step, not the two remote calls. Taking the
+          # long-lived org PAT out of the job is abofs/stonyx-workflows#36.
+          AUTH_B64=$(printf 'x-access-token:%s' "$GIT_REMOTE_TOKEN" | base64 | tr -d '\n')
+          # ::add-mask:: knows the raw secret, not this encoding of it. Same
+          # reason actions/checkout calls core.setSecret on its own basic
+          # credential before using it.
+          echo "::add-mask::$AUTH_B64"
+          GIT_AUTH_KEY="http.${GITHUB_SERVER_URL:-https://github.com}/.extraheader"
+          GIT_AUTH_VALUE="AUTHORIZATION: basic $AUTH_B64"
+          authed_git() {
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="$GIT_AUTH_KEY" GIT_CONFIG_VALUE_0="$GIT_AUTH_VALUE" git "$@"
+          }
+          authed_git pull --rebase --autostash origin main
+          authed_git push origin main --tags
+
+      - name: Create GitHub Release (stable)
+        if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.package-version.outputs.version }}
+          name: v${{ steps.package-version.outputs.version }}
+          prerelease: false
+          generate_release_notes: false
+
+      - name: Comment on PR with alpha version
+        if: contains(steps.package-version.outputs.version, 'alpha')
+        uses: actions/github-script@v7
+        env:
+          PACKAGE_NAME: ${{ steps.package-name.outputs.name }}
+          PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}
+        with:
+          script: |
+            // Read from the step env rather than interpolating a GitHub
+            // Actions expression into this source: the runner substitutes those
+            // expressions textually, before the script is ever parsed, so a
+            // quote in the value breaks out of the literal
+            // (abofs/stonyx-workflows#32). No expression may appear below.
+            const version = process.env.PUBLISHED_VERSION;
+            const packageName = process.env.PACKAGE_NAME;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🚀 Alpha Version Published\n\n**Version:** \`${version}\`\n\n**Install:**\n\`\`\`bash\npnpm add ${packageName}@${version}\n# or\npnpm add ${packageName}@alpha  # latest alpha\n\`\`\`\n\nThis alpha version is now available for testing!`
+            });
