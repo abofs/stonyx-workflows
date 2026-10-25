@@ -1252,7 +1252,11 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     return 'witnessed';
   };
 
-  test('the if: reader refuses or folds every multi-line and commented shape; none passes a bypass (#61)', () => {
+  // Every shape below is also refused by the step-shape allowlist
+  // (test/step-shape-test.js), which reads the live files with code sharing
+  // nothing with this reader. These cases pin the second fence: the reader
+  // itself throws rather than returns a condition GitHub does not run.
+  test('the if: reader refuses every multi-line, block, single-quoted, duplicated and commented shape; none passes a bypass (#61)', () => {
     const cases = {
       'plain, continued on the next line': [`        if: ${GATE_BETA}`, `          ${BYPASS}`],
       'plain, continued after a blank line': [`        if: ${GATE_BETA}`, '', `          ${BYPASS}`],
@@ -1269,6 +1273,15 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
       'comment line under the key line': [`        if: ${GATE_BETA} ${BYPASS}`, '          # reviewed'],
       'folded block scalar': ['        if: >-', `          ${GATE_BETA}`, `          ${BYPASS}`],
       'literal block scalar': ['        if: |', `          ${GATE_BETA}`, `          ${BYPASS}`],
+      // Framework r3 HIGH: to GitHub this is ONE quoted string literal, always
+      // truthy; the old reader folded it and stripped the quotes, and the
+      // check evaluated the gated condition. 588/588 green.
+      'block scalar whose body is a quoted string': ['        if: >-', `          '${GATE_BETA.replaceAll("'", "''")}'`],
+      'single-quoted, one line': [`        if: '${GATE_BETA.replaceAll("'", "''")}'`],
+      // No body line, so no continuation check fires: only the header refusal does.
+      'block header with no body': ['        if: >-'],
+      // Convention r3 NIT: this reader took the first, YAML the last.
+      'duplicate if:': [`        if: ${GATE_BETA}`, `        if: ${GATE_BETA} ${BYPASS}`],
     };
     const outcomes = Object.fromEntries(Object.entries(cases)
       .map(([label, ifLines]) => [label, refusedOrWitnessed(withBetaIf(ifLines.join('\n')), label).split(':')[0]]));
@@ -1282,27 +1295,29 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
       'trailing comment on the key line': 'refused',
       'double-quoted, then a trailing comment': 'refused',
       'comment line under the key line': 'refused',
-      'folded block scalar': 'witnessed',
-      'literal block scalar': 'witnessed',
+      'folded block scalar': 'refused',
+      'literal block scalar': 'refused',
+      'block scalar whose body is a quoted string': 'refused',
+      'single-quoted, one line': 'refused',
+      'block header with no body': 'refused',
+      'duplicate if:': 'refused',
     });
   });
 
-  // The inverse: a correct condition in each shape the reader accepts is read
-  // as exactly that condition, so the cases above are not red because every
-  // shape is red.
+  // The inverse: a correct condition in each shape the reader accepts -- one
+  // line, plain or double-quoted, `${{ }}` or not -- is read as exactly that
+  // condition, so the cases above are not red because every shape is red.
   test('the if: reader reads a correct condition in every accepted shape as that condition (#61)', () => {
     for (const ifLines of [
       [`        if: ${GATE_BETA}`],
       [`        if: "${GATE_BETA}"`],
-      [`        if: '${GATE_BETA.replaceAll("'", "''")}'`],
       [`        if: \${{ ${GATE_BETA} }}`],
-      ['        if: >-', `          ${GATE_BETA.replace(' && ', '\n          && ')}`],
-      ['        if: |', `          ${GATE_BETA}`],
+      [`        if: "\${{ ${GATE_BETA} }}"`],
     ]) {
       const text = withBetaIf(ifLines.join('\n'));
       assert.deepEqual(publishBypasses(text, BETA_STEP), [], ifLines.join(' / '));
       const step = publishSteps(text).find((st) => st.name === 'Publish to NPM (beta)');
-      assert.equal(ifOf(step).replace(/\s+/g, ' '), GATE_BETA, ifLines.join(' / '));
+      assert.equal(ifOf(step), GATE_BETA, ifLines.join(' / '));
     }
   });
 

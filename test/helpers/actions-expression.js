@@ -183,17 +183,24 @@ function lookup(path, ctx, src) {
 }
 
 /**
- * An `if:` value as written in YAML, with the optional `${{ }}` and quotes
- * removed. A single-quoted YAML scalar's `''` is one `'`, so it is unescaped
- * here; a double-quoted one with a backslash escape in it THROWS, because
+ * An `if:` value as written in YAML, with the optional `${{ }}` and the
+ * double quotes removed.
+ *
+ * It takes the one shape `stepScalarOf` returns for an `if:` -- a single-line
+ * plain or double-quoted scalar -- and throws on anything else. It used to
+ * strip single quotes too, and applied that to block-scalar bodies, where
+ * quotes are not YAML syntax but expression text: GitHub read one string
+ * literal (always truthy) where this read the gated condition (#61, Framework
+ * round 3). A double-quoted value with a backslash in it also throws, because
  * YAML's escape set is not implemented and a half-decoded condition is a
  * different condition from the one GitHub evaluates.
  */
 export function conditionSource(raw) {
+  if (raw.includes('\n')) throw new Error(`the test evaluator reads a one-line if: only: ${JSON.stringify(raw)}`);
   let s = raw.trim();
-  if (s.length >= 2 && s.startsWith("'") && s.endsWith("'")) {
-    s = s.slice(1, -1).replace(/''/g, "'");
-  } else if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+  if (s.startsWith("'")) throw new Error(`the test evaluator does not read a single-quoted if: ${raw}`);
+  if (s.startsWith('"')) {
+    if (s.length < 2 || !s.endsWith('"')) throw new Error(`unclosed double-quoted if: ${raw}`);
     s = s.slice(1, -1);
     if (s.includes('\\')) throw new Error(`the test evaluator does not decode YAML double-quoted escapes: ${raw}`);
   }
