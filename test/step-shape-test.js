@@ -124,9 +124,15 @@ describe('workflow step shape allowlist (#61)', () => {
     'single-quoted value not closed': [BETA_IF, `${BETA_IF}\n        id: 'a`, 'id', /single-quoted value must close/, 'beta'],
     'env: nested mapping': [BETA_IF, `${BETA_IF}\n        env:\n          A:\n            B: c`, 'env.A', /nested mapping/, 'beta'],
     'flow-mapping step': [/^ {6}- name: Publish to NPM \(beta\)$/, `      - {name: x, run: npm publish}\n${BETA_NAME}`, null, /not a "key: value" line/, 'none'],
+    // Test Coverage r4 W2: YAML reads a null; the evaluator reads it as false,
+    // and GitHub may coerce it to "" and run the step as success().
+    'if: null': [BETA_IF, '        if: null', 'if', /null, boolean or number/, 'beta'],
+    'if: ~': [BETA_IF, '        if: ~', 'if', /null, boolean or number/, 'beta'],
+    'if: TRUE': [BETA_IF, '        if: TRUE', 'if', /null, boolean or number/, 'beta'],
+    'if: 0': [BETA_IF, '        if: 0', 'if', /null, boolean or number/, 'beta'],
   };
 
-  test('every bypass shape from rounds 2 and 3 is refused, naming the step, the key and the rule', () => {
+  test('every bypass shape from rounds 2 to 4 is refused, naming the step, the key and the rule', () => {
     const missed = [];
     for (const [label, [from, to, key, rule, which]] of Object.entries(RED)) {
       const { violations } = stepShapes(mutate(from, to), 'npm-publish.yml');
