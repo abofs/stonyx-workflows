@@ -163,6 +163,10 @@ export function stepShapes(text, file = '<workflow>') {
         bodyIndent = null;
       }
       if (line.trimStart().startsWith('#')) continue;
+      if (ind === stepsIndent && /^ *-( |$)/.test(line)) {
+        refuse(i, null, 'a "- " list item at the steps: column (a compact sequence) is refused; indent the steps');
+        break;
+      }
       if (ind <= stepsIndent) break;
 
       const item = line.match(/^( *)-( +)(\S.*)$/);
