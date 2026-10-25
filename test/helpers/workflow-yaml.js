@@ -523,9 +523,16 @@ export function envOf(step) {
     const match = lines[i].match(/^\s*([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
     if (!match) throw new Error(`unrecognised env: entry in step ${JSON.stringify(stepName)}: ${lines[i]}`);
     const value = match[2].trim();
-    env[match[1]] = BLOCK_SCALAR_HEADER.test(value)
-      ? blockScalarBody(lines, i, `step ${JSON.stringify(stepName)} env: value ${match[1]}`)
-      : value;
+    const where = `step ${JSON.stringify(stepName)} env: value ${match[1]}`;
+    if (BLOCK_SCALAR_HEADER.test(value)) {
+      env[match[1]] = blockScalarBody(lines, i, where);
+      continue;
+    }
+    // The same half-read stepScalar refuses: a plain value continued onto the
+    // next line is folded by YAML, and returning the first line would hand the
+    // #60 simulator an env GitHub never sets (#61, Convention round 2).
+    inlineScalarMustEndOnItsLine(lines, i, value, where);
+    env[match[1]] = value;
   }
   return env;
 }
