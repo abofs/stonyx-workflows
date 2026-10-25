@@ -35,7 +35,7 @@ on:
         description: 'The name of the published package'
         value: ${{ jobs.publish.outputs.package-name }}
       version-channel:
-        description: 'The release channel (alpha/beta/stable)'
+        description: 'The release channel (alpha/beta/stable/patch/minor/major/custom). Empty on a cascade that moved no dependency range: no channel was decided.'
         value: ${{ jobs.publish.outputs.version-channel }}
 
 permissions:
