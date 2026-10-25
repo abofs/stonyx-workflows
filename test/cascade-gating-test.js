@@ -441,6 +441,9 @@ describe('#60 harness controls -- the expression evaluator computes GitHub\'s an
     ["github.ref_name == 'main'", true], ["github.event_name != 'push'", false],
     ["steps.gate.outputs.release == 'true'", true], ["steps.gate.outputs.empty == 'true'", false],
     ["steps.nope.outputs.release == 'true'", false], ["steps.nope.outputs.release == ''", true],
+    // Dereferencing a string is null, not a JS property of it; a non-numeric
+    // string still compares to null without coercion.
+    ['steps.gate.outputs.release.length', null], ["null == 'x0'", false], ["null == 'refs/heads/0'", false],
     // contains() -- case-insensitive substring, null is ''.
     ["contains('Hello', 'ELL')", true], ["contains('abc', 'd')", false], ["contains(null, 'a')", false],
     ["contains('', '')", true], ["contains(github.ref_name, 'AI')", true],
@@ -468,6 +471,11 @@ describe('#60 harness controls -- the expression evaluator computes GitHub\'s an
     ["'' == false", /number coercion/],
     ["'true' == true", /number coercion/],
     ["null == '0'", /number coercion/],
+    // The runner trims and uses Double.TryParse, so each of these is 0 there.
+    ["null == ' '", /number coercion/], ["null == '00'", /number coercion/], ["null == '+0'", /number coercion/],
+    ["null == '.0'", /number coercion/], ["null == '0.'", /number coercion/], ["null == '0o0'", /number coercion/],
+    // Context keys are case-insensitive in the runner; a case variant is refused.
+    ["github.Event_Name == 'push'", /case-insensitively/], ["steps.GATE.outputs.release", /case-insensitively/],
     ['contains(true, \'t\')', /does not implement contains/],
   ]) {
     test(`refuses ${src}`, () => {
