@@ -94,8 +94,11 @@ function jobOutputs(text) {
   const m = text.slice(job).match(/^ {4}outputs:\n((?: {6}.*\n)+)/m);
   if (!m) throw new Error('could not find the publish job outputs: mapping');
   return Object.fromEntries(m[1].trimEnd().split('\n').map((l) => {
-    const kv = l.trim().match(/^(['"]?)([\w-]+)\1\s*:\s*(.*)$/);
-    if (!kv) throw new Error(`unreadable publish job output line: ${JSON.stringify(l)}`);
+    // Exactly six spaces: a deeper line is a continuation YAML folds into the
+    // previous value, and reading it as a value of its own (or not at all) is
+    // the half-read #61 Convention round 2 measured on `if:`. So is a comment.
+    const kv = l.match(/^ {6}(['"]?)([\w-]+)\1\s*:\s*(\S(?:.*\S)?)\s*$/);
+    if (!kv || /(^|\s)#/.test(kv[3])) throw new Error(`unreadable publish job output line: ${JSON.stringify(l)}`);
     return [kv[2], kv[3]];
   }));
 }
@@ -378,6 +381,29 @@ describe('#60 harness controls -- the simulation can see the defect it is used t
     const run = await simulateRun(OLD, 'cascadeChanged');
     assert.equal(run.failure, null, run.failure && run.failure.stderr);
     assert.equal(run.packageJson.devDependencies['@stonyx/utils'], '0.2.3-beta.38');
+  });
+
+  // The readers that FEED the simulation refuse a value they would half-read
+  // (#61, Convention round 2): a continued plain value is folded by YAML, so
+  // returning its first line would simulate an env or an output GitHub never
+  // produces. The inverse rows read the one-line value as written.
+  test('envOf and jobOutputs refuse a continued or commented value, and read a one-line value as written', () => {
+    const stepWith = (envLines) => parseSteps(['jobs:', '  j:', '    steps:', '      - name: s', '        env:',
+      ...envLines.map((l) => `          ${l}`), '        run: true', ''].join('\n'))[0];
+    assert.deepEqual(envOf(stepWith(['A: one', 'B: "two"'])), { A: 'one', B: '"two"' });
+    assert.throws(() => envOf(stepWith(['A: one', '  two'])), /continues onto the next line/);
+    assert.throws(() => envOf(stepWith(['A: one', '  B: two'])), /continues onto the next line/);
+    assert.throws(() => envOf(stepWith(['A: one # two'])), /# comment/);
+    assert.throws(() => envOf(stepWith(['A: "one', '  two"'])), /continues onto the next line|not closed/);
+
+    const outputsLine = '      package-name: ${{ steps.package-name.outputs.name }}\n';
+    assert.equal(NEW_PUBLISH.split(outputsLine).length, 2, 'the package-name output line must occur exactly once');
+    assert.equal(jobOutputs(NEW_PUBLISH)['package-name'], '${{ steps.package-name.outputs.name }}');
+    for (const tail of ['        || x\n', '        x: y\n']) {
+      assert.throws(() => jobOutputs(NEW_PUBLISH.replace(outputsLine, outputsLine + tail)), /unreadable publish job output line/);
+    }
+    assert.throws(() => jobOutputs(NEW_PUBLISH.replace(outputsLine, outputsLine.replace('}}', '}} # c'))),
+      /unreadable publish job output line/);
   });
 
   test('the evaluator refuses an expression it does not implement rather than guessing', () => {
