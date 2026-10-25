@@ -154,6 +154,26 @@ describe('workflow step shape allowlist (#61)', () => {
     }
   });
 
+  // Round 4: each job below is appended to the live npm-publish.yml, and
+  // libyaml (Ruby psych) reads every one of them as a job whose steps run an
+  // unguarded publish. parseSteps sees none of them, so the population
+  // cross-check agrees with the omission; the allowlist must refuse each
+  // itself.
+  test('a steps key spelled in a form neither reader walks is refused by the allowlist itself', () => {
+    const SNEAK = {
+      'compact sequence (Test Coverage W1, Framework W1)': ['  sneaky:\n    runs-on: ubuntu-latest\n    steps:\n'
+        + '    - name: Publish elsewhere\n      run: pnpm publish --access public --no-git-checks\n', /compact sequence/],
+    };
+    assert.ok(npmPublish.endsWith('\n'), 'the appended job must start on its own line');
+    for (const [label, [job, rule]] of Object.entries(SNEAK)) {
+      const text = npmPublish + job;
+      assert.equal(parseSteps(text).filter((s) => /pnpm publish --access public/.test(s.body)).length, 0,
+        `${label}: parseSteps must not see the appended step, or this case does not test the blind spot`);
+      const { violations } = stepShapes(text, 'npm-publish.yml');
+      assert.ok(violations.some((v) => rule.test(v)), `${label}: ${JSON.stringify(violations)}`);
+    }
+  });
+
   // The inverse: every shape the allowlist admits, in one synthetic workflow,
   // reads clean -- including block bodies whose lines look like refused
   // shapes, which must be skipped as payload. Without this, the reds above
