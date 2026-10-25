@@ -1319,6 +1319,12 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
       const step = publishSteps(text).find((st) => st.name === 'Publish to NPM (beta)');
       assert.equal(ifOf(step), GATE_BETA, ifLines.join(' / '));
     }
+    // conditionSource takes only what the reader hands it; anything else
+    // throws rather than being unquoted into a different condition.
+    for (const [bad, why] of [["'a == b'", /single-quoted/], ['a\n|| b', /one-line/], ['"a', /unclosed/], ['"a\\x"', /escapes/]]) {
+      assert.throws(() => conditionSource(bad), why, JSON.stringify(bad));
+    }
+    assert.equal(conditionSource('"${{ a == b }}"'), 'a == b');
   });
 
   // What feeds `stepScalarOf` is the step's key depth, which parseSteps sets.
