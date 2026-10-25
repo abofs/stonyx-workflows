@@ -131,10 +131,10 @@ describe('workflow step shape allowlist (#61)', () => {
     'if: TRUE': [BETA_IF, '        if: TRUE', 'if', /null, boolean or number/, 'beta'],
     'if: 0': [BETA_IF, '        if: 0', 'if', /null, boolean or number/, 'beta'],
     // Test Coverage r4 W3, SM3: an own key after a run: | body is still read as
-    // an own key. YAML reads this shell: as "bash {0} if: ... x: y" and the
-    // step as having no if: at all.
+    // an own key. YAML reads this shell: as "bash {0} if: ... x: y", so the
+    // if: line under it is not a key at all.
     'unclosed quoted own key after a run: | body absorbs the if: line': [
-      /^ {8}if: steps\.release-gate[^\n]*'beta'\)\n {8}run: (pnpm publish [^\n]*--tag beta [^\n]*)$/,
+      /^ {8}run: (pnpm publish [^\n]*--tag beta [^\n]*)$/,
       `        run: |\n          $1\n        shell: "bash {0}\n${BETA_IF}\n        x: y"`, 'shell', /double-quoted value must close/, 'beta'],
     // SM8: an escaped quote does not close a double-quoted value.
     'double-quoted value ending in \\" absorbs the if: line': [/^ {6}- name: Publish to NPM \(beta\)$/,
@@ -214,7 +214,8 @@ describe('workflow step shape allowlist (#61)', () => {
     const wf = (v) => `on:\n  push:\n    branches: ${v}\njobs:\n  j:\n    steps:\n      - run: echo\n`;
     assert.deepEqual(stepShapes(wf('[main]')).violations, []);
     assert.deepEqual(stepShapes(wf('[main, release/*, v1-x]')).violations, []);
-    for (const v of ['[main, "x"]', '[{a: b}]', '[main,dev]', '[main', '{a: b}', '[ main ]']) {
+    for (const v of ['[main, "x"]', '[{a: b}]', '[main,dev]', '[main', '{a: b}', '[ main ]',
+      '\n      - [main]', '\n      - {a: b}']) {
       assert.ok(stepShapes(wf(v)).violations.some((m) => /flow collection/.test(m)), v);
     }
   });
