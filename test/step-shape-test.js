@@ -32,12 +32,22 @@ const BYPASS = "|| github.event_name == 'workflow_dispatch'";
 
 /**
  * `npmPublish` with `from` (which must occur exactly once) replaced by `to`.
- * The publish conditions recur on the commit and Release steps, so an `if:`
- * anchor is pinned to its publish step's name line.
+ *
+ * `BETA_IF`/`STABLE_IF` as an anchor mean "that publish step's one-line `if:`,
+ * WHATEVER IT SAYS": the step's name line followed by any one-line `if:`, so
+ * an edit to a live condition reds the evaluated check and not these cases.
+ * (`BETA_IF`/`STABLE_IF` inside `to` are injected text, not anchors.)
  */
 function mutate(from, to) {
   for (const [ifLine, nameLine] of [[BETA_IF, BETA_NAME], [STABLE_IF, STABLE_NAME]]) {
-    if (from === ifLine) return mutate(`${nameLine}\n${from}`, `${nameLine}\n${to}`);
+    if (from !== ifLine) continue;
+    const anchor = new RegExp(`^${nameLine.replace(/[()]/g, '\\$&')}\n {8}if: [^\n]*$`, 'gm');
+    assert.equal(npmPublish.match(anchor)?.length, 1, `${nameLine.trim()} must open with a one-line if: exactly once`);
+    return npmPublish.replace(anchor, () => `${nameLine}\n${to}`);
+  }
+  if (from instanceof RegExp) {
+    assert.equal(npmPublish.match(new RegExp(from.source, 'gm'))?.length, 1, `the mutation anchor must match exactly once: ${from}`);
+    return npmPublish.replace(new RegExp(from.source, 'm'), to);
   }
   assert.equal(npmPublish.split(from).length, 2, `the mutation anchor must occur exactly once: ${JSON.stringify(from)}`);
   const out = npmPublish.replace(from, () => to);
@@ -85,8 +95,8 @@ describe('workflow step shape allowlist (#61)', () => {
     'block scalar with a quoted body, stable publish': [STABLE_IF,
       `        if: >-\n          '${GATE_STABLE.replaceAll("'", "''")}'`, 'if', /block scalar is refused/, 'stable'],
     // Test Coverage r3 SW1: YAML reads this step as having no if: at all.
-    'unclosed quoted name absorbs the if: line': [`${BETA_NAME}\n${BETA_IF}\n`,
-      `      - name: "Publish to NPM (beta)\n${BETA_IF}\n        "\n`, 'name', /double-quoted value must close on its own line/, '"Publish to NPM (beta)'],
+    'unclosed quoted name absorbs the if: line': [/^ {6}- name: Publish to NPM \(beta\)$/,
+      `      - name: "Publish to NPM (beta)\n${BETA_IF}\n        "`, 'name', /double-quoted value must close on its own line/, '"Publish to NPM (beta)'],
     // Convention r3 NIT: the reader took the first, YAML the last.
     'duplicate if:': [BETA_IF, `${BETA_IF}\n        if: ${GATE_BETA} ${BYPASS}`, 'if', /appears twice/, 'beta'],
     // Convention r2 HIGH.
@@ -103,16 +113,15 @@ describe('workflow step shape allowlist (#61)', () => {
     'trailing comment after a double-quoted if:': [STABLE_IF, `${STABLE_IF} # x`, 'if', /nothing after the closing quote/, 'stable'],
     'double-quoted if: with an escape': [STABLE_IF, STABLE_IF.replace("'true'", "'tr\\x75e'"), 'if', /backslash/, 'stable'],
     'quoted "if": key': [BETA_IF, BETA_IF.replace('if:', '"if":'), null, /not a "key: value" line/, 'beta'],
-    'if: on the dash line, continued': [`${BETA_NAME}\n${BETA_IF}\n`,
-      `      - if: ${GATE_BETA}\n          ${BYPASS}\n        name: Publish to NPM (beta)\n`, null, /continuation/, 'beta'],
+    'if: on the dash line, continued': [/^ {6}- name: Publish to NPM \(beta\)$/,
+      `      - if: ${GATE_BETA}\n          ${BYPASS}\n        name: Publish to NPM (beta)`, null, /continuation/, 'beta'],
     'if: key indented one column deeper': [BETA_IF, ` ${BETA_IF}`, null, /column 9 is not one of the step's own keys/, 'beta'],
-    'run: folded': ['        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta',
-      '        run: >\n          pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta', 'run', /YAML indicator/, 'beta'],
+    'run: folded': [/^ {8}run: (pnpm publish [^\n]*--tag beta [^\n]*)$/, '        run: >\n          $1', 'run', /YAML indicator/, 'beta'],
     'if: with its value on the next lines': [BETA_IF, `        if:\n          ${GATE_BETA}\n          ${BYPASS}`, 'if', /no inline value/, 'beta'],
     'duplicate env: key': [BETA_IF, `${BETA_IF}\n        env:\n          A: one\n          A: two`, 'env.A', /appears twice under env:/, 'beta'],
     'env: value as a block': [BETA_IF, `${BETA_IF}\n        env:\n          A: |\n            x`, 'env.A', /block is allowed on run: and with: script: only/, 'beta'],
     'env: nested mapping': [BETA_IF, `${BETA_IF}\n        env:\n          A:\n            B: c`, 'env.A', /nested mapping/, 'beta'],
-    'flow-mapping step': [`${BETA_NAME}\n`, `      - {name: x, run: npm publish}\n${BETA_NAME}\n`, null, /not a "key: value" line/, 'none'],
+    'flow-mapping step': [/^ {6}- name: Publish to NPM \(beta\)$/, `      - {name: x, run: npm publish}\n${BETA_NAME}`, null, /not a "key: value" line/, 'none'],
   };
 
   test('every bypass shape from rounds 2 and 3 is refused, naming the step, the key and the rule', () => {
