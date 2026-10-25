@@ -31,10 +31,12 @@ import {
 // YAML. The families below are re-run anyway -- a construction argument that
 // nobody re-measured is how the last three rounds each started.
 //
-// The extractor in `test/helpers/workflow-yaml.js` is DIAGNOSTICS ONLY from
-// here on. It still names which step and which sink an expression sits in, and
-// the executed `run:`-body tests still need real step bodies from it. If it is
-// wrong, a message gets less helpful; nothing goes unswept.
+// The extractor in `test/helpers/workflow-yaml.js` carries no `${{ }}`
+// guarantee from here on (but see its header: the #39/#60 `if:` check and the
+// #60 simulator read it). For this sweep it still names which step and which
+// sink an expression sits in, and the executed `run:`-body tests still need
+// real step bodies from it. If it is wrong, a message gets less helpful;
+// nothing goes unswept.
 
 const cascade = readWorkflowFile('cascade.yml');
 const ci = readWorkflowFile('ci.yml');

@@ -1,6 +1,6 @@
 // Minimal, purpose-built reader for the workflow YAML in this repo.
 //
-// DIAGNOSTICS ONLY FOR THE `${{ }}` SWEEP -- BUT ONE GUARANTEE READS IT.
+// DIAGNOSTICS ONLY FOR THE `${{ }}` SWEEP -- BUT TWO GUARANTEE CHECKS READ IT.
 //
 // The #39/#60 check "no publish step can run under any input on which the
 // guard does not" (test/tarball-guard-test.js) reads every publish and guard
@@ -8,11 +8,18 @@
 // (test/cascade-gating-test.js) reads `if:`, `id:`, `run:` and `env:` through
 // this file. For those, a wrong answer here IS a hole: a condition read
 // stricter than the one GitHub runs makes the check pass with nothing behind
-// it. That happened once -- a plain `if:` continued onto the next line was read
-// as its first line, and a two-line bypass stayed 571/571 green (#61,
-// Convention round 2) -- so `stepScalar` and `envOf` now return an inline
-// value only when it is the whole value, and throw otherwise. Review this file
-// with that priority.
+// it. Three review rounds on #61 each found one: a plain `if:` continued onto
+// the next line (571/571 green), a `>-` block whose body is one quoted literal
+// to GitHub but the gated condition here (588/588 green), an unclosed quoted
+// `name:` swallowing the `if:` line, a duplicate `if:` read first-wins.
+//
+// So the shapes are fenced off, not patched one at a time. The step-shape
+// allowlist (test/helpers/step-shape.js, run over every live workflow file by
+// test/step-shape-test.js) refuses every step shape but single-line scalars,
+// `|`/`|-` blocks on `run:`/`script:`, and a plain or double-quoted one-line
+// `if:`; it shares no code with this file. And `stepScalarOf` reads exactly
+// those shapes and throws on the rest: one line, written once, no block
+// scalar, no single-quoted `if:`. Review this file with that priority.
 //
 // For the `${{ }}` sweep, it used to carry the guarantee. Three review rounds on abofs/stonyx-workflows#37 found
 // nine ways to hide a `${{ }}` expression from a sweep founded on this reader
