@@ -122,7 +122,10 @@ export function parseSteps(text) {
 
     for (let i = stepsIdx + 1; i < lines.length; i++) {
       const line = lines[i];
-      if (line.trim() !== '' && indentOf(line) <= stepsIndent) break;
+      // A comment may sit at any column, so it does not end the block. It used
+      // to: a column-0 comment inside a step cut every line after it out of
+      // every step (#61, round 3).
+      if (line.trim() !== '' && !line.trim().startsWith('#') && indentOf(line) <= stepsIndent) break;
 
       const item = line.trim() === '' ? null : line.match(/^(\s*)-(\s+\S.*|\s*)$/);
       if (item && (listIndent === null || item[1].length === listIndent)) {
@@ -136,7 +139,10 @@ export function parseSteps(text) {
             + 'reader instead of deleting the case that failed.',
           );
         }
-        current = { job, lines: content === '' ? [] : [`${' '.repeat(listIndent + 2)}${content}`] };
+        // The content keeps its real column (`-   name:` puts the key at +4,
+        // not +2), so the step's own key depth is the depth its other keys use.
+        const column = listIndent + 1 + item[2].match(/^\s*/)[0].length;
+        current = { job, start: i, lines: content === '' ? [] : [`${' '.repeat(column)}${content}`] };
         steps.push(current);
         continue;
       }
@@ -146,9 +152,25 @@ export function parseSteps(text) {
 
   if (steps.length === 0) throw new Error('workflow steps: block contained no steps');
 
-  return steps.map(({ job, lines: body }, index) => {
-    const text = body.join('\n');
+  return steps.map(({ job, start, lines: raw }, index) => {
+    // A comment may sit at any column; it is not part of the step. Any other
+    // line LESS indented than the step's first key is not a key of this step:
+    // the only YAML that puts one there is a quoted scalar folded across lines,
+    // which libyaml accepts. Reading the step with that line in it moved the
+    // step's key depth, so its own `name:` and `if:` read as absent (#61,
+    // round 3 probe). It throws instead.
+    const firstKey = raw.find((l) => l.trim() !== '' && !l.trim().startsWith('#'));
+    const body = raw.filter((l) => !(l.trim().startsWith('#') && firstKey && indentOf(l) < indentOf(firstKey)));
     const keyIndent = Math.min(...body.filter((l) => l.trim() !== '').map(indentOf));
+    if (firstKey && keyIndent < indentOf(firstKey)) {
+      throw new Error(
+        `step at line ${start + 1}: a line is indented less than the step's first key `
+        + `(${JSON.stringify(body.find((l) => l.trim() !== '' && indentOf(l) < indentOf(firstKey)).trim())}). `
+        + 'This reader does not fold multi-line scalars, and reading the step without folding would move its '
+        + 'key depth -- extend the reader instead of deleting the case that failed.',
+      );
+    }
+    const text = body.join('\n');
     const name = body
       .find((l) => indentOf(l) === keyIndent && /^\s*name:(\s|$)/.test(l))
       ?.replace(/^\s*name:\s*/, '')

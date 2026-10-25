@@ -1194,10 +1194,10 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
   }
 
   /** Every publish step in `text` that can run with the guard skipped, with its witness. */
-  function publishBypasses(text) {
+  function publishBypasses(text, onlyStep = null) {
     const [guard] = stepsNamed(text, GUARD_STEP);
     assert.ok(guard, `no step named ${JSON.stringify(GUARD_STEP)}`);
-    const steps = publishSteps(text);
+    const steps = publishSteps(text).filter((st) => onlyStep === null || st.name === onlyStep);
     assert.ok(steps.length > 0, 'no publish step found; a vacuous pass is not a pass');
     const found = [];
     for (const step of steps) {
@@ -1228,6 +1228,10 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
   const BETA_IF = /^( {6}- name: Publish to NPM \(beta\)\n) {8}if: [^\n]*\n/m;
   const GATE_BETA = "steps.release-gate.outputs.release == 'true' && contains(steps.package-version.outputs.version, 'beta')";
   const BYPASS = "|| github.event_name == 'workflow_dispatch'";
+  // Scoped to the beta step, so an edit to another publish step's condition
+  // reds the live check above and not these reader cases.
+  const BETA_STEP = 'Publish to NPM (beta)';
+  const READER_REFUSAL = /This helper returns an inline value only when it is the whole value|indented less than the step's first key/;
   const withBetaIf = (ifLines) => {
     assert.equal(npmPublish.match(new RegExp(BETA_IF.source, 'gm'))?.length, 1,
       'the beta publish step must open with a one-line if: exactly once');
@@ -1236,10 +1240,13 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
   const refusedOrWitnessed = (text, label) => {
     let found;
     try {
-      found = publishBypasses(text);
+      found = publishBypasses(text, BETA_STEP);
     } catch (err) {
       if (err instanceof assert.AssertionError) throw err;
-      return `refused: ${err.message}`;
+      // The READER must be what refuses. A downstream accident (the tokenizer
+      // choking on a stray quote) also throws, but it is not a fence anyone
+      // wrote, and it hid a removed reader check at 587/587 green.
+      return READER_REFUSAL.test(err.message) ? `refused: ${err.message}` : `threw elsewhere: ${err.message}`;
     }
     assert.notDeepEqual(found, [], `${label}: the checker passed a bypass`);
     return 'witnessed';
@@ -1250,6 +1257,12 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
       'plain, continued on the next line': [`        if: ${GATE_BETA}`, `          ${BYPASS}`],
       'plain, continued after a blank line': [`        if: ${GATE_BETA}`, '', `          ${BYPASS}`],
       'double-quoted over two lines': [`        if: "${GATE_BETA}`, `          ${BYPASS}"`],
+      // libyaml (Ruby Psych measured) folds a quoted scalar continued at the
+      // key's own indent, or less, into the value. The continuation-line check
+      // cannot see those lines: the closing-quote check refuses the first, and
+      // parseSteps refuses a step line indented below the step's keys.
+      'double-quoted, continued at the key indent': [`        if: "${GATE_BETA}`, `        ${BYPASS}"`],
+      'single-quoted, continued below the key indent': [`        if: '${GATE_BETA.replaceAll("'", "''")}`, `       ${BYPASS.replaceAll("'", "''")}'`],
       'single-quoted over two lines': [`        if: '${GATE_BETA.replaceAll("'", "''")}`, `          ${BYPASS.replaceAll("'", "''")}'`],
       'trailing comment on the key line': [`        if: ${GATE_BETA} # ${BYPASS}`],
       'comment line under the key line': [`        if: ${GATE_BETA} ${BYPASS}`, '          # reviewed'],
@@ -1262,6 +1275,8 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
       'plain, continued on the next line': 'refused',
       'plain, continued after a blank line': 'refused',
       'double-quoted over two lines': 'refused',
+      'double-quoted, continued at the key indent': 'refused',
+      'single-quoted, continued below the key indent': 'refused',
       'single-quoted over two lines': 'refused',
       'trailing comment on the key line': 'refused',
       'comment line under the key line': 'refused',
@@ -1283,10 +1298,25 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
       ['        if: |', `          ${GATE_BETA}`],
     ]) {
       const text = withBetaIf(ifLines.join('\n'));
-      assert.deepEqual(publishBypasses(text), [], ifLines.join(' / '));
+      assert.deepEqual(publishBypasses(text, BETA_STEP), [], ifLines.join(' / '));
       const step = publishSteps(text).find((st) => st.name === 'Publish to NPM (beta)');
       assert.equal(ifOf(step).replace(/\s+/g, ' '), GATE_BETA, ifLines.join(' / '));
     }
+  });
+
+  // What feeds `stepScalarOf` is the step's key depth, which parseSteps sets.
+  // A wide dash (`-   name:`) and a comment at column 0 must leave it where
+  // the step's keys are; a non-comment line below it is refused.
+  test('parseSteps keeps a step\'s own key depth, and refuses a line below it (#61)', () => {
+    const wf = (stepLines) => ['jobs:', '  j:', '    steps:', ...stepLines, ''].join('\n');
+    const [wide] = parseSteps(wf(['      -   name: wide', `          if: ${GATE_BETA}`, '          run: true']));
+    assert.equal(wide.name, 'wide');
+    assert.equal(stepScalarOf(wide, 'if'), GATE_BETA);
+    const [commented] = parseSteps(wf(['      - name: c', '# a column-0 comment', `        if: ${GATE_BETA}`, '        run: true']));
+    assert.equal(commented.name, 'c');
+    assert.equal(stepScalarOf(commented, 'if'), GATE_BETA);
+    assert.throws(() => parseSteps(wf(['      - name: low', `        if: "${GATE_BETA}`, `       ${BYPASS}"`, '        run: true'])),
+      /indented less than the step's first key/);
   });
 
   // `stepScalarOf` reads the step's OWN keys only: an `if:` under `with:` or
@@ -1299,7 +1329,7 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
       const noOwnIf = withBetaIf(nested);
       const step = publishSteps(noOwnIf).find((st) => st.name === 'Publish to NPM (beta)');
       assert.equal(stepScalarOf(step, 'if', { optional: true }), null, `${parent}: if: was read as the step's condition`);
-      assert.notDeepEqual(publishBypasses(noOwnIf), [], `${parent}: an unconditional publish passed`);
+      assert.notDeepEqual(publishBypasses(noOwnIf, BETA_STEP), [], `${parent}: an unconditional publish passed`);
 
       for (const order of [[nested, `        if: ${GATE_BETA}`], [`        if: ${GATE_BETA}`, nested]]) {
         const own = withBetaIf(order.join('\n').replace(`          if: ${GATE_BETA}`, '          if: nested'));
