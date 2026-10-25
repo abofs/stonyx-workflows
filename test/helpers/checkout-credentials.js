@@ -3,9 +3,10 @@
 // THIS FILE CARRIES A GUARANTEE, so it is a RAW-TEXT reader: it parses no YAML,
 // imports nothing at all, and refuses loudly on any shape it does not
 // understand. That is the discipline `raw-expression-scan.js` follows and the
-// opposite of `workflow-yaml.js`, which says of itself "DIAGNOSTICS ONLY. NO
-// GUARANTEE IN THIS SUITE DEPENDS ON THIS FILE" -- nine bypasses on
-// abofs/stonyx-workflows#37 are why. So nothing here imports it.
+// opposite of `workflow-yaml.js`, which carries no `${{ }}` guarantee -- nine
+// bypasses on abofs/stonyx-workflows#37 are why (but see its header: the
+// #39/#60 `if:` check and the #60 simulator read it, fenced by the step-shape
+// allowlist in `step-shape.js`). So nothing here imports it.
 //
 // It is NOT written the way `raw-expression-scan.js` is written, and an earlier
 // revision of this header claimed it was. That file's own header says
