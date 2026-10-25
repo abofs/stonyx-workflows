@@ -1376,7 +1376,7 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
 
   // The DOMAIN can fail: each case below is witnessed by exactly one part of
   // it, so dropping that part reds here rather than silently narrowing the
-  // check (#61, Test Coverage round 2, N1/N2/N3/N12). Each has a gated sibling
+  // check (#61, Test Coverage round 2, N1/N2/N3/N12; round 3, G3/GF). Each has a gated sibling
   // that must produce no witness, so these are not red because everything is.
   test('the checker domain realises each profile its comment claims, and reads the guard as well as the publish (#61)', () => {
     const beta = "contains(steps.package-version.outputs.version, 'beta')";
@@ -1391,7 +1391,20 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
       ["github.ref && !contains(github.ref, 'true') && !contains(github.ref, 'beta')", RELEASE_GATE],
       // N4 -- a truthy value equal to no literal.
       ["steps.release-gate.outputs.release && steps.release-gate.outputs.release != 'true'", RELEASE_GATE],
+      // GF -- needs a value containing EVERY literal and equal to none: the
+      // full subset, padded (#61, Test Coverage round 3, O12).
+      ["contains(github.ref, 'true') && contains(github.ref, 'beta')", RELEASE_GATE],
     ].map(([bypass, guard]) => [`${RELEASE_GATE} && ${beta} || ${bypass}`, guard]);
+    // G3 -- needs THREE pairwise-different values with the same profile, so a
+    // third pad (O1: pads capped at 2; O11: two distinct pad characters). Not
+    // wrapped in the beta condition, which would add a fifth path and exceed
+    // the assignment cap: four paths, a 19-value domain.
+    const G3 = ['github.ref', 'github.head_ref', 'github.base_ref'];
+    cases.push([
+      [`${G3[0]} != ${G3[1]}`, `${G3[1]} != ${G3[2]}`, `${G3[0]} != ${G3[2]}`, ...G3,
+        ...G3.flatMap((p) => [`!contains(${p}, 'true')`, `!contains(${p}, 'beta')`])].join(' && '),
+      RELEASE_GATE,
+    ]);
     // N3 -- a path, and then a literal, that only the GUARD reads.
     cases.push([RELEASE_GATE, `${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`]);
     cases.push([`${RELEASE_GATE} && github.event_name`, `${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`]);
@@ -1403,6 +1416,8 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
       `${RELEASE_GATE} && contains(github.ref, 'beta') && github.ref != 'beta' && !contains(github.ref, 'true')`,
       `${RELEASE_GATE} && github.head_ref != github.base_ref && github.head_ref`,
       `${RELEASE_GATE} && github.ref && !contains(github.ref, 'true')`,
+      `${RELEASE_GATE} && contains(github.ref, 'true') && contains(github.ref, 'beta')`,
+      `${RELEASE_GATE} && github.ref != github.head_ref && github.head_ref != github.base_ref && github.ref != github.base_ref`,
     ]) {
       assert.equal(publishWithoutGuard(gated, RELEASE_GATE).assignment, null, `false witness for ${gated}`);
     }
