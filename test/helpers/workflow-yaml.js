@@ -359,12 +359,9 @@ function blockScalarBody(lines, headerIdx, describe) {
  */
 const KEY_PROBE = (key) => new RegExp(`^\\s*(['"]?)${key}\\1\\s*:(\\s|$)`);
 
-function stepScalar(step, key, { ownKeysOnly = false } = {}) {
+function stepScalar(step, key) {
   const lines = step.body.split('\n');
-  const keyIndent = Math.min(...lines.filter((l) => l.trim() !== '').map(indentOf));
-  const idx = structuralLineIdxs(lines)
-    .filter((i) => !ownKeysOnly || indentOf(lines[i]) === keyIndent)
-    .find((i) => KEY_PROBE(key).test(lines[i])) ?? -1;
+  const idx = structuralLineIdxs(lines).find((i) => KEY_PROBE(key).test(lines[i])) ?? -1;
   if (idx === -1) throw new MissingStepKeyError(step, key);
 
   const value = lines[idx].replace(new RegExp(`^\\s*(['"]?)${key}\\1\\s*:\\s*`), '').replace(/\s+$/, '');
@@ -382,6 +379,14 @@ function stepScalar(step, key, { ownKeysOnly = false } = {}) {
 
   inlineScalarMustEndOnItsLine(lines, idx, value, `${key}: in step ${JSON.stringify(step.name)}`);
   return value;
+}
+
+function refuseInline(where, why) {
+  throw new Error(
+    `${where}: ${why}. This helper returns an inline value only when it is the whole value, and returning `
+    + 'part of it would hand every check that reads it a condition or body other than the one GitHub runs '
+    + '-- write the value on one line, or extend the helper instead of deleting the case.',
+  );
 }
 
 /**
@@ -404,13 +409,7 @@ function stepScalar(step, key, { ownKeysOnly = false } = {}) {
  * of these shapes is refused rather than half-read.
  */
 function inlineScalarMustEndOnItsLine(lines, idx, value, where) {
-  const refuse = (why) => {
-    throw new Error(
-      `${where}: ${why}. This helper returns an inline value only when it is the whole value, and returning `
-      + 'part of it would hand every check that reads it a condition or body other than the one GitHub runs '
-      + '-- write the value on one line or as a block scalar, or extend the helper instead of deleting the case.',
-    );
-  };
+  const refuse = (why) => refuseInline(where, why);
 
   const next = lines.slice(idx + 1).find((l) => l.trim() !== '');
   if (next !== undefined && indentOf(next) > indentOf(lines[idx])) {
@@ -436,19 +435,39 @@ function inlineScalarMustEndOnItsLine(lines, idx, value, where) {
 }
 
 /**
- * A scalar key the step itself declares (`if:`, `id:`, ...), read with the
- * same quoted-key-aware probe as `run:`. Only the step's OWN key depth counts:
- * a `with: { if: ... }` input is not the step's condition. Returns null when
- * the step has no such key and `optional` is set; throws MissingStepKeyError
- * otherwise. The value is returned as written -- quotes and `${{ }}` intact.
+ * A scalar key the step itself declares (`if:`, `id:`), as written -- quotes
+ * and `${{ }}` intact. Only the step's OWN key depth counts: a `with: { if: ...
+ * }` input is not the step's condition. Returns null when the step has no
+ * such key and `optional` is set; throws MissingStepKeyError otherwise.
+ *
+ * ONE LINE OR A THROW. This is what the #39/#60 check and the #60 simulator
+ * read conditions through, and it accepts exactly the shapes the step-shape
+ * allowlist (test/helpers/step-shape.js) admits for them: a single-line plain
+ * or quoted scalar, closed on its line, nothing after it, written once. A
+ * block scalar, a next-line value, a duplicate key, and -- for `if:` -- a
+ * single-quoted value all throw. It used to fold block scalars, and each
+ * round of review found a block or multi-line shape it read differently from
+ * GitHub (a `>-` body that is one quoted literal to GitHub, but the gated
+ * condition to this reader, #61 Framework round 3); none of the live files
+ * uses one, so the capability is gone rather than patched.
  */
 export function stepScalarOf(step, key, { optional = false } = {}) {
-  try {
-    return stepScalar(step, key, { ownKeysOnly: true });
-  } catch (e) {
-    if (optional && e instanceof MissingStepKeyError) return null;
-    throw e;
+  const lines = step.body.split('\n');
+  const keyIndent = Math.min(...lines.filter((l) => l.trim() !== '').map(indentOf));
+  const idxs = structuralLineIdxs(lines).filter((i) => indentOf(lines[i]) === keyIndent && KEY_PROBE(key).test(lines[i]));
+  if (idxs.length === 0) {
+    if (optional) return null;
+    throw new MissingStepKeyError(step, key);
   }
+  const where = `${key}: in step ${JSON.stringify(step.name)}`;
+  if (idxs.length > 1) refuseInline(where, `the key appears ${idxs.length} times, and YAML readers disagree on which one wins`);
+  const value = lines[idxs[0]].replace(new RegExp(`^\\s*(['"]?)${key}\\1\\s*:\\s*`), '').replace(/\s+$/, '');
+  if (value === '' || /^[|>&*!]/.test(value)) {
+    refuseInline(where, `${JSON.stringify(value)} is not a one-line value (a block scalar, a next-line value, a tag, an anchor or an alias)`);
+  }
+  if (key === 'if' && value.startsWith("'")) refuseInline(where, 'a single-quoted if: is not read; write it plain or double-quoted');
+  inlineScalarMustEndOnItsLine(lines, idxs[0], value, where);
+  return value;
 }
 
 /** The body of a step's `run:` block, taken from the step object, never by name. */
