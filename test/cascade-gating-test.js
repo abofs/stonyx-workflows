@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -54,8 +55,24 @@ import { envOf, parseSteps, readWorkflow, runBodyOf, stepScriptBody } from './he
 
 const NEW_PUBLISH = readWorkflow('npm-publish.yml');
 const NEW_CASCADE = readWorkflow('cascade.yml');
-const OLD_PUBLISH = readFileSync(new URL('./fixtures/npm-publish-7fb718b.yml', import.meta.url), 'utf8');
-const OLD_CASCADE = readFileSync(new URL('./fixtures/cascade-7fb718b.yml', import.meta.url), 'utf8');
+
+// The fixtures are pinned by their git object hash, recomputed offline, for the
+// reason test/lift-equivalence-test.js and test/sweep-bypass-test.js give:
+// `git show` is unusable on Self CI's depth-1 checkout, and an unpinned
+// fixture is a mutable file with a commit hash in its name. Editing the
+// baseline is otherwise the cheapest way to make a "behaves exactly as today"
+// red go away. Measured before this pin existed: changing the fixture's
+// `Publish to NPM (stable)` condition left this file 27/27 green
+// (abofs/stonyx-workflows#61, Convention HIGH).
+const FIXTURES = {
+  // `git rev-parse 7fb718b:.github/workflows/npm-publish.yml`
+  'npm-publish-7fb718b.yml': '9101da428da52d98641e2b322614c2b6c7e22efb',
+  // `git rev-parse 7fb718b:.github/workflows/cascade.yml`
+  'cascade-7fb718b.yml': 'cf4eadd9a6542d690f58ed78ad080050516fd705',
+};
+const fixtureBytes = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
+const OLD_PUBLISH = fixtureBytes('npm-publish-7fb718b.yml').toString('utf8');
+const OLD_CASCADE = fixtureBytes('cascade-7fb718b.yml').toString('utf8');
 
 const DISPATCH_STEP = 'Dispatch to downstream dependents';
 
@@ -500,6 +517,14 @@ const OLD_STEP_NAMES = parseSteps(OLD_PUBLISH).map((s) => s.name);
 // ---------------------------------------------------------------------------
 
 describe('#60 harness controls -- the simulation can see the defect it is used to rule out', () => {
+  for (const [name, blobSha] of Object.entries(FIXTURES)) {
+    test(`the pinned baseline ${name} is the exact blob from main@7fb718b`, () => {
+      const bytes = fixtureBytes(name);
+      const sha = createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`, 'utf8'), bytes])).digest('hex');
+      assert.equal(sha, blobSha, `fixtures/${name} is not the blob it claims to be`);
+    });
+  }
+
   // Without these, every "dispatches nothing" assertion below could pass on a
   // harness that never reaches createDispatchEvent at all.
   test('main@7fb718b: an alpha (pull_request) run publishes an alpha AND dispatches to stonyx-orm', async () => {
