@@ -173,10 +173,21 @@ function lookup(path, ctx, src) {
   return value ?? null;
 }
 
-/** An `if:` value as written in YAML, with the optional `${{ }}` and quotes removed. */
+/**
+ * An `if:` value as written in YAML, with the optional `${{ }}` and quotes
+ * removed. A single-quoted YAML scalar's `''` is one `'`, so it is unescaped
+ * here; a double-quoted one with a backslash escape in it THROWS, because
+ * YAML's escape set is not implemented and a half-decoded condition is a
+ * different condition from the one GitHub evaluates.
+ */
 export function conditionSource(raw) {
   let s = raw.trim();
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) s = s.slice(1, -1);
+  if (s.length >= 2 && s.startsWith("'") && s.endsWith("'")) {
+    s = s.slice(1, -1).replace(/''/g, "'");
+  } else if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+    s = s.slice(1, -1);
+    if (s.includes('\\')) throw new Error(`the test evaluator does not decode YAML double-quoted escapes: ${raw}`);
+  }
   const wrapped = s.match(/^\$\{\{([\s\S]*)\}\}$/);
   return (wrapped ? wrapped[1] : s).trim();
 }

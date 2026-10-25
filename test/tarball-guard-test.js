@@ -1165,20 +1165,118 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     return { assignment: null, checked };
   }
 
-  test('no publish step can run under any input on which the guard does not (#60, evaluated)', () => {
-    const [guard] = stepsNamed(npmPublish, GUARD_STEP);
+  /** Every publish step in `text` that can run with the guard skipped, with its witness. */
+  function publishBypasses(text) {
+    const [guard] = stepsNamed(text, GUARD_STEP);
     assert.ok(guard, `no step named ${JSON.stringify(GUARD_STEP)}`);
-    const steps = publishSteps(npmPublish);
+    const steps = publishSteps(text);
     assert.ok(steps.length > 0, 'no publish step found; a vacuous pass is not a pass');
+    const found = [];
     for (const step of steps) {
       const { assignment, checked } = publishWithoutGuard(ifOf(step), ifOf(guard));
-      assert.ok(checked > 1, `publish step ${JSON.stringify(step.name)}: only ${checked} assignment(s) checked`);
-      assert.equal(
-        assignment,
-        null,
-        `publish step ${JSON.stringify(step.name)} (if: ${JSON.stringify(ifOf(step))}) runs while the guard `
-        + `(if: ${JSON.stringify(ifOf(guard))}) is skipped, under ${JSON.stringify(assignment)}`,
-      );
+      if (assignment === null) {
+        assert.ok(checked > 1, `publish step ${JSON.stringify(step.name)}: only ${checked} assignment(s) checked`);
+      } else {
+        found.push(`publish step ${JSON.stringify(step.name)} (if: ${JSON.stringify(ifOf(step))}) runs while the guard `
+          + `(if: ${JSON.stringify(ifOf(guard))}) is skipped, under ${JSON.stringify(assignment)}`);
+      }
+    }
+    return found;
+  }
+
+  test('no publish step can run under any input on which the guard does not (#60, evaluated)', () => {
+    assert.deepEqual(publishBypasses(npmPublish), []);
+  });
+
+  // What FEEDS the check above is the `if:` reader, and a reader that returns
+  // a condition stricter than the one GitHub runs makes the evaluation vacuous.
+  // Round 2 measured exactly that: a plain `if:` scalar continued onto the next
+  // line was read as its key line alone, so the S1 bypass written over two
+  // lines stayed 571/571 green (#61, Convention round 2). Each shape below is
+  // applied to the real workflow text and must either be refused by the reader
+  // or produce a witness -- never pass.
+  const BETA_IF = "        if: steps.release-gate.outputs.release == 'true' && contains(steps.package-version.outputs.version, 'beta')\n"
+    + '        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta';
+  const GATE_BETA = "steps.release-gate.outputs.release == 'true' && contains(steps.package-version.outputs.version, 'beta')";
+  const BETA_RUN = '        run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta';
+  const BYPASS = "|| github.event_name == 'workflow_dispatch'";
+  const withBetaIf = (ifLines) => {
+    assert.equal(npmPublish.split(BETA_IF).length, 2, 'the beta publish if:/run: pair must occur exactly once');
+    return npmPublish.replace(BETA_IF, `${ifLines}\n${BETA_RUN}`);
+  };
+  const refusedOrWitnessed = (text, label) => {
+    let found;
+    try {
+      found = publishBypasses(text);
+    } catch (err) {
+      if (err instanceof assert.AssertionError) throw err;
+      return `refused: ${err.message}`;
+    }
+    assert.notDeepEqual(found, [], `${label}: the checker passed a bypass`);
+    return 'witnessed';
+  };
+
+  test('the if: reader refuses or folds every multi-line and commented shape; none passes a bypass (#61)', () => {
+    const cases = {
+      'plain, continued on the next line': [`        if: ${GATE_BETA}`, `          ${BYPASS}`],
+      'plain, continued after a blank line': [`        if: ${GATE_BETA}`, '', `          ${BYPASS}`],
+      'double-quoted over two lines': [`        if: "${GATE_BETA}`, `          ${BYPASS}"`],
+      'single-quoted over two lines': [`        if: '${GATE_BETA.replaceAll("'", "''")}`, `          ${BYPASS.replaceAll("'", "''")}'`],
+      'trailing comment on the key line': [`        if: ${GATE_BETA} # ${BYPASS}`],
+      'comment line under the key line': [`        if: ${GATE_BETA} ${BYPASS}`, '          # reviewed'],
+      'folded block scalar': ['        if: >-', `          ${GATE_BETA}`, `          ${BYPASS}`],
+      'literal block scalar': ['        if: |', `          ${GATE_BETA}`, `          ${BYPASS}`],
+    };
+    const outcomes = Object.fromEntries(Object.entries(cases)
+      .map(([label, ifLines]) => [label, refusedOrWitnessed(withBetaIf(ifLines.join('\n')), label).split(':')[0]]));
+    assert.deepEqual(outcomes, {
+      'plain, continued on the next line': 'refused',
+      'plain, continued after a blank line': 'refused',
+      'double-quoted over two lines': 'refused',
+      'single-quoted over two lines': 'refused',
+      'trailing comment on the key line': 'refused',
+      'comment line under the key line': 'refused',
+      'folded block scalar': 'witnessed',
+      'literal block scalar': 'witnessed',
+    });
+  });
+
+  // The inverse: a correct condition in each shape the reader accepts is read
+  // as exactly that condition, so the cases above are not red because every
+  // shape is red.
+  test('the if: reader reads a correct condition in every accepted shape as that condition (#61)', () => {
+    for (const ifLines of [
+      [`        if: ${GATE_BETA}`],
+      [`        if: "${GATE_BETA}"`],
+      [`        if: '${GATE_BETA.replaceAll("'", "''")}'`],
+      [`        if: \${{ ${GATE_BETA} }}`],
+      ['        if: >-', `          ${GATE_BETA.replace(' && ', '\n          && ')}`],
+      ['        if: |', `          ${GATE_BETA}`],
+    ]) {
+      const text = withBetaIf(ifLines.join('\n'));
+      assert.deepEqual(publishBypasses(text), [], ifLines.join(' / '));
+      const step = publishSteps(text).find((st) => st.name === 'Publish to NPM (beta)');
+      assert.equal(ifOf(step).replace(/\s+/g, ' '), GATE_BETA, ifLines.join(' / '));
+    }
+  });
+
+  // `stepScalarOf` reads the step's OWN keys only: an `if:` under `with:` or
+  // `env:` is an input or a variable, not the step's condition. If the reader
+  // took the nested one, a publish step with no condition of its own would be
+  // read as gated -- stricter than the real one, which is none.
+  test('a nested with: if: / env: if: is not read as the step condition (#61)', () => {
+    for (const parent of ['with', 'env']) {
+      const nested = [`        ${parent}:`, `          if: ${GATE_BETA}`].join('\n');
+      const noOwnIf = withBetaIf(nested);
+      const step = publishSteps(noOwnIf).find((st) => st.name === 'Publish to NPM (beta)');
+      assert.equal(stepScalarOf(step, 'if', { optional: true }), null, `${parent}: if: was read as the step's condition`);
+      assert.notDeepEqual(publishBypasses(noOwnIf), [], `${parent}: an unconditional publish passed`);
+
+      for (const order of [[nested, `        if: ${GATE_BETA}`], [`        if: ${GATE_BETA}`, nested]]) {
+        const own = withBetaIf(order.join('\n').replace(`          if: ${GATE_BETA}`, '          if: nested'));
+        const st = publishSteps(own).find((x) => x.name === 'Publish to NPM (beta)');
+        assert.equal(stepScalarOf(st, 'if'), GATE_BETA, `${parent}: the nested if: displaced the step's own`);
+      }
     }
   });
 
