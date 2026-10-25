@@ -9,7 +9,7 @@ All Stonyx packages follow a 3-stage pipeline. PRs target `dev`; `dev` merges to
 | Stage | Trigger | npm tag | Example version |
 |---|---|---|---|
 | Alpha | PR push (PRs into `dev` or `main`) | `alpha` | `0.x.y-alpha.N` |
-| Beta | Push to `dev` (a PR merge), or a cascade dispatch | `beta` | `0.x.y-beta.N` |
+| Beta | Push to `dev` (a PR merge), or a cascade dispatch that moved at least one Stonyx dependency range | `beta` | `0.x.y-beta.N` |
 | Stable | Push to `main` (a `dev` → `main` merge) | `latest` | `0.x.y` |
 
 The channel is chosen by the `Determine version bump type` step in `.github/workflows/npm-publish.yml`, whose `if`/`elif` chain tests, in this order: a non-empty `cascade-source` gives beta, a `pull_request` event gives alpha, a push to `refs/heads/main` gives stable, any other push gives beta. A stable run bumps with `pnpm version patch` in the `Bump version (stable)` step, which turns `0.x.y-beta.N` into `0.x.y`. A manual `workflow_dispatch` (`patch`/`minor`/`major` or `custom-version`) is a second, non-prerelease path; it is **currently frozen** (see [No rehearsal path](#no-rehearsal-path)).
@@ -27,6 +27,35 @@ Beta and stable releases also create a GitHub release.
 When a dependency publishes a beta or stable release, `stonyx-workflows` automatically dispatches rebuilds to downstream dependents. The dependency graph is defined in [`dependency-map.json`](../dependency-map.json) in this repo.
 
 For example, publishing `@stonyx/utils` cascades to all packages that depend on it (`stonyx`, `@stonyx/events`, `@stonyx/cron`, etc.), which in turn cascade to their own dependents.
+
+### When a cascade dispatches, and when it does not
+
+Two rules, both from [stonyx-workflows#60](https://github.com/abofs/stonyx-workflows/issues/60):
+
+| Run | Publishes | Commits / tags / GitHub Release | Dispatches dependents |
+|---|---|---|---|
+| PR (alpha) | yes, under `alpha`, and comments on the PR | no | **no** |
+| Push to `dev` (beta) | yes, under `beta` | yes | yes |
+| Push to `main` (stable), or a manual dispatch | yes, under `latest` | yes | yes |
+| Cascade, at least one `stonyx`/`@stonyx/*` range moved | yes, under `beta` | yes | yes |
+| Cascade, **no range moved** | **no** | **no** | **no** -- and the run is **green** |
+
+**An alpha dispatches nothing.** A dependent's `Update all Stonyx dependencies to latest` step reads only `dist-tags.beta` and `dist-tags.latest`, so an alpha never reached it; the dispatch only made every dependent publish an identical beta and push a release commit to its `dev` (utils PR#56: one alpha, eight repos).
+
+**A cascade that moves no range stops.** `Update all Stonyx dependencies to latest` now reports `changed=true|false`, and the next step, `Decide whether this run releases`, turns that into `release=true|false`. Every step after it carries `steps.release-gate.outputs.release == 'true'` in its `if:` -- install, tests, version bump, pack-and-guard, all three publish steps, both commit/tag/push steps, both GitHub Release steps and the PR comment -- except the `always()` cleanup of `.stonyx-workflows/`. The run logs `::notice::Cascade changed no Stonyx dependency range...` and concludes success. Gating only the bump steps would not have been enough: the publish and push steps key on the version string, and on an empty version the *stable* conditions are true.
+
+In cascade mode, a `changed` value other than exactly `true` or `false` (the update step did not report) fails the job rather than being read as "nothing changed".
+
+**How the publish job tells `cascade.yml` not to dispatch.** Consumers wire `cascade.yml`'s `published-version` input to `npm-publish.yml`'s `published-version` output and cannot be changed, so that output is the only channel. The last step, `Decide whether to cascade`, sets it to:
+
+- the published version, on a beta, stable, `custom`, `patch`, `minor` or `major` release;
+- the literal token `no-cascade` on an alpha, or when the release gate closed.
+
+`cascade.yml` validates `package-name` first, exactly as before, then returns without dispatching -- and without failing -- when `published-version` is exactly `no-cascade`, then validates every other value as a semver version exactly as before. The **empty string is still an invalid version** and still reds the cascade job: it is what GitHub hands over for an output nobody wrote, so an accident in the publish job stays loud instead of becoming a silent skip. The channel decision comes from `Determine version bump type`, not from the spelling of the version.
+
+The consumer's `cascade` job still runs on these paths (it `needs: publish`, which succeeded); it logs `Nothing to cascade for <package>` and ends green.
+
+A `custom-version` that is itself a prerelease such as `1.0.0-alpha.1` is published under `alpha` (the publish steps key on the version string) but has channel `custom`, so it still dispatches, as it did before #60. `workflow_dispatch` is frozen, so this path is not reachable today.
 
 ### A registry lookup that fails now fails the job
 
@@ -175,7 +204,7 @@ This change moves where a git credential failure surfaces, so it gets a runbook 
 
 **How to recognise it.** The job reds at `Commit version bump and create tag (beta)` or `Commit version bump and create tag (stable)`, on the `authed_git pull` or `authed_git push` line, typically with a `403`/`401` or `could not read Username`. Two things make this different from before:
 
-- **It surfaces at the end of the job rather than the start.** Previously the credential was written into `.git/config` at `Checkout code` (step 1 of 26), so a bad push credential could fail there, before anything was published. Now the checkout succeeds on a token it discards, and the first thing that exercises the push credential is the push step itself (step 22 or 24 of 26) -- after the package is already on the registry.
+- **It surfaces at the end of the job rather than the start.** Previously the credential was written into `.git/config` at `Checkout code` (step 1 of 29), so a bad push credential could fail there, before anything was published. Now the checkout succeeds on a token it discards, and the first thing that exercises the push credential is the push step itself (step 24 or 26 of 29) -- after the package is already on the registry.
 - **`Checkout code` being green tells you nothing about the push credential.** They are the same expression, but the checkout only needs read access to one repo.
 
 Distinguish it from the failure that looks identical but is not credential-related: `authed_git pull --rebase --autostash` can also red on a genuine rebase conflict or a non-fast-forward, which is a branch-state problem and needs no credential work at all. Read the message before assuming the credential.
