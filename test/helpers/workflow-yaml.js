@@ -345,7 +345,59 @@ function stepScalar(step, key, { ownKeysOnly = false } = {}) {
     );
   }
 
+  inlineScalarMustEndOnItsLine(lines, idx, value, `${key}: in step ${JSON.stringify(step.name)}`);
   return value;
+}
+
+/**
+ * An inline value is returned only when it is the WHOLE value: one line, no
+ * comment, a quoted scalar closed where the line ends. Every other inline
+ * shape throws.
+ *
+ * Plain scalars may continue onto more-indented lines, and YAML (and so GitHub)
+ * folds those lines into the value. This helper used to return the key line
+ * alone, so
+ *
+ *     if: <gate> && contains(<version>, 'beta')
+ *       || github.event_name == 'workflow_dispatch'
+ *
+ * was read as the gated condition while GitHub ran the bypass -- 571/571 green
+ * on the evaluated #39 check that reads `if:` through this helper
+ * (abofs/stonyx-workflows#61, Convention round 2). A quoted scalar may span
+ * lines the same way, and a trailing ` # comment` is not part of the value
+ * either. Folding is YAML's job and this file does not implement YAML, so each
+ * of these shapes is refused rather than half-read.
+ */
+function inlineScalarMustEndOnItsLine(lines, idx, value, where) {
+  const refuse = (why) => {
+    throw new Error(
+      `${where}: ${why}. This helper returns an inline value only when it is the whole value, and returning `
+      + 'part of it would hand every check that reads it a condition or body other than the one GitHub runs '
+      + '-- write the value on one line or as a block scalar, or extend the helper instead of deleting the case.',
+    );
+  };
+
+  const next = lines.slice(idx + 1).find((l) => l.trim() !== '');
+  if (next !== undefined && indentOf(next) > indentOf(lines[idx])) {
+    refuse(`the inline value continues onto the next line (${JSON.stringify(next.trim())})`);
+  }
+
+  const quote = value[0];
+  if (quote === "'" || quote === '"') {
+    let j = 1;
+    for (; j < value.length; j++) {
+      if (quote === '"' && value[j] === '\\') { j++; continue; }
+      if (value[j] === quote) {
+        if (quote === "'" && value[j + 1] === "'") { j++; continue; }
+        break;
+      }
+    }
+    if (j >= value.length) refuse('the quoted value is not closed on its own line');
+    if (value.slice(j + 1).trim() !== '') refuse(`text follows the closing quote (${JSON.stringify(value.slice(j + 1).trim())})`);
+    return;
+  }
+
+  if (/(^|\s)#/.test(value)) refuse('the line carries a # comment, which is not part of the value');
 }
 
 /**
