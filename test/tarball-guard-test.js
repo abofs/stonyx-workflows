@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { conditionSource } from './helpers/actions-expression.js';
+import { conditionSource, evaluate, tokenize, truthy } from './helpers/actions-expression.js';
 import {
   MissingStepKeyError,
   indentOf,
@@ -1050,16 +1050,15 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
   // prepublishOnly build, which cannot succeed without node_modules. So the
   // guard now carries exactly one condition, the release gate, and the property
   // the old pin protected is restated as the one that actually matters: a
-  // publish step can run only when the guard ran. That holds iff the guard's
-  // condition is the gate and nothing else, and every publish step's condition
-  // is the gate AND something. A guard condition that is anything more than the
-  // gate is still a bypass and still reds here.
+  // publish step can run only when the guard ran.
   const RELEASE_GATE = "steps.release-gate.outputs.release == 'true'";
   const ifOf = (step) => {
     const raw = stepScalarOf(step, 'if', { optional: true });
     return raw === null ? null : conditionSource(raw);
   };
 
+  // A fail-closed exact pin on the guard's own condition: anything else reds,
+  // including a harmless rewrite. The property itself is the next test.
   test('the guard carries no condition but the release gate (#60)', () => {
     const [guard] = stepsNamed(npmPublish, GUARD_STEP);
     assert.ok(guard, `no step named ${JSON.stringify(GUARD_STEP)}`);
@@ -1072,15 +1071,133 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     );
   });
 
-  test('every publish step requires the same release gate, so no publish runs where the guard did not (#60)', () => {
-    for (const step of publishSteps(npmPublish)) {
-      const condition = ifOf(step);
-      assert.ok(
-        condition && condition.startsWith(`${RELEASE_GATE} && `),
-        `publish step ${JSON.stringify(step.name)} has condition ${JSON.stringify(condition)}, which does not `
-        + 'require the release gate the guard requires -- it could run on a path where the guard was skipped',
+  // Evaluated, not spelled. Round 1 pinned this with
+  // `condition.startsWith(`${RELEASE_GATE} && `)`, and `GATE && X || Y` passes
+  // that prefix while publishing on the Y path with the guard skipped (&& binds
+  // tighter than ||): `... || github.event_name == 'workflow_dispatch'` on the
+  // stable publish stayed 500/500 green (#61, Test Coverage S1). A spelling
+  // check guarding against a bypass was itself bypassable by spelling.
+  //
+  // So every publish condition and the guard condition are evaluated, with
+  // test/helpers/actions-expression.js, over every assignment of every context
+  // path either one reads, and a single assignment where the publish runs and
+  // the guard does not is a red with that assignment as the witness. A missing
+  // `if:` is unconditional and evaluated as such, so dropping the condition
+  // reds too.
+  //
+  // The value domain: these expressions only compare paths to literals or to
+  // each other (==, !=), test substrings of literals (contains) and test
+  // truthiness. So their outcome depends only on which literals a value equals
+  // or contains. The domain is null, '', a value matching no literal, and one
+  // value per SUBSET of the string literals present (each subset's literals
+  // joined by a NUL), which realises every equality and containment pattern
+  // except a literal being a substring of another -- an overlap the literals
+  // themselves already exhibit. Booleans are deliberately absent: a path
+  // compared with `true`/`false` makes the evaluator throw (it does not do
+  // GitHub's number coercion), which reds here rather than passing.
+  const LITERALS_CAP = 10;
+  const ASSIGNMENTS_CAP = 2_000_000;
+
+  function pathsAndLiterals(src) {
+    const tokens = tokenize(src);
+    const paths = new Set();
+    const literals = new Set();
+    tokens.forEach((t, i) => {
+      if (t.type === 'str') literals.add(t.value);
+      if (t.type === 'ident' && !['true', 'false', 'null'].includes(t.value)
+        && !(tokens[i + 1] && tokens[i + 1].value === '(')) paths.add(t.value);
+    });
+    return { paths, literals };
+  }
+
+  function contextFrom(assignment) {
+    const ctx = {};
+    for (const [path, value] of Object.entries(assignment)) {
+      const keys = path.split('.');
+      let node = ctx;
+      for (const key of keys.slice(0, -1)) {
+        if (node[key] === undefined) node[key] = {};
+        if (typeof node[key] !== 'object' || node[key] === null) throw new Error(`${path} overlaps another path`);
+        node = node[key];
+      }
+      if (node[keys.at(-1)] !== undefined) throw new Error(`${path} overlaps another path`);
+      node[keys.at(-1)] = value;
+    }
+    return ctx;
+  }
+
+  function* assignments(paths, domain) {
+    const counters = paths.map(() => 0);
+    for (;;) {
+      yield Object.fromEntries(paths.map((p, i) => [p, domain[counters[i]]]));
+      let i = 0;
+      while (i < paths.length && ++counters[i] === domain.length) counters[i++] = 0;
+      if (i === paths.length) return;
+    }
+  }
+
+  /** The first assignment under which `publishIf` runs and `guardIf` does not, or null. */
+  function publishWithoutGuard(publishIf, guardIf) {
+    const exprs = [publishIf ?? 'true', guardIf ?? 'true'];
+    const paths = new Set();
+    const literals = new Set();
+    for (const e of exprs) {
+      const found = pathsAndLiterals(e);
+      found.paths.forEach((p) => paths.add(p));
+      found.literals.forEach((l) => literals.add(l));
+    }
+    const lits = [...literals];
+    assert.ok(lits.length <= LITERALS_CAP, `${lits.length} string literals; the subset domain is capped at ${LITERALS_CAP}`);
+    const domain = [null, '', '\u0001none'];
+    for (let mask = 1; mask < (1 << lits.length); mask++) {
+      domain.push(lits.filter((_, i) => mask & (1 << i)).join('\u0000'));
+    }
+    const pathList = [...paths];
+    assert.ok(domain.length ** pathList.length <= ASSIGNMENTS_CAP,
+      `${domain.length}^${pathList.length} assignments exceeds the cap; narrow the domain rather than sampling it`);
+
+    let checked = 0;
+    for (const assignment of assignments(pathList, domain)) {
+      const ctx = contextFrom(assignment);
+      checked++;
+      if (truthy(evaluate(exprs[0], ctx)) && !truthy(evaluate(exprs[1], ctx))) return { assignment, checked };
+    }
+    return { assignment: null, checked };
+  }
+
+  test('no publish step can run under any input on which the guard does not (#60, evaluated)', () => {
+    const [guard] = stepsNamed(npmPublish, GUARD_STEP);
+    assert.ok(guard, `no step named ${JSON.stringify(GUARD_STEP)}`);
+    const steps = publishSteps(npmPublish);
+    assert.ok(steps.length > 0, 'no publish step found; a vacuous pass is not a pass');
+    for (const step of steps) {
+      const { assignment, checked } = publishWithoutGuard(ifOf(step), ifOf(guard));
+      assert.ok(checked > 1, `publish step ${JSON.stringify(step.name)}: only ${checked} assignment(s) checked`);
+      assert.equal(
+        assignment,
+        null,
+        `publish step ${JSON.stringify(step.name)} (if: ${JSON.stringify(ifOf(step))}) runs while the guard `
+        + `(if: ${JSON.stringify(ifOf(guard))}) is skipped, under ${JSON.stringify(assignment)}`,
       );
     }
+  });
+
+  // The checker can fail: the round-1 bypass, a dropped gate and a dropped
+  // condition each produce a witness, and the head's own conditions do not.
+  test('the publish-implies-guard checker finds a witness for each known bypass shape (#60)', () => {
+    const stable = "!contains(steps.package-version.outputs.version, 'alpha') "
+      + "&& !contains(steps.package-version.outputs.version, 'beta')";
+    for (const bypass of [
+      `${RELEASE_GATE} && ${stable} || github.event_name == 'workflow_dispatch'`,
+      stable,
+      null,
+      `${RELEASE_GATE} || contains(steps.package-version.outputs.version, 'beta')`,
+      `(${RELEASE_GATE} || inputs.cascade-source == '') && ${stable}`,
+    ]) {
+      assert.notEqual(publishWithoutGuard(bypass, RELEASE_GATE).assignment, null, `no witness for ${bypass}`);
+    }
+    assert.equal(publishWithoutGuard(`${RELEASE_GATE} && ${stable}`, RELEASE_GATE).assignment, null);
+    assert.equal(publishWithoutGuard(`(${RELEASE_GATE}) && (${stable} || github.event_name == 'x')`, RELEASE_GATE).assignment, null);
   });
 
   test('neither the guard nor any publish step is advisory', () => {
