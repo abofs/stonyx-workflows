@@ -43,18 +43,54 @@ export function tokenize(src) {
   return tokens;
 }
 
+// name -> [arity, implementation]. Arity is exact: GitHub rejects a wrong
+// argument count at parse time, and silently ignoring an extra argument would
+// make `contains(a, 'b', 'zzz')` mean something the workflow does not.
 const FUNCTIONS = {
-  contains: (haystack, needle) => String(haystack ?? '').toLowerCase().includes(String(needle ?? '').toLowerCase()),
+  contains: [2, (haystack, needle) => {
+    for (const v of [haystack, needle]) {
+      if (typeof v === 'boolean' || (v !== null && typeof v === 'object')) {
+        throw new Error(`the test evaluator does not implement contains() over ${JSON.stringify(v)}`);
+      }
+    }
+    return String(haystack ?? '').toLowerCase().includes(String(needle ?? '').toLowerCase());
+  }],
   // The simulation only ever continues past a step that succeeded, so the
   // status functions are constants here.
-  always: () => true,
-  success: () => true,
+  always: [0, () => true],
+  success: [0, () => true],
 };
 
 export const truthy = (v) => !(v === false || v === null || v === undefined || v === '' || v === 0);
-const loosely = (a, b) => (typeof a === 'boolean' || typeof b === 'boolean')
-  ? a === b
-  : String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase();
+
+// A JSON-number-shaped string: what GitHub would coerce to a real number.
+const NUMERIC = /^\s*-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][-+]?\d+)?\s*$|^\s*0x[0-9a-f]+\s*$/i;
+
+/**
+ * `==` as GitHub evaluates it, for the cases this evaluator commits to:
+ * string/string (case-insensitive), boolean/boolean, null/null, and
+ * null/string where the string is not numeric (null is 0, '' is 0, any other
+ * non-numeric string is NaN). Every other mixed-type comparison goes through
+ * GitHub's number coercion (`'' == false` is true there, `'true' == true` is
+ * false), which this evaluator does not implement -- so it THROWS instead of
+ * answering.
+ */
+function loosely(a, b, src) {
+  const kind = (v) => (v === null || v === undefined ? 'null' : typeof v);
+  const [ka, kb] = [kind(a), kind(b)];
+  if (ka === kb && (ka === 'string' || ka === 'boolean' || ka === 'null')) {
+    return ka === 'string' ? a.toLowerCase() === b.toLowerCase() : a === b;
+  }
+  if ((ka === 'null' && kb === 'string') || (ka === 'string' && kb === 'null')) {
+    const str = ka === 'string' ? a : b;
+    if (str === '') return true;
+    if (!NUMERIC.test(str)) return false;
+  }
+  throw new Error(
+    `the test evaluator does not implement GitHub's number coercion for ${JSON.stringify(a)} == ${JSON.stringify(b)} `
+    + `(in: ${src})`,
+  );
+}
 
 export function evaluate(src, ctx) {
   const tokens = tokenize(src);
@@ -79,15 +115,20 @@ export function evaluate(src, ctx) {
       if (t.value === 'false') return false;
       if (t.value === 'null') return null;
       if (peek() && peek().value === '(') {
-        const fn = FUNCTIONS[t.value];
-        if (!fn) throw new Error(`the test evaluator does not implement ${t.value}() (in: ${src})`);
+        if (!Object.prototype.hasOwnProperty.call(FUNCTIONS, t.value)) {
+          throw new Error(`the test evaluator does not implement ${t.value}() (in: ${src})`);
+        }
+        const [arity, fn] = FUNCTIONS[t.value];
         take('(');
         const args = [];
-        while (peek() && peek().value !== ')') {
+        if (!(peek() && peek().value === ')')) {
           args.push(or());
-          if (peek() && peek().value === ',') take(',');
+          while (peek() && peek().value === ',') { take(','); args.push(or()); }
         }
         take(')');
+        if (args.length !== arity) {
+          throw new Error(`${t.value}() takes ${arity} argument(s), got ${args.length} (in: ${src})`);
+        }
         return fn(...args);
       }
       return lookup(t.value, ctx, src);
@@ -99,7 +140,7 @@ export function evaluate(src, ctx) {
     while (peek() && (peek().value === '==' || peek().value === '!=')) {
       const op = take().value;
       const right = primary();
-      left = op === '==' ? loosely(left, right) : !loosely(left, right);
+      left = op === '==' ? loosely(left, right, src) : !loosely(left, right, src);
     }
     return left;
   }
