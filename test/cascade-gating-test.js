@@ -390,7 +390,7 @@ describe('#60 harness controls -- the simulation can see the defect it is used t
   test('envOf and jobOutputs refuse a continued or commented value, and read a one-line value as written', () => {
     const stepWith = (envLines) => parseSteps(['jobs:', '  j:', '    steps:', '      - name: s', '        env:',
       ...envLines.map((l) => `          ${l}`), '        run: true', ''].join('\n'))[0];
-    assert.deepEqual(envOf(stepWith(['A: one', 'B: "two"'])), { A: 'one', B: '"two"' });
+    assert.deepEqual(envOf(stepWith(['A: one', 'B: "two"', "C: 'it''s'"])), { A: 'one', B: '"two"', C: "'it''s'" });
     assert.throws(() => envOf(stepWith(['A: one', '  two'])), /continues onto the next line/);
     assert.throws(() => envOf(stepWith(['A: one', '  B: two'])), /continues onto the next line/);
     assert.throws(() => envOf(stepWith(['A: one # two'])), /# comment/);
