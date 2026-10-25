@@ -6,12 +6,15 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
+import { conditionSource } from './helpers/actions-expression.js';
 import {
   MissingStepKeyError,
+  indentOf,
   parseSteps,
   readWorkflow,
   runBodyOf,
   stepRunBody,
+  stepScalarOf,
   stepsNamed,
 } from './helpers/workflow-yaml.js';
 
@@ -61,7 +64,6 @@ const GUARD_STEP = 'Pack and guard the release artifact';
 // in AC1 rather than a test that follows them both wherever they go.
 const TARBALL_PATH = '$RUNNER_TEMP/stonyx-release.tgz';
 
-const indentOf = (line) => line.match(/^(\s*)/)[1].length;
 const BLOCK_SCALAR_HEADER = /^[|>](?:[-+][1-9]?|[1-9][-+]?)?$/;
 
 /**
@@ -1054,10 +1056,8 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
   // gate is still a bypass and still reds here.
   const RELEASE_GATE = "steps.release-gate.outputs.release == 'true'";
   const ifOf = (step) => {
-    const lines = step.body.split('\n');
-    const keyIndent = Math.min(...lines.filter((l) => l.trim() !== '').map(indentOf));
-    const line = lines.find((l) => indentOf(l) === keyIndent && /^\s*if:/.test(l));
-    return line ? line.replace(/^\s*if:\s*/, '').trim().replace(/^"(.*)"$/, '$1') : null;
+    const raw = stepScalarOf(step, 'if', { optional: true });
+    return raw === null ? null : conditionSource(raw);
   };
 
   test('the guard carries no condition but the release gate (#60)', () => {

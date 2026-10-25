@@ -47,7 +47,8 @@ export function readWorkflow(name) {
   return readFileSync(workflowPath(name), 'utf8');
 }
 
-const indentOf = (line) => line.match(/^(\s*)/)[1].length;
+/** Leading whitespace width of a line. */
+export const indentOf = (line) => line.match(/^(\s*)/)[1].length;
 
 /**
  * The job a `steps:` list belongs to: the nearest enclosing mapping key.
@@ -323,9 +324,12 @@ function blockScalarBody(lines, headerIdx, describe) {
  */
 const KEY_PROBE = (key) => new RegExp(`^\\s*(['"]?)${key}\\1\\s*:(\\s|$)`);
 
-function stepScalar(step, key) {
+function stepScalar(step, key, { ownKeysOnly = false } = {}) {
   const lines = step.body.split('\n');
-  const idx = structuralLineIdxs(lines).find((i) => KEY_PROBE(key).test(lines[i])) ?? -1;
+  const keyIndent = Math.min(...lines.filter((l) => l.trim() !== '').map(indentOf));
+  const idx = structuralLineIdxs(lines)
+    .filter((i) => !ownKeysOnly || indentOf(lines[i]) === keyIndent)
+    .find((i) => KEY_PROBE(key).test(lines[i])) ?? -1;
   if (idx === -1) throw new MissingStepKeyError(step, key);
 
   const value = lines[idx].replace(new RegExp(`^\\s*(['"]?)${key}\\1\\s*:\\s*`), '').replace(/\s+$/, '');
@@ -342,6 +346,22 @@ function stepScalar(step, key) {
   }
 
   return value;
+}
+
+/**
+ * A scalar key the step itself declares (`if:`, `id:`, ...), read with the
+ * same quoted-key-aware probe as `run:`. Only the step's OWN key depth counts:
+ * a `with: { if: ... }` input is not the step's condition. Returns null when
+ * the step has no such key and `optional` is set; throws MissingStepKeyError
+ * otherwise. The value is returned as written -- quotes and `${{ }}` intact.
+ */
+export function stepScalarOf(step, key, { optional = false } = {}) {
+  try {
+    return stepScalar(step, key, { ownKeysOnly: true });
+  } catch (e) {
+    if (optional && e instanceof MissingStepKeyError) return null;
+    throw e;
+  }
 }
 
 /** The body of a step's `run:` block, taken from the step object, never by name. */
