@@ -42,7 +42,7 @@ Two rules, both from [stonyx-workflows#60](https://github.com/abofs/stonyx-workf
 
 **An alpha dispatches nothing.** A dependent's `Update all Stonyx dependencies to latest` step reads only `dist-tags.beta` and `dist-tags.latest`, so an alpha never reached it; the dispatch only made every dependent publish an identical beta and push a release commit to its `dev` (utils PR#56: one alpha, eight repos).
 
-**A cascade that moves no range stops.** `Update all Stonyx dependencies to latest` now reports `changed=true|false`, and the next step, `Decide whether this run releases`, turns that into `release=true|false`. Every step after it carries `steps.release-gate.outputs.release == 'true'` in its `if:` -- install, tests, version bump, pack-and-guard, all three publish steps, both commit/tag/push steps, both GitHub Release steps and the PR comment -- except the `always()` cleanup of `.stonyx-workflows/`. The run logs `::notice::Cascade changed no Stonyx dependency range...` and concludes success. Gating only the bump steps would not have been enough: the publish and push steps key on the version string, and on an empty version the *stable* conditions are true.
+**A cascade that moves no range stops.** `Update all Stonyx dependencies to latest` now reports `changed=true|false`, and the next step, `Decide whether this run releases`, turns that into `release=true|false`. Every step after it carries `steps.release-gate.outputs.release == 'true'` in its `if:` -- install, tests, version bump, pack-and-guard, all three publish steps, both commit/tag/push steps, both GitHub Release steps and the PR comment. Exactly two steps after it are ungated: the `always()` cleanup of `.stonyx-workflows/`, and the final cascade gate, `Decide whether to cascade`, which has to run to say "do not dispatch". The run logs `::notice::Cascade changed no Stonyx dependency range...` and concludes success. Gating only the bump steps would not have been enough: the publish and push steps key on the version string, and on an empty version the *stable* conditions are true.
 
 In cascade mode, a `changed` value other than exactly `true` or `false` (the update step did not report) fails the job rather than being read as "nothing changed".
 
@@ -53,7 +53,10 @@ In cascade mode, a `changed` value other than exactly `true` or `false` (the upd
 
 `cascade.yml` validates `package-name` first, exactly as before, then returns without dispatching -- and without failing -- when `published-version` is exactly `no-cascade`, then validates every other value as a semver version exactly as before. The **empty string is still an invalid version** and still reds the cascade job: it is what GitHub hands over for an output nobody wrote, so an accident in the publish job stays loud instead of becoming a silent skip. The channel decision comes from `Determine version bump type`, not from the spelling of the version.
 
-The consumer's `cascade` job still runs on these paths (it `needs: publish`, which succeeded); it logs `Nothing to cascade for <package>` and ends green.
+What the consumer's `cascade` job does on these paths depends on how it is wired, and both cases end green with nothing dispatched:
+
+- **Every current Stonyx consumer** (the ten repos in `dependency-map.json`, on `dev` and `main`) declares it with `needs: publish` and no `if:`. It runs, because the publish job succeeded, receives `no-cascade`, logs `Nothing to cascade for <package>` and ends green.
+- **A repo built from the README's child-repo template** gates the job on `version-channel` being `beta` or `stable`. There the job is skipped instead: on an alpha the channel is `alpha`, and on a cascade that moved no range it is empty, because `Determine version bump type` sat behind the release gate and did not run.
 
 A `custom-version` that is itself a prerelease such as `1.0.0-alpha.1` is published under `alpha` (the publish steps key on the version string) but has channel `custom`, so it still dispatches, as it did before #60. `workflow_dispatch` is frozen, so this path is not reachable today.
 
