@@ -55,7 +55,7 @@ In cascade mode, a `changed` value other than exactly `true` or `false` (the upd
 
 What the consumer's `cascade` job does on these paths depends on how it is wired, and both cases end green with nothing dispatched:
 
-- **Every current Stonyx consumer** (the ten repos in `dependency-map.json`, on `dev` and `main`) declares it with `needs: publish` and no `if:`. It runs, because the publish job succeeded, receives `no-cascade`, logs `Nothing to cascade for <package>` and ends green.
+- **Every current Stonyx consumer** (the ten packages keyed in `dependency-map.json` -- their repos' `publish.yml` on `dev` and `main`) declares it with `needs: publish` and no `if:`. It runs, because the publish job succeeded, receives `no-cascade`, logs `Nothing to cascade for <package>` and ends green.
 - **A repo built from the README's child-repo template** gates the job on `version-channel` being `beta` or `stable`. There the job is skipped instead: on an alpha the channel is `alpha`, and on a cascade that moved no range it is empty, because `Determine version bump type` sat behind the release gate and did not run.
 
 A `custom-version` that is itself a prerelease such as `1.0.0-alpha.1` is published under `alpha` (the publish steps key on the version string) but has channel `custom`, so it still dispatches, as it did before #60. `workflow_dispatch` is frozen, so this path is not reachable today.

@@ -1,8 +1,20 @@
 // Minimal, purpose-built reader for the workflow YAML in this repo.
 //
-// DIAGNOSTICS ONLY. NO GUARANTEE IN THIS SUITE DEPENDS ON THIS FILE.
+// DIAGNOSTICS ONLY FOR THE `${{ }}` SWEEP -- BUT ONE GUARANTEE READS IT.
 //
-// It used to carry one. Three review rounds on abofs/stonyx-workflows#37 found
+// The #39/#60 check "no publish step can run under any input on which the
+// guard does not" (test/tarball-guard-test.js) reads every publish and guard
+// `if:` through `parseSteps` + `stepScalarOf`, and the #60 job simulator
+// (test/cascade-gating-test.js) reads `if:`, `id:`, `run:` and `env:` through
+// this file. For those, a wrong answer here IS a hole: a condition read
+// stricter than the one GitHub runs makes the check pass with nothing behind
+// it. That happened once -- a plain `if:` continued onto the next line was read
+// as its first line, and a two-line bypass stayed 571/571 green (#61,
+// Convention round 2) -- so `stepScalar` and `envOf` now return an inline
+// value only when it is the whole value, and throw otherwise. Review this file
+// with that priority.
+//
+// For the `${{ }}` sweep, it used to carry the guarantee. Three review rounds on abofs/stonyx-workflows#37 found
 // nine ways to hide a `${{ }}` expression from a sweep founded on this reader
 // -- an unnamed step, a `run:` key nested in an earlier block scalar, a quoted
 // `"run":` key, four multi-line flow/plain scalar shapes, a single-line flow
@@ -20,10 +32,11 @@
 //   2. The EXECUTED `run:`-body tests, which genuinely need real step bodies to
 //      drop into a throwaway workspace and run.
 //
-// The consequence is worth stating in the form that decides review priority: if
-// this reader is wrong, a message gets less helpful and a `run:`-body test may
-// stop executing what it thinks it executes. NOTHING GOES UNSWEPT. A bug here
-// is a diagnostics bug, not a hole in the guarantee.
+// The consequence is worth stating in the form that decides review priority:
+// for the `${{ }}` sweep, if this reader is wrong, a message gets less helpful
+// and a `run:`-body test may stop executing what it thinks it executes --
+// NOTHING GOES UNSWEPT. For the #39/#60 publish-implies-guard check above, a bug
+// here is a hole in that guarantee.
 //
 // PR #38's hardening of this reader stays, and the discipline it was written
 // under stays with it: these helpers do not implement YAML, they extract the
