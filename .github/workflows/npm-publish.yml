@@ -29,13 +29,13 @@ on:
         required: false
     outputs:
       published-version:
-        description: 'The version that was published'
+        description: 'The version dependents are dispatched for, or the literal no-cascade when they must not be (nothing published, or an alpha). Read by cascade.yml.'
         value: ${{ jobs.publish.outputs.published-version }}
       package-name:
         description: 'The name of the published package'
         value: ${{ jobs.publish.outputs.package-name }}
       version-channel:
-        description: 'The release channel (alpha/beta/stable)'
+        description: 'The release channel (alpha/beta/stable/patch/minor/major/custom). Empty on a cascade that moved no dependency range: no channel was decided.'
         value: ${{ jobs.publish.outputs.version-channel }}
 
 permissions:
@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      published-version: ${{ steps.package-version.outputs.version }}
+      published-version: ${{ steps.cascade-gate.outputs.version }}
       package-name: ${{ steps.package-name.outputs.name }}
       version-channel: ${{ steps.version-type.outputs.type }}
 
@@ -112,6 +112,7 @@ jobs:
           echo "name=$PKG_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Update all Stonyx dependencies to latest
+        id: stonyx-deps
         if: inputs.cascade-source != ''
         run: |
           node -e '
@@ -202,21 +203,69 @@ jobs:
             } else {
               console.log("All Stonyx dependencies already up to date.");
             }
+
+            // The release gate below reads this, and only this. It is the
+            // same "changed" that decided whether package.json was rewritten
+            // one statement up, so "a range moved" and "this run releases"
+            // cannot disagree (abofs/stonyx-workflows#60).
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "changed=" + (changed ? "true" : "false") + "\n");
           '
 
+      - name: Decide whether this run releases
+        id: release-gate
+        env:
+          CASCADE_SOURCE: ${{ inputs.cascade-source }}
+          DEPS_CHANGED: ${{ steps.stonyx-deps.outputs.changed }}
+        run: |
+          # abofs/stonyx-workflows#60. A cascade that moved no stonyx/@stonyx/*
+          # range used to bump, publish an identical beta, commit
+          # `chore: release ... [skip ci]` to the branch and cascade onward --
+          # seven such commits on stonyx-cron in one hour on 2026-10-24.
+          #
+          # EVERY step after this one carries
+          # `steps.release-gate.outputs.release == 'true'` in its `if:`, except
+          # the `always()` cleanup and the cascade gate at the end. Gating only
+          # the bump steps is NOT enough, and it is the trap this design is
+          # shaped around: with the version steps skipped, the version output
+          # is empty, and `!contains('', 'alpha') && !contains('', 'beta')` is
+          # TRUE -- the STABLE publish, commit/push-to-main and GitHub Release
+          # steps would all fire. test/cascade-gating-test.js walks the whole
+          # job and pins the exact list of steps that run.
+          #
+          # The comparison is against the literal strings "true" and "false",
+          # and anything else in cascade mode is an error. An empty
+          # DEPS_CHANGED means the update step did not report -- a renamed id,
+          # a skipped step -- and treating that as "nothing changed" would turn
+          # a broken pipeline into a green run that silently never releases.
+          if [ -z "$CASCADE_SOURCE" ]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "$DEPS_CHANGED" = "true" ]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "$DEPS_CHANGED" = "false" ]; then
+            echo "::notice::Cascade changed no Stonyx dependency range. Nothing is bumped, published, committed, tagged or cascaded."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::cascade mode, but the dependency-update step reported changed=\"$DEPS_CHANGED\" rather than true or false. Refusing to guess whether this run should release." >&2
+            exit 1
+          fi
+
       - name: Install dependencies
+        if: steps.release-gate.outputs.release == 'true'
         run: pnpm install ${{ inputs.cascade-source != '' && '--no-frozen-lockfile' || '--frozen-lockfile' }}
 
       - name: Run tests
+        if: steps.release-gate.outputs.release == 'true'
         run: pnpm test
 
       - name: Configure git
+        if: steps.release-gate.outputs.release == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Determine version bump type
         id: version-type
+        if: steps.release-gate.outputs.release == 'true'
         env:
           CASCADE_SOURCE: ${{ inputs.cascade-source }}
           CUSTOM_VERSION: ${{ inputs.custom-version }}
@@ -256,7 +305,7 @@ jobs:
           fi
 
       - name: Bump version (custom)
-        if: steps.version-type.outputs.type == 'custom'
+        if: steps.release-gate.outputs.release == 'true' && steps.version-type.outputs.type == 'custom'
         env:
           CUSTOM_VERSION: ${{ inputs.custom-version }}
         run: |
@@ -276,7 +325,7 @@ jobs:
 
       - name: Resolve stonyx-workflows ref
         id: workflows-ref
-        if: steps.version-type.outputs.type == 'alpha' || steps.version-type.outputs.type == 'beta'
+        if: steps.release-gate.outputs.release == 'true' && (steps.version-type.outputs.type == 'alpha' || steps.version-type.outputs.type == 'beta')
         env:
           WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
@@ -287,7 +336,7 @@ jobs:
           echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Checkout stonyx-workflows (for version derivation script)
-        if: steps.version-type.outputs.type == 'alpha' || steps.version-type.outputs.type == 'beta'
+        if: steps.release-gate.outputs.release == 'true' && (steps.version-type.outputs.type == 'alpha' || steps.version-type.outputs.type == 'beta')
         uses: actions/checkout@v4
         with:
           repository: abofs/stonyx-workflows
@@ -303,7 +352,7 @@ jobs:
 
       - name: Calculate next alpha version
         id: alpha-version
-        if: steps.version-type.outputs.type == 'alpha'
+        if: steps.release-gate.outputs.release == 'true' && steps.version-type.outputs.type == 'alpha'
         env:
           PKG_NAME: ${{ steps.package-name.outputs.name }}
         run: |
@@ -363,7 +412,7 @@ jobs:
 
       - name: Calculate next beta version
         id: beta-version
-        if: steps.version-type.outputs.type == 'beta'
+        if: steps.release-gate.outputs.release == 'true' && steps.version-type.outputs.type == 'beta'
         env:
           PKG_NAME: ${{ steps.package-name.outputs.name }}
         run: |
@@ -426,17 +475,18 @@ jobs:
         run: rm -rf .stonyx-workflows
 
       - name: Bump version (stable)
-        if: steps.version-type.outputs.type == 'stable'
+        if: steps.release-gate.outputs.release == 'true' && steps.version-type.outputs.type == 'stable'
         run: pnpm version patch --no-git-tag-version
 
       - name: Bump version (patch/minor/major)
-        if: steps.version-type.outputs.type == 'patch' || steps.version-type.outputs.type == 'minor' || steps.version-type.outputs.type == 'major'
+        if: steps.release-gate.outputs.release == 'true' && (steps.version-type.outputs.type == 'patch' || steps.version-type.outputs.type == 'minor' || steps.version-type.outputs.type == 'major')
         env:
           VERSION_TYPE: ${{ steps.version-type.outputs.type }}
         run: pnpm version "$VERSION_TYPE" --no-git-tag-version
 
       - name: Get package version
         id: package-version
+        if: steps.release-gate.outputs.release == 'true'
         run: |
           # Same shape as the package-name step: a newline in the value would
           # otherwise forge additional $GITHUB_OUTPUT keys, and this output
@@ -453,6 +503,7 @@ jobs:
           echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Pack and guard the release artifact
+        if: steps.release-gate.outputs.release == 'true'
         # abofs/stonyx-workflows#39. Twenty-three published @stonyx/* tarballs
         # carried a checked-out .git/config to the public registry, and nothing in
         # this pipeline looked at what it was uploading. npm has no unpublish past
@@ -687,19 +738,19 @@ jobs:
         # has never produced an attestation in 109 versions, published through
         # this same workflow with a green job (abofs/stonyx-workflows#43). A
         # green publish job is not evidence that provenance was produced.
-        if: contains(steps.package-version.outputs.version, 'alpha')
+        if: steps.release-gate.outputs.release == 'true' && contains(steps.package-version.outputs.version, 'alpha')
         run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag alpha --access public --no-git-checks
 
       - name: Publish to NPM (beta)
-        if: contains(steps.package-version.outputs.version, 'beta')
+        if: steps.release-gate.outputs.release == 'true' && contains(steps.package-version.outputs.version, 'beta')
         run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --tag beta --access public --no-git-checks
 
       - name: Publish to NPM (stable)
-        if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
+        if: "steps.release-gate.outputs.release == 'true' && !contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
         run: pnpm publish "$RUNNER_TEMP/stonyx-release.tgz" --access public --no-git-checks
 
       - name: Commit version bump and create tag (beta)
-        if: contains(steps.package-version.outputs.version, 'beta')
+        if: steps.release-gate.outputs.release == 'true' && contains(steps.package-version.outputs.version, 'beta')
         env:
           # A branch name may contain a double quote, so interpolating
           # github.ref_name into this shell source was a push-access injection
@@ -753,7 +804,7 @@ jobs:
           authed_git push --tags origin --end-of-options "$BRANCH"
 
       - name: Create GitHub Release (beta)
-        if: contains(steps.package-version.outputs.version, 'beta')
+        if: steps.release-gate.outputs.release == 'true' && contains(steps.package-version.outputs.version, 'beta')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.package-version.outputs.version }}
@@ -762,7 +813,7 @@ jobs:
           generate_release_notes: false
 
       - name: Commit version bump and create tag (stable)
-        if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
+        if: "steps.release-gate.outputs.release == 'true' && !contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
         env:
           PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}
           # The checkout no longer leaves a credential in .git/config
@@ -806,7 +857,7 @@ jobs:
           authed_git push origin main --tags
 
       - name: Create GitHub Release (stable)
-        if: "!contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
+        if: "steps.release-gate.outputs.release == 'true' && !contains(steps.package-version.outputs.version, 'alpha') && !contains(steps.package-version.outputs.version, 'beta')"
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.package-version.outputs.version }}
@@ -815,7 +866,7 @@ jobs:
           generate_release_notes: false
 
       - name: Comment on PR with alpha version
-        if: contains(steps.package-version.outputs.version, 'alpha')
+        if: steps.release-gate.outputs.release == 'true' && contains(steps.package-version.outputs.version, 'alpha')
         uses: actions/github-script@v7
         env:
           PACKAGE_NAME: ${{ steps.package-name.outputs.name }}
@@ -835,3 +886,57 @@ jobs:
               repo: context.repo.repo,
               body: `## 🚀 Alpha Version Published\n\n**Version:** \`${version}\`\n\n**Install:**\n\`\`\`bash\npnpm add ${packageName}@${version}\n# or\npnpm add ${packageName}@alpha  # latest alpha\n\`\`\`\n\nThis alpha version is now available for testing!`
             });
+
+      - name: Decide whether to cascade
+        id: cascade-gate
+        env:
+          RELEASE: ${{ steps.release-gate.outputs.release }}
+          CHANNEL: ${{ steps.version-type.outputs.type }}
+          PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}
+        run: |
+          # abofs/stonyx-workflows#60. This step's `version` output IS the
+          # job's `published-version` output, which every consumer passes
+          # straight to cascade.yml. Consumer files cannot change, so this is
+          # the only channel through which the publish job can tell the
+          # cascade job "do not dispatch".
+          #
+          # It says so with the explicit token `no-cascade`, never with an
+          # empty string. Empty is what GitHub hands over for an output nobody
+          # wrote -- a renamed step id, a skipped step -- and cascade.yml keeps
+          # refusing empty as an invalid version (#32), so an accident stays a
+          # red cascade job instead of becoming a silent skip.
+          #
+          # Keyed on the release decision and the channel decision themselves,
+          # not on the spelling of the version string.
+          if [ "$RELEASE" = "false" ]; then
+            echo "version=no-cascade" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$RELEASE" != "true" ]; then
+            echo "::error::release gate reported release=\"$RELEASE\"; expected true or false" >&2
+            exit 1
+          fi
+          case "$CHANNEL" in
+            alpha)
+              # A PR's alpha is published and commented on as before, but no
+              # dependent reads it: their update step resolves only
+              # dist-tags.beta and dist-tags.latest. Dispatching made every
+              # dependent publish an identical beta and push a release commit
+              # to its dev (utils PR#56: one alpha, eight repos).
+              echo "::notice::Alpha publish: no dependent is dispatched."
+              echo "version=no-cascade" >> "$GITHUB_OUTPUT"
+              ;;
+            beta|stable|custom|patch|minor|major)
+              # Already proven a semver string by `Get package version`, so it
+              # cannot forge a second output line.
+              if [ -z "$PUBLISHED_VERSION" ]; then
+                echo "::error::a $CHANNEL release ran but no version was recorded" >&2
+                exit 1
+              fi
+              echo "version=$PUBLISHED_VERSION" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::unknown release channel \"$CHANNEL\"; refusing to decide whether dependents are dispatched" >&2
+              exit 1
+              ;;
+          esac

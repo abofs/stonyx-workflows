@@ -6,12 +6,15 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
+import { conditionSource, evaluate, tokenize, truthy } from './helpers/actions-expression.js';
 import {
   MissingStepKeyError,
+  indentOf,
   parseSteps,
   readWorkflow,
   runBodyOf,
   stepRunBody,
+  stepScalarOf,
   stepsNamed,
 } from './helpers/workflow-yaml.js';
 
@@ -61,7 +64,6 @@ const GUARD_STEP = 'Pack and guard the release artifact';
 // in AC1 rather than a test that follows them both wherever they go.
 const TARBALL_PATH = '$RUNNER_TEMP/stonyx-release.tgz';
 
-const indentOf = (line) => line.match(/^(\s*)/)[1].length;
 const BLOCK_SCALAR_HEADER = /^[|>](?:[-+][1-9]?|[1-9][-+]?)?$/;
 
 /**
@@ -1042,15 +1044,396 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     }
   });
 
-  test('the guard is unconditional', () => {
+  // This was 'the guard is unconditional' until abofs/stonyx-workflows#60. A
+  // cascade that moved no dependency range now skips EVERY step after the
+  // release gate, install included -- and the guard runs the consumer's
+  // prepublishOnly build, which cannot succeed without node_modules. So the
+  // guard now carries exactly one condition, the release gate, and the property
+  // the old pin protected is restated as the one that actually matters: a
+  // publish step can run only when the guard ran.
+  const RELEASE_GATE = "steps.release-gate.outputs.release == 'true'";
+  const ifOf = (step) => {
+    const raw = stepScalarOf(step, 'if', { optional: true });
+    return raw === null ? null : conditionSource(raw);
+  };
+
+  // A fail-closed exact pin on the guard's own condition: anything else reds,
+  // including a harmless rewrite. The property itself is the next test.
+  test('the guard carries no condition but the release gate (#60)', () => {
     const [guard] = stepsNamed(npmPublish, GUARD_STEP);
     assert.ok(guard, `no step named ${JSON.stringify(GUARD_STEP)}`);
-    const keys = stepKeys(guard);
-    assert.ok(
-      !keys.includes('if'),
-      `the guard carries an if: (${JSON.stringify(keys)}). Any condition on it is a bypass -- one that would be `
-      + 'evaluated from consumer-influenced outputs, and one nobody would notice going false',
+    assert.equal(stepKeys(guard).filter((k) => k === 'if').length, 1, 'the guard must carry exactly one if:');
+    assert.equal(
+      ifOf(guard),
+      RELEASE_GATE,
+      'the guard carries a condition other than the release gate. Any further condition on it is a bypass -- one '
+      + 'that would be evaluated from consumer-influenced outputs, and one nobody would notice going false',
     );
+  });
+
+  // Evaluated, not spelled. Round 1 pinned this with
+  // `condition.startsWith(`${RELEASE_GATE} && `)`, and `GATE && X || Y` passes
+  // that prefix while publishing on the Y path with the guard skipped (&& binds
+  // tighter than ||): `... || github.event_name == 'workflow_dispatch'` on the
+  // stable publish stayed 500/500 green (#61, Test Coverage S1). A spelling
+  // check guarding against a bypass was itself bypassable by spelling.
+  //
+  // So every publish condition and the guard condition are evaluated, with
+  // test/helpers/actions-expression.js, over every assignment of every context
+  // path either one reads, and a single assignment where the publish runs and
+  // the guard does not is a red with that assignment as the witness. A missing
+  // `if:` is unconditional and evaluated as such, so dropping the condition
+  // reds too.
+  //
+  // The value domain, and its real limit. The checker accepts these shapes
+  // only: `==`/`!=` between paths, string literals and null; `!`, `&&`, `||`,
+  // parentheses; truthiness; and `contains(<path>, '<literal>')` -- any other
+  // contains() throws below, because a path as the needle or a literal as the
+  // haystack makes the outcome depend on substrings of a value, which no finite
+  // domain built from the literals realises. Under those shapes a value's
+  // effect is fixed by its PROFILE: null-or-empty, equal to one literal (case-
+  // insensitively), or "contains exactly the literals in S and equals none".
+  // The domain is therefore:
+  //   - null, standing for '' too (the evaluator cannot tell them apart:
+  //     `null == ''`, both falsy, `contains()` reads both as '');
+  //   - each literal itself;
+  //   - for every subset S of the literals, INCLUDING the empty one, a value
+  //     that contains exactly S and equals no literal: a private-use pad
+  //     character (never whitespace, never numeric), then S joined by NUL. Round 2 had only the unpadded join, so "contains
+  //     'beta', is not 'beta', contains no other literal" had no value, and
+  //     `... || contains(github.ref,'beta') && github.ref != 'beta' &&
+  //     !contains(github.ref,'true')` passed (#61, Test Coverage N1);
+  //   - as many distinct pads per subset as there are paths, so any pattern
+  //     of path-vs-path equality among same-profile values is realisable.
+  //     One value per profile made `head_ref != base_ref` with equal profiles
+  //     unsatisfiable, and that bypass passed too (N12).
+  // That is complete for the accepted shapes when no literal contains a NUL
+  // or a pad character. It is NOT a model of a context whose real value is a
+  // boolean, a number or an object: every path is assigned a string or null,
+  // so GitHub's number coercion of such a value (`github.event.forced ==
+  // 'true'` is false there) is outside it. The evaluator throws on comparing
+  // a path to a boolean literal; nothing else here would notice.
+  const LITERALS_CAP = 10;
+  const ASSIGNMENTS_CAP = 2_000_000;
+
+  function pathsAndLiterals(src) {
+    const tokens = tokenize(src);
+    const paths = new Set();
+    const literals = new Set();
+    tokens.forEach((t, i) => {
+      if (t.type === 'str') literals.add(t.value);
+      if (t.type === 'ident' && !['true', 'false', 'null'].includes(t.value)
+        && !(tokens[i + 1] && tokens[i + 1].value === '(')) paths.add(t.value);
+      if (t.type === 'ident' && t.value === 'contains') {
+        const [open, haystack, comma, needle, close] = tokens.slice(i + 1, i + 6);
+        const isPath = haystack && haystack.type === 'ident' && !['true', 'false', 'null'].includes(haystack.value);
+        if (!(open?.value === '(' && isPath && comma?.value === ',' && needle?.type === 'str' && close?.value === ')')) {
+          throw new Error(`the publish-implies-guard checker models contains(<path>, '<literal>') only: ${src}`);
+        }
+      }
+    });
+    return { paths, literals };
+  }
+
+  function contextFrom(assignment) {
+    const ctx = {};
+    for (const [path, value] of Object.entries(assignment)) {
+      const keys = path.split('.');
+      let node = ctx;
+      for (const key of keys.slice(0, -1)) {
+        if (node[key] === undefined) node[key] = {};
+        if (typeof node[key] !== 'object' || node[key] === null) throw new Error(`${path} overlaps another path`);
+        node = node[key];
+      }
+      if (node[keys.at(-1)] !== undefined) throw new Error(`${path} overlaps another path`);
+      node[keys.at(-1)] = value;
+    }
+    return ctx;
+  }
+
+  function* assignments(paths, domain) {
+    const counters = paths.map(() => 0);
+    for (;;) {
+      yield Object.fromEntries(paths.map((p, i) => [p, domain[counters[i]]]));
+      let i = 0;
+      while (i < paths.length && ++counters[i] === domain.length) counters[i++] = 0;
+      if (i === paths.length) return;
+    }
+  }
+
+  /** The first assignment under which `publishIf` runs and `guardIf` does not, or null. */
+  function publishWithoutGuard(publishIf, guardIf) {
+    const exprs = [publishIf ?? 'true', guardIf ?? 'true'];
+    const paths = new Set();
+    const literals = new Set();
+    for (const e of exprs) {
+      const found = pathsAndLiterals(e);
+      found.paths.forEach((p) => paths.add(p));
+      found.literals.forEach((l) => literals.add(l));
+    }
+    const lits = [...literals];
+    assert.ok(lits.length <= LITERALS_CAP, `${lits.length} string literals; the subset domain is capped at ${LITERALS_CAP}`);
+    const pathList = [...paths];
+    const domain = [null, ...lits];
+    for (let pad = 1; pad <= Math.max(1, pathList.length); pad++) {
+      for (let mask = 0; mask < (1 << lits.length); mask++) {
+        domain.push(String.fromCharCode(0xE000 + pad) + lits.filter((_, i) => mask & (1 << i)).join('\u0000'));
+      }
+    }
+    assert.ok(lits.every((l) => !/[\u0000\uE000-\uF8FF]/.test(l)), 'a literal carries a NUL or private-use pad character; the domain cannot realise it');
+    assert.ok(domain.length ** pathList.length <= ASSIGNMENTS_CAP,
+      `${domain.length}^${pathList.length} assignments exceeds the cap; narrow the domain rather than sampling it`);
+
+    let checked = 0;
+    for (const assignment of assignments(pathList, domain)) {
+      const ctx = contextFrom(assignment);
+      checked++;
+      if (truthy(evaluate(exprs[0], ctx)) && !truthy(evaluate(exprs[1], ctx))) return { assignment, checked };
+    }
+    return { assignment: null, checked };
+  }
+
+  /** Every publish step in `text` that can run with the guard skipped, with its witness. */
+  function publishBypasses(text, onlyStep = null) {
+    const [guard] = stepsNamed(text, GUARD_STEP);
+    assert.ok(guard, `no step named ${JSON.stringify(GUARD_STEP)}`);
+    const steps = publishSteps(text).filter((st) => onlyStep === null || st.name === onlyStep);
+    assert.ok(steps.length > 0, 'no publish step found; a vacuous pass is not a pass');
+    const found = [];
+    for (const step of steps) {
+      const { assignment, checked } = publishWithoutGuard(ifOf(step), ifOf(guard));
+      if (assignment === null) {
+        assert.ok(checked > 1, `publish step ${JSON.stringify(step.name)}: only ${checked} assignment(s) checked`);
+      } else {
+        found.push(`publish step ${JSON.stringify(step.name)} (if: ${JSON.stringify(ifOf(step))}) runs while the guard `
+          + `(if: ${JSON.stringify(ifOf(guard))}) is skipped, under ${JSON.stringify(assignment)}`);
+      }
+    }
+    return found;
+  }
+
+  test('no publish step can run under any input on which the guard does not (#60, evaluated)', () => {
+    assert.deepEqual(publishBypasses(npmPublish), []);
+  });
+
+  // What FEEDS the check above is the `if:` reader, and a reader that returns
+  // a condition stricter than the one GitHub runs makes the evaluation vacuous.
+  // Round 2 measured exactly that: a plain `if:` scalar continued onto the next
+  // line was read as its key line alone, so the S1 bypass written over two
+  // lines stayed 571/571 green (#61, Convention round 2). Each shape below is
+  // applied to the real workflow text and must either be refused by the reader
+  // or produce a witness -- never pass.
+  // The beta publish step's one-line `if:` is REPLACED, whatever it says, so
+  // these cases keep testing the reader when the live condition changes.
+  const BETA_IF = /^( {6}- name: Publish to NPM \(beta\)\n) {8}if: [^\n]*\n/m;
+  const GATE_BETA = "steps.release-gate.outputs.release == 'true' && contains(steps.package-version.outputs.version, 'beta')";
+  const BYPASS = "|| github.event_name == 'workflow_dispatch'";
+  // Scoped to the beta step, so an edit to another publish step's condition
+  // reds the live check above and not these reader cases.
+  const BETA_STEP = 'Publish to NPM (beta)';
+  const READER_REFUSAL = /This helper returns an inline value only when it is the whole value|indented less than the step's first key/;
+  const withBetaIf = (ifLines) => {
+    assert.equal(npmPublish.match(new RegExp(BETA_IF.source, 'gm'))?.length, 1,
+      'the beta publish step must open with a one-line if: exactly once');
+    return npmPublish.replace(BETA_IF, (_, nameLine) => `${nameLine}${ifLines}\n`);
+  };
+  const refusedOrWitnessed = (text, label) => {
+    let found;
+    try {
+      found = publishBypasses(text, BETA_STEP);
+    } catch (err) {
+      if (err instanceof assert.AssertionError) throw err;
+      // The READER must be what refuses. A downstream accident (the tokenizer
+      // choking on a stray quote) also throws, but it is not a fence anyone
+      // wrote, and it hid a removed reader check at 587/587 green.
+      return READER_REFUSAL.test(err.message) ? `refused: ${err.message}` : `threw elsewhere: ${err.message}`;
+    }
+    assert.notDeepEqual(found, [], `${label}: the checker passed a bypass`);
+    return 'witnessed';
+  };
+
+  // Every shape below is also refused by the step-shape allowlist
+  // (test/step-shape-test.js), which reads the live files with code sharing
+  // nothing with this reader. These cases pin the second fence: the reader
+  // itself throws rather than returns a condition GitHub does not run.
+  test('the if: reader refuses every multi-line, block, single-quoted, duplicated and commented shape; none passes a bypass (#61)', () => {
+    const cases = {
+      'plain, continued on the next line': [`        if: ${GATE_BETA}`, `          ${BYPASS}`],
+      'plain, continued after a blank line': [`        if: ${GATE_BETA}`, '', `          ${BYPASS}`],
+      'double-quoted over two lines': [`        if: "${GATE_BETA}`, `          ${BYPASS}"`],
+      // libyaml (Ruby Psych measured) folds a quoted scalar continued at the
+      // key's own indent, or less, into the value. The continuation-line check
+      // cannot see those lines: the closing-quote check refuses the first, and
+      // parseSteps refuses a step line indented below the step's keys.
+      'double-quoted, continued at the key indent': [`        if: "${GATE_BETA}`, `        ${BYPASS}"`],
+      'single-quoted, continued below the key indent': [`        if: '${GATE_BETA.replaceAll("'", "''")}`, `       ${BYPASS.replaceAll("'", "''")}'`],
+      'single-quoted over two lines': [`        if: '${GATE_BETA.replaceAll("'", "''")}`, `          ${BYPASS.replaceAll("'", "''")}'`],
+      'trailing comment on the key line': [`        if: ${GATE_BETA} # ${BYPASS}`],
+      'double-quoted, then a trailing comment': [`        if: "${GATE_BETA}" # ${BYPASS}`],
+      'comment line under the key line': [`        if: ${GATE_BETA} ${BYPASS}`, '          # reviewed'],
+      'folded block scalar': ['        if: >-', `          ${GATE_BETA}`, `          ${BYPASS}`],
+      'literal block scalar': ['        if: |', `          ${GATE_BETA}`, `          ${BYPASS}`],
+      // Framework r3 HIGH: to GitHub this is ONE quoted string literal, always
+      // truthy; the old reader folded it and stripped the quotes, and the
+      // check evaluated the gated condition. 588/588 green.
+      'block scalar whose body is a quoted string': ['        if: >-', `          '${GATE_BETA.replaceAll("'", "''")}'`],
+      'single-quoted, one line': [`        if: '${GATE_BETA.replaceAll("'", "''")}'`],
+      // No body line, so no continuation check fires: only the header refusal does.
+      'block header with no body': ['        if: >-'],
+      // Convention r3 NIT: this reader took the first, YAML the last.
+      'duplicate if:': [`        if: ${GATE_BETA}`, `        if: ${GATE_BETA} ${BYPASS}`],
+    };
+    const outcomes = Object.fromEntries(Object.entries(cases)
+      .map(([label, ifLines]) => [label, refusedOrWitnessed(withBetaIf(ifLines.join('\n')), label).split(':')[0]]));
+    assert.deepEqual(outcomes, {
+      'plain, continued on the next line': 'refused',
+      'plain, continued after a blank line': 'refused',
+      'double-quoted over two lines': 'refused',
+      'double-quoted, continued at the key indent': 'refused',
+      'single-quoted, continued below the key indent': 'refused',
+      'single-quoted over two lines': 'refused',
+      'trailing comment on the key line': 'refused',
+      'double-quoted, then a trailing comment': 'refused',
+      'comment line under the key line': 'refused',
+      'folded block scalar': 'refused',
+      'literal block scalar': 'refused',
+      'block scalar whose body is a quoted string': 'refused',
+      'single-quoted, one line': 'refused',
+      'block header with no body': 'refused',
+      'duplicate if:': 'refused',
+    });
+  });
+
+  // The inverse: a correct condition in each shape the reader accepts -- one
+  // line, plain or double-quoted, `${{ }}` or not -- is read as exactly that
+  // condition, so the cases above are not red because every shape is red.
+  test('the if: reader reads a correct condition in every accepted shape as that condition (#61)', () => {
+    for (const ifLines of [
+      [`        if: ${GATE_BETA}`],
+      [`        if: "${GATE_BETA}"`],
+      [`        if: \${{ ${GATE_BETA} }}`],
+      [`        if: "\${{ ${GATE_BETA} }}"`],
+    ]) {
+      const text = withBetaIf(ifLines.join('\n'));
+      assert.deepEqual(publishBypasses(text, BETA_STEP), [], ifLines.join(' / '));
+      const step = publishSteps(text).find((st) => st.name === 'Publish to NPM (beta)');
+      assert.equal(ifOf(step), GATE_BETA, ifLines.join(' / '));
+    }
+    // conditionSource takes only what the reader hands it; anything else
+    // throws rather than being unquoted into a different condition.
+    for (const [bad, why] of [["'a == b'", /single-quoted/], ['a\n|| b', /one-line/], ['"a', /unclosed/], ['"a\\x"', /escapes/]]) {
+      assert.throws(() => conditionSource(bad), why, JSON.stringify(bad));
+    }
+    assert.equal(conditionSource('"${{ a == b }}"'), 'a == b');
+  });
+
+  // What feeds `stepScalarOf` is the step's key depth, which parseSteps sets.
+  // A wide dash (`-   name:`) and a comment at column 0 must leave it where
+  // the step's keys are; a non-comment line below it is refused.
+  test('parseSteps keeps a step\'s own key depth, and refuses a line below it (#61)', () => {
+    const wf = (stepLines) => ['jobs:', '  j:', '    steps:', ...stepLines, ''].join('\n');
+    const [wide] = parseSteps(wf(['      -   name: wide', `          if: ${GATE_BETA}`, '          run: true']));
+    assert.equal(wide.name, 'wide');
+    assert.equal(stepScalarOf(wide, 'if'), GATE_BETA);
+    const [commented] = parseSteps(wf(['      - name: c', '# a column-0 comment', `        if: ${GATE_BETA}`, '        run: true']));
+    assert.equal(commented.name, 'c');
+    assert.equal(stepScalarOf(commented, 'if'), GATE_BETA);
+    assert.throws(() => parseSteps(wf(['      - name: low', `        if: "${GATE_BETA}`, `       ${BYPASS}"`, '        run: true'])),
+      /indented less than the step's first key/);
+  });
+
+  // `stepScalarOf` reads the step's OWN keys only: an `if:` under `with:` or
+  // `env:` is an input or a variable, not the step's condition. If the reader
+  // took the nested one, a publish step with no condition of its own would be
+  // read as gated -- stricter than the real one, which is none.
+  test('a nested with: if: / env: if: is not read as the step condition (#61)', () => {
+    for (const parent of ['with', 'env']) {
+      const nested = [`        ${parent}:`, `          if: ${GATE_BETA}`].join('\n');
+      const noOwnIf = withBetaIf(nested);
+      const step = publishSteps(noOwnIf).find((st) => st.name === 'Publish to NPM (beta)');
+      assert.equal(stepScalarOf(step, 'if', { optional: true }), null, `${parent}: if: was read as the step's condition`);
+      assert.notDeepEqual(publishBypasses(noOwnIf, BETA_STEP), [], `${parent}: an unconditional publish passed`);
+
+      for (const order of [[nested, `        if: ${GATE_BETA}`], [`        if: ${GATE_BETA}`, nested]]) {
+        const own = withBetaIf(order.join('\n').replace(`          if: ${GATE_BETA}`, '          if: nested'));
+        const st = publishSteps(own).find((x) => x.name === 'Publish to NPM (beta)');
+        assert.equal(stepScalarOf(st, 'if'), GATE_BETA, `${parent}: the nested if: displaced the step's own`);
+      }
+    }
+  });
+
+  // The checker can fail: the round-1 bypass, a dropped gate and a dropped
+  // condition each produce a witness, and the head's own conditions do not.
+  test('the publish-implies-guard checker finds a witness for each known bypass shape (#60)', () => {
+    const stable = "!contains(steps.package-version.outputs.version, 'alpha') "
+      + "&& !contains(steps.package-version.outputs.version, 'beta')";
+    for (const bypass of [
+      `${RELEASE_GATE} && ${stable} || github.event_name == 'workflow_dispatch'`,
+      stable,
+      null,
+      `${RELEASE_GATE} || contains(steps.package-version.outputs.version, 'beta')`,
+      `(${RELEASE_GATE} || inputs.cascade-source == '') && ${stable}`,
+    ]) {
+      assert.notEqual(publishWithoutGuard(bypass, RELEASE_GATE).assignment, null, `no witness for ${bypass}`);
+    }
+    assert.equal(publishWithoutGuard(`${RELEASE_GATE} && ${stable}`, RELEASE_GATE).assignment, null);
+    assert.equal(publishWithoutGuard(`(${RELEASE_GATE}) && (${stable} || github.event_name == 'x')`, RELEASE_GATE).assignment, null);
+  });
+
+  // The DOMAIN can fail: each case below is witnessed by exactly one part of
+  // it, so dropping that part reds here rather than silently narrowing the
+  // check (#61, Test Coverage round 2, N1/N2/N3/N12; round 3, G3/GF). Each has a gated sibling
+  // that must produce no witness, so these are not red because everything is.
+  test('the checker domain realises each profile its comment claims, and reads the guard as well as the publish (#61)', () => {
+    const beta = "contains(steps.package-version.outputs.version, 'beta')";
+    const cases = [
+      // N1 -- needs "contains 'beta', equals no literal, contains no other": a padded subset.
+      ["contains(github.ref, 'beta') && github.ref != 'beta' && !contains(github.ref, 'true')", RELEASE_GATE],
+      // N12 -- needs two DIFFERENT values with the same profile: one pad per path.
+      ["github.head_ref != github.base_ref && github.head_ref && github.base_ref && !contains(github.head_ref, 'true') "
+        + "&& !contains(github.base_ref, 'true') && !contains(github.head_ref, 'beta') && !contains(github.base_ref, 'beta')",
+      RELEASE_GATE],
+      // N2 -- needs a truthy value containing no literal: the padded EMPTY subset.
+      ["github.ref && !contains(github.ref, 'true') && !contains(github.ref, 'beta')", RELEASE_GATE],
+      // N4 -- a truthy value equal to no literal.
+      ["steps.release-gate.outputs.release && steps.release-gate.outputs.release != 'true'", RELEASE_GATE],
+      // GF -- needs a value containing EVERY literal and equal to none: the
+      // full subset, padded (#61, Test Coverage round 3, O12).
+      ["contains(github.ref, 'true') && contains(github.ref, 'beta')", RELEASE_GATE],
+    ].map(([bypass, guard]) => [`${RELEASE_GATE} && ${beta} || ${bypass}`, guard]);
+    // G3 -- needs THREE pairwise-different values with the same profile, so a
+    // third pad (O1: pads capped at 2; O11: two distinct pad characters). Not
+    // wrapped in the beta condition, which would add a fifth path and exceed
+    // the assignment cap: four paths, a 19-value domain.
+    const G3 = ['github.ref', 'github.head_ref', 'github.base_ref'];
+    cases.push([
+      [`${G3[0]} != ${G3[1]}`, `${G3[1]} != ${G3[2]}`, `${G3[0]} != ${G3[2]}`, ...G3,
+        ...G3.flatMap((p) => [`!contains(${p}, 'true')`, `!contains(${p}, 'beta')`])].join(' && '),
+      RELEASE_GATE,
+    ]);
+    // N3 -- a path, and then a literal, that only the GUARD reads.
+    cases.push([RELEASE_GATE, `${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`]);
+    cases.push([`${RELEASE_GATE} && github.event_name`, `${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`]);
+    const unwitnessed = cases.filter(([publish, guard]) => publishWithoutGuard(publish, guard).assignment === null)
+      .map(([publish, guard]) => `no witness for ${publish} (guard: ${guard})`);
+    assert.deepEqual(unwitnessed, []);
+
+    for (const gated of [
+      `${RELEASE_GATE} && contains(github.ref, 'beta') && github.ref != 'beta' && !contains(github.ref, 'true')`,
+      `${RELEASE_GATE} && github.head_ref != github.base_ref && github.head_ref`,
+      `${RELEASE_GATE} && github.ref && !contains(github.ref, 'true')`,
+      `${RELEASE_GATE} && contains(github.ref, 'true') && contains(github.ref, 'beta')`,
+      `${RELEASE_GATE} && github.ref != github.head_ref && github.head_ref != github.base_ref && github.ref != github.base_ref`,
+    ]) {
+      assert.equal(publishWithoutGuard(gated, RELEASE_GATE).assignment, null, `false witness for ${gated}`);
+    }
+    assert.equal(publishWithoutGuard(`${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`,
+      `${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`).assignment, null);
+
+    // Outside the model: refused, not answered.
+    for (const outside of ["contains(github.ref, github.head_ref)", "contains('refs/heads/beta', github.ref)"]) {
+      assert.throws(() => publishWithoutGuard(`${RELEASE_GATE} || ${outside}`, RELEASE_GATE), /models contains\(<path>/);
+    }
   });
 
   test('neither the guard nor any publish step is advisory', () => {

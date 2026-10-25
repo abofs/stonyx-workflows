@@ -239,13 +239,13 @@ export const EXPRESSION_ALLOWLIST = {
         + 'A declared output value, not program text.',
     },
     {
-      line: 'published-version: ${{ steps.package-version.outputs.version }}',
+      line: 'published-version: ${{ steps.cascade-gate.outputs.version }}',
       context: 'jobs > publish > outputs',
-      expression: '${{ steps.package-version.outputs.version }}',
+      expression: '${{ steps.cascade-gate.outputs.version }}',
       occurrences: 1,
-      why: 'steps.package-version.outputs.version lifted from a step output to a job output. The producing '
-        + 'step validates it as a semver string before writing $GITHUB_OUTPUT, and a job `outputs:` mapping is '
-        + 'not program text.',
+      why: 'steps.cascade-gate.outputs.version lifted from a step output to a job output (#60). The producing '
+        + 'step writes either the literal no-cascade or steps.package-version.outputs.version, which that step '
+        + 'validated as semver before writing $GITHUB_OUTPUT. A job `outputs:` mapping is not program text.',
     },
     {
       line: 'package-name: ${{ steps.package-name.outputs.name }}',
@@ -326,10 +326,38 @@ export const EXPRESSION_ALLOWLIST = {
       line: 'CASCADE_SOURCE: ${{ inputs.cascade-source }}',
       context: 'jobs > publish > steps > env',
       expression: '${{ inputs.cascade-source }}',
+      occurrences: 2,
+      why: 'inputs.cascade-source is consumer-controlled and reaches a step `env:` value, in the version-type '
+        + 'step and in the release gate (#60). That is #32\'s remediation: both run: bodies read '
+        + '"$CASCADE_SOURCE" only as a quoted variable expansion in a `[ -n ]`/`[ -z ]` test and never splice '
+        + 'the input into shell source.',
+    },
+    {
+      line: 'DEPS_CHANGED: ${{ steps.stonyx-deps.outputs.changed }}',
+      context: 'jobs > publish > steps > env',
+      expression: '${{ steps.stonyx-deps.outputs.changed }}',
       occurrences: 1,
-      why: 'inputs.cascade-source is consumer-controlled and reaches a step `env:` value. That is #32\'s '
-        + 'remediation for this step: the run: body below reads "$CASCADE_SOURCE" as a quoted variable '
-        + 'expansion and never splices the input into shell source.',
+      why: 'steps.stonyx-deps.outputs.changed is written by the dependency-update step as the literal true or '
+        + 'false, never consumer text, and reaches a step `env:` value of the release gate (#60). The run: body '
+        + 'compares "$DEPS_CHANGED" against those two literals and fails on anything else.',
+    },
+    {
+      line: 'RELEASE: ${{ steps.release-gate.outputs.release }}',
+      context: 'jobs > publish > steps > env',
+      expression: '${{ steps.release-gate.outputs.release }}',
+      occurrences: 1,
+      why: 'steps.release-gate.outputs.release is the literal true or false written by the release gate, '
+        + 'reaching a step `env:` value of the cascade gate (#60). The run: body compares "$RELEASE" against '
+        + 'those two literals and fails on anything else.',
+    },
+    {
+      line: 'CHANNEL: ${{ steps.version-type.outputs.type }}',
+      context: 'jobs > publish > steps > env',
+      expression: '${{ steps.version-type.outputs.type }}',
+      occurrences: 1,
+      why: 'steps.version-type.outputs.type is one of a fixed keyword set written by the version-type step, '
+        + 'reaching a step `env:` value of the cascade gate (#60). The run: body matches "$CHANNEL" in a `case` '
+        + 'against fixed patterns and fails on an unknown value.',
     },
     {
       line: 'CUSTOM_VERSION: ${{ inputs.custom-version }}',
@@ -415,10 +443,11 @@ export const EXPRESSION_ALLOWLIST = {
       line: 'PUBLISHED_VERSION: ${{ steps.package-version.outputs.version }}',
       context: 'jobs > publish > steps > env',
       expression: '${{ steps.package-version.outputs.version }}',
-      occurrences: 3,
+      occurrences: 4,
       why: 'steps.package-version.outputs.version reaching a step `env:` value in the three steps that commit, '
-        + 'tag and comment. The producing step validates it as semver before writing $GITHUB_OUTPUT, and each '
-        + 'consumer reads "$PUBLISHED_VERSION" or process.env rather than interpolating it.',
+        + 'tag and comment, and in the cascade gate (#60). The producing step validates it as semver before '
+        + 'writing $GITHUB_OUTPUT, and each consumer reads "$PUBLISHED_VERSION" or process.env rather than '
+        + 'interpolating it.',
     },
     {
       line: 'tag_name: v${{ steps.package-version.outputs.version }}',

@@ -1,8 +1,27 @@
 // Minimal, purpose-built reader for the workflow YAML in this repo.
 //
-// DIAGNOSTICS ONLY. NO GUARANTEE IN THIS SUITE DEPENDS ON THIS FILE.
+// DIAGNOSTICS ONLY FOR THE `${{ }}` SWEEP -- BUT TWO GUARANTEE CHECKS READ IT.
 //
-// It used to carry one. Three review rounds on abofs/stonyx-workflows#37 found
+// The #39/#60 check "no publish step can run under any input on which the
+// guard does not" (test/tarball-guard-test.js) reads every publish and guard
+// `if:` through `parseSteps` + `stepScalarOf`, and the #60 job simulator
+// (test/cascade-gating-test.js) reads `if:`, `id:`, `run:` and `env:` through
+// this file. For those, a wrong answer here IS a hole: a condition read
+// stricter than the one GitHub runs makes the check pass with nothing behind
+// it. Review rounds on #61 found four: a plain `if:` continued onto
+// the next line (571/571 green), a `>-` block whose body is one quoted literal
+// to GitHub but the gated condition here (588/588 green), an unclosed quoted
+// `name:` swallowing the `if:` line, a duplicate `if:` read first-wins.
+//
+// So the shapes are fenced off, not patched one at a time. The step-shape
+// allowlist (test/helpers/step-shape.js, run over every live workflow file by
+// test/step-shape-test.js) refuses every step shape but single-line scalars,
+// `|`/`|-` blocks on `run:`/`script:`, and a plain or double-quoted one-line
+// `if:`; it shares no code with this file. And `stepScalarOf` reads exactly
+// those shapes and throws on the rest: one line, written once, no block
+// scalar, no single-quoted `if:`. Review this file with that priority.
+//
+// For the `${{ }}` sweep, it used to carry the guarantee. Three review rounds on abofs/stonyx-workflows#37 found
 // nine ways to hide a `${{ }}` expression from a sweep founded on this reader
 // -- an unnamed step, a `run:` key nested in an earlier block scalar, a quoted
 // `"run":` key, four multi-line flow/plain scalar shapes, a single-line flow
@@ -20,10 +39,11 @@
 //   2. The EXECUTED `run:`-body tests, which genuinely need real step bodies to
 //      drop into a throwaway workspace and run.
 //
-// The consequence is worth stating in the form that decides review priority: if
-// this reader is wrong, a message gets less helpful and a `run:`-body test may
-// stop executing what it thinks it executes. NOTHING GOES UNSWEPT. A bug here
-// is a diagnostics bug, not a hole in the guarantee.
+// The consequence is worth stating in the form that decides review priority:
+// for the `${{ }}` sweep, if this reader is wrong, a message gets less helpful
+// and a `run:`-body test may stop executing what it thinks it executes --
+// NOTHING GOES UNSWEPT. For the #39/#60 publish-implies-guard check above, a bug
+// here is a hole in that guarantee.
 //
 // PR #38's hardening of this reader stays, and the discipline it was written
 // under stays with it: these helpers do not implement YAML, they extract the
@@ -47,7 +67,8 @@ export function readWorkflow(name) {
   return readFileSync(workflowPath(name), 'utf8');
 }
 
-const indentOf = (line) => line.match(/^(\s*)/)[1].length;
+/** Leading whitespace width of a line. */
+export const indentOf = (line) => line.match(/^(\s*)/)[1].length;
 
 /**
  * The job a `steps:` list belongs to: the nearest enclosing mapping key.
@@ -108,7 +129,10 @@ export function parseSteps(text) {
 
     for (let i = stepsIdx + 1; i < lines.length; i++) {
       const line = lines[i];
-      if (line.trim() !== '' && indentOf(line) <= stepsIndent) break;
+      // A comment may sit at any column, so it does not end the block. It used
+      // to: a column-0 comment inside a step cut every line after it out of
+      // every step (#61, round 3).
+      if (line.trim() !== '' && !line.trim().startsWith('#') && indentOf(line) <= stepsIndent) break;
 
       const item = line.trim() === '' ? null : line.match(/^(\s*)-(\s+\S.*|\s*)$/);
       if (item && (listIndent === null || item[1].length === listIndent)) {
@@ -122,7 +146,10 @@ export function parseSteps(text) {
             + 'reader instead of deleting the case that failed.',
           );
         }
-        current = { job, lines: content === '' ? [] : [`${' '.repeat(listIndent + 2)}${content}`] };
+        // The content keeps its real column (`-   name:` puts the key at +4,
+        // not +2), so the step's own key depth is the depth its other keys use.
+        const column = listIndent + 1 + item[2].match(/^\s*/)[0].length;
+        current = { job, start: i, lines: content === '' ? [] : [`${' '.repeat(column)}${content}`] };
         steps.push(current);
         continue;
       }
@@ -132,9 +159,25 @@ export function parseSteps(text) {
 
   if (steps.length === 0) throw new Error('workflow steps: block contained no steps');
 
-  return steps.map(({ job, lines: body }, index) => {
-    const text = body.join('\n');
+  return steps.map(({ job, start, lines: raw }, index) => {
+    // A comment may sit at any column; it is not part of the step. Any other
+    // line LESS indented than the step's first key is not a key of this step:
+    // the only YAML that puts one there is a quoted scalar folded across lines,
+    // which libyaml accepts. Reading the step with that line in it moved the
+    // step's key depth, so its own `name:` and `if:` read as absent (#61,
+    // round 3 probe). It throws instead.
+    const firstKey = raw.find((l) => l.trim() !== '' && !l.trim().startsWith('#'));
+    const body = raw.filter((l) => !(l.trim().startsWith('#') && firstKey && indentOf(l) < indentOf(firstKey)));
     const keyIndent = Math.min(...body.filter((l) => l.trim() !== '').map(indentOf));
+    if (firstKey && keyIndent < indentOf(firstKey)) {
+      throw new Error(
+        `step at line ${start + 1}: a line is indented less than the step's first key `
+        + `(${JSON.stringify(body.find((l) => l.trim() !== '' && indentOf(l) < indentOf(firstKey)).trim())}). `
+        + 'This reader does not fold multi-line scalars, and reading the step without folding would move its '
+        + 'key depth -- extend the reader instead of deleting the case that failed.',
+      );
+    }
+    const text = body.join('\n');
     const name = body
       .find((l) => indentOf(l) === keyIndent && /^\s*name:(\s|$)/.test(l))
       ?.replace(/^\s*name:\s*/, '')
@@ -323,17 +366,23 @@ function blockScalarBody(lines, headerIdx, describe) {
  */
 const KEY_PROBE = (key) => new RegExp(`^\\s*(['"]?)${key}\\1\\s*:(\\s|$)`);
 
+// The value on a key line, with the (possibly quoted) key and trailing space
+// stripped; and the value starts that are a block header, a tag, an anchor or
+// an alias. Shared by `stepScalar` and `stepScalarOf` so the two cannot drift.
+const keyLineValue = (line, key) => line.replace(new RegExp(`^\\s*(['"]?)${key}\\1\\s*:\\s*`), '').replace(/\s+$/, '');
+const NOT_ONE_LINE_VALUE = /^[|>&*!]/;
+
 function stepScalar(step, key) {
   const lines = step.body.split('\n');
   const idx = structuralLineIdxs(lines).find((i) => KEY_PROBE(key).test(lines[i])) ?? -1;
   if (idx === -1) throw new MissingStepKeyError(step, key);
 
-  const value = lines[idx].replace(new RegExp(`^\\s*(['"]?)${key}\\1\\s*:\\s*`), '').replace(/\s+$/, '');
+  const value = keyLineValue(lines[idx], key);
   const where = `step ${JSON.stringify(step.name)} ${key}: block`;
 
   if (value === '' || BLOCK_SCALAR_HEADER.test(value)) return blockScalarBody(lines, idx, where);
 
-  if (/^[|>&*!]/.test(value)) {
+  if (NOT_ONE_LINE_VALUE.test(value)) {
     throw new Error(
       `unrecognised ${key}: scalar header in step ${JSON.stringify(step.name)}: ${JSON.stringify(value)}. `
       + 'This helper does not understand it, and returning it as the body would put whatever it introduces '
@@ -341,6 +390,96 @@ function stepScalar(step, key) {
     );
   }
 
+  inlineScalarMustEndOnItsLine(lines, idx, value, `${key}: in step ${JSON.stringify(step.name)}`);
+  return value;
+}
+
+function refuseInline(where, why) {
+  throw new Error(
+    `${where}: ${why}. This helper returns an inline value only when it is the whole value, and returning `
+    + 'part of it would hand every check that reads it a condition or body other than the one GitHub runs '
+    + '-- write the value on one line, or extend the helper instead of deleting the case.',
+  );
+}
+
+/**
+ * An inline value is returned only when it is the WHOLE value: one line, no
+ * comment, a quoted scalar closed where the line ends. Every other inline
+ * shape throws.
+ *
+ * Plain scalars may continue onto more-indented lines, and YAML (and so GitHub)
+ * folds those lines into the value. This helper used to return the key line
+ * alone, so
+ *
+ *     if: <gate> && contains(<version>, 'beta')
+ *       || github.event_name == 'workflow_dispatch'
+ *
+ * was read as the gated condition while GitHub ran the bypass -- 571/571 green
+ * on the evaluated #39 check that reads `if:` through this helper
+ * (abofs/stonyx-workflows#61, Convention round 2). A quoted scalar may span
+ * lines the same way, and a trailing ` # comment` is not part of the value
+ * either. Folding is YAML's job and this file does not implement YAML, so each
+ * of these shapes is refused rather than half-read.
+ */
+function inlineScalarMustEndOnItsLine(lines, idx, value, where) {
+  const refuse = (why) => refuseInline(where, why);
+
+  const next = lines.slice(idx + 1).find((l) => l.trim() !== '');
+  if (next !== undefined && indentOf(next) > indentOf(lines[idx])) {
+    refuse(`the inline value continues onto the next line (${JSON.stringify(next.trim())})`);
+  }
+
+  const quote = value[0];
+  if (quote === "'" || quote === '"') {
+    let j = 1;
+    for (; j < value.length; j++) {
+      if (quote === '"' && value[j] === '\\') { j++; continue; }
+      if (value[j] === quote) {
+        if (quote === "'" && value[j + 1] === "'") { j++; continue; }
+        break;
+      }
+    }
+    if (j >= value.length) refuse('the quoted value is not closed on its own line');
+    if (value.slice(j + 1).trim() !== '') refuse(`text follows the closing quote (${JSON.stringify(value.slice(j + 1).trim())})`);
+    return;
+  }
+
+  if (/(^|\s)#/.test(value)) refuse('the line carries a # comment, which is not part of the value');
+}
+
+/**
+ * A scalar key the step itself declares (`if:`, `id:`), as written -- quotes
+ * and `${{ }}` intact. Only the step's OWN key depth counts: a `with: { if: ...
+ * }` input is not the step's condition. Returns null when the step has no
+ * such key and `optional` is set; throws MissingStepKeyError otherwise.
+ *
+ * ONE LINE OR A THROW. This is what the #39/#60 check and the #60 simulator
+ * read conditions through, and it accepts exactly the shapes the step-shape
+ * allowlist (test/helpers/step-shape.js) admits for them: a single-line plain
+ * or quoted scalar, closed on its line, nothing after it, written once. A
+ * block scalar, a next-line value, a duplicate key, and -- for `if:` -- a
+ * single-quoted value all throw. It used to fold block scalars, and each
+ * round of review found a block or multi-line shape it read differently from
+ * GitHub (a `>-` body that is one quoted literal to GitHub, but the gated
+ * condition to this reader, #61 Framework round 3); none of the live files
+ * uses one, so the capability is gone rather than patched.
+ */
+export function stepScalarOf(step, key, { optional = false } = {}) {
+  const lines = step.body.split('\n');
+  const keyIndent = Math.min(...lines.filter((l) => l.trim() !== '').map(indentOf));
+  const idxs = structuralLineIdxs(lines).filter((i) => indentOf(lines[i]) === keyIndent && KEY_PROBE(key).test(lines[i]));
+  if (idxs.length === 0) {
+    if (optional) return null;
+    throw new MissingStepKeyError(step, key);
+  }
+  const where = `${key}: in step ${JSON.stringify(step.name)}`;
+  if (idxs.length > 1) refuseInline(where, `the key appears ${idxs.length} times, and YAML readers disagree on which one wins`);
+  const value = keyLineValue(lines[idxs[0]], key);
+  if (value === '' || NOT_ONE_LINE_VALUE.test(value)) {
+    refuseInline(where, `${JSON.stringify(value)} is not a one-line value (a block scalar, a next-line value, a tag, an anchor or an alias)`);
+  }
+  if (key === 'if' && value.startsWith("'")) refuseInline(where, 'a single-quoted if: is not read; write it plain or double-quoted');
+  inlineScalarMustEndOnItsLine(lines, idxs[0], value, where);
   return value;
 }
 
@@ -451,9 +590,16 @@ export function envOf(step) {
     const match = lines[i].match(/^\s*([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
     if (!match) throw new Error(`unrecognised env: entry in step ${JSON.stringify(stepName)}: ${lines[i]}`);
     const value = match[2].trim();
-    env[match[1]] = BLOCK_SCALAR_HEADER.test(value)
-      ? blockScalarBody(lines, i, `step ${JSON.stringify(stepName)} env: value ${match[1]}`)
-      : value;
+    const where = `step ${JSON.stringify(stepName)} env: value ${match[1]}`;
+    if (BLOCK_SCALAR_HEADER.test(value)) {
+      env[match[1]] = blockScalarBody(lines, i, where);
+      continue;
+    }
+    // The same half-read stepScalar refuses: a plain value continued onto the
+    // next line is folded by YAML, and returning the first line would hand the
+    // #60 simulator an env GitHub never sets (#61, Convention round 2).
+    inlineScalarMustEndOnItsLine(lines, i, value, where);
+    env[match[1]] = value;
   }
   return env;
 }
