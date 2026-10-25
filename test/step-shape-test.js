@@ -130,6 +130,18 @@ describe('workflow step shape allowlist (#61)', () => {
     'if: ~': [BETA_IF, '        if: ~', 'if', /null, boolean or number/, 'beta'],
     'if: TRUE': [BETA_IF, '        if: TRUE', 'if', /null, boolean or number/, 'beta'],
     'if: 0': [BETA_IF, '        if: 0', 'if', /null, boolean or number/, 'beta'],
+    // Test Coverage r4 W3, SM3: an own key after a run: | body is still read as
+    // an own key. YAML reads this shell: as "bash {0} if: ... x: y" and the
+    // step as having no if: at all.
+    'unclosed quoted own key after a run: | body absorbs the if: line': [
+      /^ {8}if: steps\.release-gate[^\n]*'beta'\)\n {8}run: (pnpm publish [^\n]*--tag beta [^\n]*)$/,
+      `        run: |\n          $1\n        shell: "bash {0}\n${BETA_IF}\n        x: y"`, 'shell', /double-quoted value must close/, 'beta'],
+    // SM8: an escaped quote does not close a double-quoted value.
+    'double-quoted value ending in \\" absorbs the if: line': [/^ {6}- name: Publish to NPM \(beta\)$/,
+      `      - name: "Publish to NPM (beta)\\"\n${BETA_IF}\n        x: y"`, 'name', /double-quoted value must close/, '"Publish to NPM (beta)\\"'],
+    // SM9: env: children are held to the same one-line shapes.
+    'unclosed quote under env: absorbs the if: line': [BETA_IF,
+      `        env:\n          NOTE: "x\n${BETA_IF}\n          x: y"`, 'env.NOTE', /double-quoted value must close/, 'beta'],
   };
 
   test('every bypass shape from rounds 2 to 4 is refused, naming the step, the key and the rule', () => {
