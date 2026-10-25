@@ -1,0 +1,96 @@
+name: Reusable Cascade Dispatch
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: 'Name of the package that was just published'
+        type: string
+        required: true
+      published-version:
+        description: 'Version that was just published'
+        type: string
+        required: true
+    secrets:
+      CASCADE_PAT:
+        required: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout stonyx-workflows (for dependency map)
+        uses: actions/checkout@v4
+        with:
+          repository: abofs/stonyx-workflows
+          ref: main
+          token: ${{ secrets.CASCADE_PAT }}
+          # The org-wide CASCADE_PAT again. This job runs no consumer code, so
+          # the exposure here is smaller than npm-publish.yml's -- but the
+          # dispatch step below already passes the PAT explicitly as
+          # `github-token:`, so nothing in this job reads it from .git/config
+          # and persisting it buys nothing (abofs/stonyx-workflows#35).
+          persist-credentials: false
+
+      - name: Dispatch to downstream dependents
+        uses: actions/github-script@v7
+        env:
+          PACKAGE_NAME: ${{ inputs.package-name }}
+          PUBLISHED_VERSION: ${{ inputs.published-version }}
+        with:
+          github-token: ${{ secrets.CASCADE_PAT }}
+          script: |
+            const fs = require('fs');
+            const depMap = JSON.parse(fs.readFileSync('dependency-map.json', 'utf8'));
+
+            // These two values originate in a consumer's package.json and reach
+            // this step through workflow_call inputs. They are read from the
+            // step env rather than interpolated as a GitHub Actions expression:
+            // the runner substitutes those expressions into this source before
+            // the script is parsed, and this script holds the org-level
+            // CASCADE_PAT, so an interpolation here is a whole-org credential,
+            // not a repo-bound one (abofs/stonyx-workflows#32). No expression
+            // may appear below.
+            const packageName = process.env.PACKAGE_NAME;
+            const publishedVersion = process.env.PUBLISHED_VERSION;
+
+            // The same grammar the four npm-publish.yml validators enforce,
+            // including the 214-character npm bound. The copies are pinned
+            // string-identical by test/injection-test.js so this one cannot
+            // drift out of step with them.
+            if (typeof packageName !== 'string' || packageName.length === 0 || packageName.length > 214 ||
+                !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(packageName)) {
+              throw new Error(`Refusing to cascade: ${JSON.stringify(packageName)} is not a valid npm package name`);
+            }
+            if (typeof publishedVersion !== 'string' ||
+                !/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(publishedVersion)) {
+              throw new Error(`Refusing to cascade: ${JSON.stringify(publishedVersion)} is not a valid semver version`);
+            }
+
+            const entry = depMap[packageName];
+            if (!entry || !entry.dependents || entry.dependents.length === 0) {
+              console.log(`No downstream dependents for ${packageName}`);
+              return;
+            }
+
+            // Deduplicate by repo (a repo may appear multiple times if it depends on the package in both sections)
+            const uniqueRepos = [...new Set(entry.dependents.map(d => d.repo))];
+
+            console.log(`Dispatching cascade-publish to ${uniqueRepos.length} repo(s) for ${packageName}@${publishedVersion}`);
+
+            for (const repo of uniqueRepos) {
+              const [owner, repoName] = repo.split('/');
+              console.log(`  -> ${repo}`);
+              await github.rest.repos.createDispatchEvent({
+                owner,
+                repo: repoName,
+                event_type: 'cascade-publish',
+                client_payload: {
+                  source_package: packageName,
+                  source_version: publishedVersion
+                }
+              });
+            }
+
+            console.log('Cascade dispatch complete.');
