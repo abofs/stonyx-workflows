@@ -1085,16 +1085,34 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
   // `if:` is unconditional and evaluated as such, so dropping the condition
   // reds too.
   //
-  // The value domain: these expressions only compare paths to literals or to
-  // each other (==, !=), test substrings of literals (contains) and test
-  // truthiness. So their outcome depends only on which literals a value equals
-  // or contains. The domain is null, '', a value matching no literal, and one
-  // value per SUBSET of the string literals present (each subset's literals
-  // joined by a NUL), which realises every equality and containment pattern
-  // except a literal being a substring of another -- an overlap the literals
-  // themselves already exhibit. Booleans are deliberately absent: a path
-  // compared with `true`/`false` makes the evaluator throw (it does not do
-  // GitHub's number coercion), which reds here rather than passing.
+  // The value domain, and its real limit. The checker accepts these shapes
+  // only: `==`/`!=` between paths, string literals and null; `!`, `&&`, `||`,
+  // parentheses; truthiness; and `contains(<path>, '<literal>')` -- any other
+  // contains() throws below, because a path as the needle or a literal as the
+  // haystack makes the outcome depend on substrings of a value, which no finite
+  // domain built from the literals realises. Under those shapes a value's
+  // effect is fixed by its PROFILE: null-or-empty, equal to one literal (case-
+  // insensitively), or "contains exactly the literals in S and equals none".
+  // The domain is therefore:
+  //   - null, standing for '' too (the evaluator cannot tell them apart:
+  //     `null == ''`, both falsy, `contains()` reads both as '');
+  //   - each literal itself;
+  //   - for every subset S of the literals, INCLUDING the empty one, a value
+  //     that contains exactly S and equals no literal: a \u0001-style pad, then
+  //     S joined by NUL. Round 2 had only the unpadded join, so "contains
+  //     'beta', is not 'beta', contains no other literal" had no value, and
+  //     `... || contains(github.ref,'beta') && github.ref != 'beta' &&
+  //     !contains(github.ref,'true')` passed (#61, Test Coverage N1);
+  //   - as many distinct pads per subset as there are paths, so any pattern
+  //     of path-vs-path equality among same-profile values is realisable.
+  //     One value per profile made `head_ref != base_ref` with equal profiles
+  //     unsatisfiable, and that bypass passed too (N12).
+  // That is complete for the accepted shapes when no literal contains a NUL
+  // or a pad character. It is NOT a model of a context whose real value is a
+  // boolean, a number or an object: every path is assigned a string or null,
+  // so GitHub's number coercion of such a value (`github.event.forced ==
+  // 'true'` is false there) is outside it. The evaluator throws on comparing
+  // a path to a boolean literal; nothing else here would notice.
   const LITERALS_CAP = 10;
   const ASSIGNMENTS_CAP = 2_000_000;
 
@@ -1106,6 +1124,13 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
       if (t.type === 'str') literals.add(t.value);
       if (t.type === 'ident' && !['true', 'false', 'null'].includes(t.value)
         && !(tokens[i + 1] && tokens[i + 1].value === '(')) paths.add(t.value);
+      if (t.type === 'ident' && t.value === 'contains') {
+        const [open, haystack, comma, needle, close] = tokens.slice(i + 1, i + 6);
+        const isPath = haystack && haystack.type === 'ident' && !['true', 'false', 'null'].includes(haystack.value);
+        if (!(open?.value === '(' && isPath && comma?.value === ',' && needle?.type === 'str' && close?.value === ')')) {
+          throw new Error(`the publish-implies-guard checker models contains(<path>, '<literal>') only: ${src}`);
+        }
+      }
     });
     return { paths, literals };
   }
@@ -1148,11 +1173,14 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     }
     const lits = [...literals];
     assert.ok(lits.length <= LITERALS_CAP, `${lits.length} string literals; the subset domain is capped at ${LITERALS_CAP}`);
-    const domain = [null, '', '\u0001none'];
-    for (let mask = 1; mask < (1 << lits.length); mask++) {
-      domain.push(lits.filter((_, i) => mask & (1 << i)).join('\u0000'));
-    }
     const pathList = [...paths];
+    const domain = [null, ...lits];
+    for (let pad = 1; pad <= Math.max(1, pathList.length); pad++) {
+      for (let mask = 0; mask < (1 << lits.length); mask++) {
+        domain.push(String.fromCharCode(pad) + lits.filter((_, i) => mask & (1 << i)).join('\u0000'));
+      }
+    }
+    assert.ok(lits.every((l) => !/[\u0000-\u001f]/.test(l)), 'a literal carries a NUL or pad character; the domain cannot realise it');
     assert.ok(domain.length ** pathList.length <= ASSIGNMENTS_CAP,
       `${domain.length}^${pathList.length} assignments exceeds the cap; narrow the domain rather than sampling it`);
 
@@ -1297,6 +1325,47 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     }
     assert.equal(publishWithoutGuard(`${RELEASE_GATE} && ${stable}`, RELEASE_GATE).assignment, null);
     assert.equal(publishWithoutGuard(`(${RELEASE_GATE}) && (${stable} || github.event_name == 'x')`, RELEASE_GATE).assignment, null);
+  });
+
+  // The DOMAIN can fail: each case below is witnessed by exactly one part of
+  // it, so dropping that part reds here rather than silently narrowing the
+  // check (#61, Test Coverage round 2, N1/N2/N3/N12). Each has a gated sibling
+  // that must produce no witness, so these are not red because everything is.
+  test('the checker domain realises each profile its comment claims, and reads the guard as well as the publish (#61)', () => {
+    const beta = "contains(steps.package-version.outputs.version, 'beta')";
+    const cases = [
+      // N1 -- needs "contains 'beta', equals no literal, contains no other": a padded subset.
+      ["contains(github.ref, 'beta') && github.ref != 'beta' && !contains(github.ref, 'true')", RELEASE_GATE],
+      // N12 -- needs two DIFFERENT values with the same profile: one pad per path.
+      ["github.head_ref != github.base_ref && github.head_ref && github.base_ref && !contains(github.head_ref, 'true') "
+        + "&& !contains(github.base_ref, 'true') && !contains(github.head_ref, 'beta') && !contains(github.base_ref, 'beta')",
+      RELEASE_GATE],
+      // N2 -- needs a truthy value containing no literal: the padded EMPTY subset.
+      ["github.ref && !contains(github.ref, 'true')", RELEASE_GATE],
+      // N4 -- a truthy value equal to no literal.
+      ["steps.release-gate.outputs.release && steps.release-gate.outputs.release != 'true'", RELEASE_GATE],
+    ].map(([bypass, guard]) => [`${RELEASE_GATE} && ${beta} || ${bypass}`, guard]);
+    // N3 -- a path, and then a literal, that only the GUARD reads.
+    cases.push([RELEASE_GATE, `${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`]);
+    cases.push([`${RELEASE_GATE} && github.event_name`, `${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`]);
+    for (const [publish, guard] of cases) {
+      assert.notEqual(publishWithoutGuard(publish, guard).assignment, null, `no witness for ${publish} (guard: ${guard})`);
+    }
+
+    for (const gated of [
+      `${RELEASE_GATE} && contains(github.ref, 'beta') && github.ref != 'beta' && !contains(github.ref, 'true')`,
+      `${RELEASE_GATE} && github.head_ref != github.base_ref && github.head_ref`,
+      `${RELEASE_GATE} && github.ref && !contains(github.ref, 'true')`,
+    ]) {
+      assert.equal(publishWithoutGuard(gated, RELEASE_GATE).assignment, null, `false witness for ${gated}`);
+    }
+    assert.equal(publishWithoutGuard(`${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`,
+      `${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`).assignment, null);
+
+    // Outside the model: refused, not answered.
+    for (const outside of ["contains(github.ref, github.head_ref)", "contains('refs/heads/beta', github.ref)"]) {
+      assert.throws(() => publishWithoutGuard(`${RELEASE_GATE} || ${outside}`, RELEASE_GATE), /models contains\(<path>/);
+    }
   });
 
   test('neither the guard nor any publish step is advisory', () => {
