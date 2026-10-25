@@ -1348,9 +1348,9 @@ describe('AC5 -- no publish path can bypass the guard (#39)', () => {
     // N3 -- a path, and then a literal, that only the GUARD reads.
     cases.push([RELEASE_GATE, `${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`]);
     cases.push([`${RELEASE_GATE} && github.event_name`, `${RELEASE_GATE} && github.event_name != 'workflow_dispatch'`]);
-    for (const [publish, guard] of cases) {
-      assert.notEqual(publishWithoutGuard(publish, guard).assignment, null, `no witness for ${publish} (guard: ${guard})`);
-    }
+    const unwitnessed = cases.filter(([publish, guard]) => publishWithoutGuard(publish, guard).assignment === null)
+      .map(([publish, guard]) => `no witness for ${publish} (guard: ${guard})`);
+    assert.deepEqual(unwitnessed, []);
 
     for (const gated of [
       `${RELEASE_GATE} && contains(github.ref, 'beta') && github.ref != 'beta' && !contains(github.ref, 'true')`,
