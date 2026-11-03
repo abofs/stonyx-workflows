@@ -1,66 +1,16 @@
-// The shape allowlist for workflow steps (#61, introduced in the round-3 fix set).
-//
-// The #39/#60 publish-implies-guard check and the #60 job simulator read `if:`,
-// `id:`, `env:` and `run:` through `workflow-yaml.js`, a hand-written reader.
-// Review rounds on #61 found four YAML shapes that reader read differently
-// from GitHub -- a plain `if:` continued onto the next line, a
-// `>-` block whose body is a quoted string, an unclosed quoted `name:` that
-// swallows the `if:` line, a duplicate `if:` -- and in every case the check
-// evaluated a condition GitHub never runs. Patching the reader one shape at a
-// time does not end that, so this file removes the shapes instead: a workflow
-// step may only be written in the few value shapes the live files already
-// use, and anything else is a red that names the step, the key and the rule.
-//
-// Inside a step, every own key (`name`, `id`, `if`, `uses`, `run`, ...) and
-// every key under `env:` and `with:` must be:
-//   - a complete single-line scalar: plain, or single- or double-quoted and
-//     closed on that line, with nothing after it -- or
-//   - for `run:` (and `script:` under `with:`) only, a `|` or `|-` block.
-// `env:` and `with:` may open a one-level mapping. `if:` must be a
-// single-line plain or double-quoted value with no backslash, and not a plain
-// value YAML resolves to null, a boolean or a number. A key may appear once per
-// step (and once per mapping), and a case variant of a step key (`If:`) is
-// refused. The steps must be indented under `steps:`; a compact sequence (`- `
-// at the `steps:` column) is refused. Blank lines and `#` comment lines are
-// skipped; any other line in a step is refused.
-//
-// File-wide, outside `run:`/`script:` block bodies, it also refuses every form
-// that can spell a `steps` key, or a whole job, on a line it would not walk: a
-// flow collection (`{` or `[`, except a one-line `[word, word]` list), a quoted
-// key, an explicit `? key`, a tag, anchor or alias on a key or value, and a
-// quoted value not closed on its line.
-//
-// THIS FILE SHARES NO CODE WITH `workflow-yaml.js` AND LOADS NOTHING. If it
-// were fed by that reader, a shape the reader mis-tokenises would be
-// mis-tokenised here too and pass both. It works on raw lines, by column, with
-// its own few rules. It first refuses, anywhere in the file, every character
-// that could make its line or column count differ from YAML's: YAML (libyaml,
-// and the runner's parser) also breaks lines at CR, NEL, U+2028 and U+2029, a
-// tab is never indentation, and this check counts spaces only. Any other
-// whitespace and control character goes with them, so `\s` in the rules below
-// means the space it looks like.
 
 const STRUCTURAL_STEPS = /^( *)steps:\s*$/;
 const ANY_STEPS = /^\s*(?:-\s+)?["']?steps["']?\s*:/;
 const KEY_LINE = /^([A-Za-z_][A-Za-z0-9_-]*):(?: +(.*))?$/;
 const BLOCK = new Set(['|', '|-']);
 const FLOW_WORDS = /^\[[\w.*/-]+(?:, [\w.*/-]+)*\]$/;
-// The step keys GitHub reads. A key that matches one of them case-insensitively
-// but not exactly (`If:`) is refused: the check would not read it as the key.
 const STEP_KEYS = ['name', 'id', 'if', 'uses', 'run', 'shell', 'with', 'env', 'working-directory',
   'continue-on-error', 'timeout-minutes'];
-// A plain `if:` YAML resolves to something other than a string: null, a
-// boolean (YAML 1.2 true/false in any case, and the YAML 1.1 yes/no/on/off),
-// or a number (YAML 1.2 and 1.1 forms, including 1.1's `1:20`). The evaluator reads these as JavaScript values; GitHub coerces
-// them, and a null coerced to "" may run as success().
 const NON_STRING_IF = new RegExp('^(?:null|~|true|false|yes|no|on|off|[-+]?\\.inf|\\.nan|0x[0-9a-f_]+|0o[0-7_]+|0b[01_]+'
   + '|[-+]?(?:[0-9][0-9_:]*(?:\\.[0-9_]*)?|\\.[0-9_]+)(?:e[-+]?[0-9]+)?)$', 'i');
 
 const spaces = (line) => line.match(/^ */)[0].length;
 
-/**
- * The shape of a one-line value, or the reason it is not one this check reads.
- */
 function scalarShape(v) {
   if (v.startsWith('"')) {
     return /^"(?:[^"\\]|\\.)*"$/.test(v)
@@ -80,14 +30,6 @@ function scalarShape(v) {
   return { shape: 'plain' };
 }
 
-/**
- * Every step in `text`, and every way one of them breaks the allowlist.
- *
- * Returns `{ steps, violations }`: `steps` is `[{ line, name }]` in file order
- * (`name` raw, as written), so a caller can cross-check the population against
- * another reader; `violations` is an array of messages, empty when the file is
- * inside the allowlist.
- */
 export function stepShapes(text, file = '<workflow>') {
   const lines = text.split('\n');
   const steps = [];
@@ -107,13 +49,6 @@ export function stepShapes(text, file = '<workflow>') {
   });
   if (found.length > 0) return { steps, violations: found.map((v) => format(file, v)) };
 
-  // File-wide, outside `run:`/`script:` block bodies: the YAML forms that can
-  // spell a `steps` key, or a whole job, on a line `ANY_STEPS` and
-  // `STRUCTURAL_STEPS` never see -- `{runs-on: x, steps: [...]}`, `"ste\x70s":`,
-  // `? steps`, `!!str steps:`, `&a steps:` -- and the unclosed quote that could
-  // hide a `run: |` header from the body skip below. None of them is in a live
-  // file; the one flow collection that is (`branches: [main]`) is admitted in
-  // exactly that form.
   let fileBody = null;
   lines.forEach((line, i) => {
     if (line.trim() === '') return;
@@ -153,8 +88,8 @@ export function stepShapes(text, file = '<workflow>') {
     const stepsIndent = opener[1].length;
     let listIndent = null;
     let step = null;
-    let mapping = null; // { key, childCol, keys }
-    let bodyIndent = null; // inside a `|` block whose key sits at this column
+    let mapping = null;
+    let bodyIndent = null;
 
     const refuse = (i, key, rule) => found.push({ step, line: i, key, rule });
 

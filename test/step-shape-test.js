@@ -5,17 +5,6 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { stepShapes } from './helpers/step-shape.js';
 import { parseSteps } from './helpers/workflow-yaml.js';
 
-// abofs/stonyx-workflows#61, round-3 fix set. The evaluated #39/#60 publish-implies-
-// guard check is only as true as the `if:` it is handed, and three rounds each
-// found a YAML shape the hand-written reader read differently from GitHub. The
-// fix is not a fourth reader patch: `test/helpers/step-shape.js` refuses every
-// step shape outside the few the live files use, so the reader only ever sees
-// shapes it reads correctly. Its rules are in its header.
-//
-// The allowlist reads the REAL workflow files only -- every file in
-// `.github/workflows/`, no extension filter. Synthetic fixtures elsewhere in the
-// suite deliberately build broken shapes (duplicate `run:` keys in the #37
-// sweep tests, for one) and are not workflows anyone runs.
 
 const WORKFLOWS = new URL('../.github/workflows/', import.meta.url);
 const files = readdirSync(WORKFLOWS).sort();
@@ -30,14 +19,6 @@ const GATE_BETA = BETA_IF.replace('        if: ', '');
 const GATE_STABLE = STABLE_IF.replace('        if: ', '').slice(1, -1);
 const BYPASS = "|| github.event_name == 'workflow_dispatch'";
 
-/**
- * `npmPublish` with `from` (which must occur exactly once) replaced by `to`.
- *
- * `BETA_IF`/`STABLE_IF` as an anchor mean "that publish step's one-line `if:`,
- * WHATEVER IT SAYS": the step's name line followed by any one-line `if:`, so
- * an edit to a live condition reds the evaluated check and not these cases.
- * (`BETA_IF`/`STABLE_IF` inside `to` are injected text, not anchors.)
- */
 function mutate(from, to) {
   for (const [ifLine, nameLine] of [[BETA_IF, BETA_NAME], [STABLE_IF, STABLE_NAME]]) {
     if (from !== ifLine) continue;
@@ -66,8 +47,6 @@ describe('workflow step shape allowlist (#61)', () => {
     }
   });
 
-  // A cross-check, not a dependency: the two share no code, so a step one of
-  // them cannot see and the other can reds here.
   test('the allowlist and parseSteps find the same steps in every live workflow', () => {
     for (const file of files) {
       assert.deepEqual(stepShapes(read(file), file).steps.map((s) => s.name), parseSteps(read(file)).map((s) => s.name), file);
@@ -85,21 +64,12 @@ describe('workflow step shape allowlist (#61)', () => {
     }
   });
 
-  // Each shape a review round used to slip a condition past the reader, applied
-  // to the live file. Each must be refused with a message naming the step, the
-  // key and the rule. Where a case is also caught by the evaluated check in
-  // tarball-guard-test.js, that is noted; the allowlist does not depend on it.
   const RED = {
-    // Framework r3 HIGH: GitHub reads one quoted literal (always truthy); the
-    // old reader stripped the quotes and evaluated the gated condition.
     'block scalar with a quoted body, stable publish': [STABLE_IF,
       `        if: >-\n          '${GATE_STABLE.replaceAll("'", "''")}'`, 'if', /block scalar is refused/, 'stable'],
-    // Test Coverage r3 SW1: YAML reads this step as having no if: at all.
     'unclosed quoted name absorbs the if: line': [/^ {6}- name: Publish to NPM \(beta\)$/,
       `      - name: "Publish to NPM (beta)\n${BETA_IF}\n        "`, 'name', /double-quoted value must close on its own line/, '"Publish to NPM (beta)'],
-    // Convention r3 NIT: the reader took the first, YAML the last.
     'duplicate if:': [BETA_IF, `${BETA_IF}\n        if: ${GATE_BETA} ${BYPASS}`, 'if', /appears twice/, 'beta'],
-    // Convention r2 HIGH.
     'plain if: continued on the next line': [BETA_IF, `${BETA_IF}\n          ${BYPASS}`, null, /continuation of the previous value/, 'beta'],
     'plain if: continued after a comment line': [BETA_IF, `${BETA_IF}\n          # reviewed\n          ${BYPASS}`, null, /continuation/, 'beta'],
     'if: >-': [BETA_IF, `        if: >-\n          ${GATE_BETA}\n          ${BYPASS}`, 'if', /block scalar is refused/, 'beta'],
@@ -124,25 +94,17 @@ describe('workflow step shape allowlist (#61)', () => {
     'single-quoted value not closed': [BETA_IF, `${BETA_IF}\n        id: 'a`, 'id', /single-quoted value must close/, 'beta'],
     'env: nested mapping': [BETA_IF, `${BETA_IF}\n        env:\n          A:\n            B: c`, 'env.A', /nested mapping/, 'beta'],
     'flow-mapping step': [/^ {6}- name: Publish to NPM \(beta\)$/, `      - {name: x, run: npm publish}\n${BETA_NAME}`, null, /not a "key: value" line/, 'none'],
-    // Test Coverage r4 W2: YAML reads a null; the evaluator reads it as false,
-    // and GitHub may coerce it to "" and run the step as success().
     'if: null': [BETA_IF, '        if: null', 'if', /null, boolean or number/, 'beta'],
     'if: ~': [BETA_IF, '        if: ~', 'if', /null, boolean or number/, 'beta'],
     'if: TRUE': [BETA_IF, '        if: TRUE', 'if', /null, boolean or number/, 'beta'],
     'if: 0': [BETA_IF, '        if: 0', 'if', /null, boolean or number/, 'beta'],
-    // Test Coverage r4 W3, SM3: an own key after a run: | body is still read as
-    // an own key. YAML reads this shell: as "bash {0} if: ... x: y", so the
-    // if: line under it is not a key at all.
     'unclosed quoted own key after a run: | body absorbs the if: line': [
       /^ {8}run: (pnpm publish [^\n]*--tag beta [^\n]*)$/,
       `        run: |\n          $1\n        shell: "bash {0}\n${BETA_IF}\n        x: y"`, 'shell', /double-quoted value must close/, 'beta'],
-    // SM8: an escaped quote does not close a double-quoted value.
     'double-quoted value ending in \\" absorbs the if: line': [/^ {6}- name: Publish to NPM \(beta\)$/,
       `      - name: "Publish to NPM (beta)\\"\n${BETA_IF}\n        x: y"`, 'name', /double-quoted value must close/, '"Publish to NPM (beta)\\"'],
-    // SM9: env: children are held to the same one-line shapes.
     'unclosed quote under env: absorbs the if: line': [BETA_IF,
       `        env:\n          NOTE: "x\n${BETA_IF}\n          x: y"`, 'env.NOTE', /double-quoted value must close/, 'beta'],
-    // Convention r4 NIT: a case variant of a key the check reads.
     'If: case variant': [BETA_IF, `${BETA_IF}\n        If: always()`, 'If', /case variant of if:/, 'beta'],
   };
 
@@ -160,7 +122,6 @@ describe('workflow step shape allowlist (#61)', () => {
   test('a character YAML reads as a line break, or as non-space whitespace, is refused before any step is read', () => {
     for (const [label, ch] of [['LS', '\u2028'], ['PS', '\u2029'], ['NEL', '\u0085'], ['CR', '\r'], ['TAB', '\t'],
       ['NBSP', '\u00a0'], ['BOM', '\ufeff']]) {
-      // The runner breaks the line at LS/PS/NEL/CR, so this hides a second if: inside the first one's line.
       const { violations } = stepShapes(mutate(BETA_IF, `${BETA_IF}${ch}        if: true`), 'npm-publish.yml');
       assert.ok(violations.length > 0 && violations.every((v) => /control character or whitespace other than a space/.test(v)),
         `${label}: ${JSON.stringify(violations)}`);
@@ -174,11 +135,6 @@ describe('workflow step shape allowlist (#61)', () => {
     }
   });
 
-  // Round-4 reviews: each job below is appended to the live npm-publish.yml, and
-  // libyaml (Ruby psych) reads every one of them as a job whose steps run an
-  // unguarded publish. parseSteps sees none of them, so the population
-  // cross-check agrees with the omission; the allowlist must refuse each
-  // itself.
   test('a steps key spelled in a form neither reader walks is refused by the allowlist itself', () => {
     const SNEAK = {
       'compact sequence (Test Coverage W1, Framework W1)': ['  sneaky:\n    runs-on: ubuntu-latest\n    steps:\n'
@@ -195,8 +151,6 @@ describe('workflow step shape allowlist (#61)', () => {
         /tag, anchor or alias on a key/],
       'tagged flow job': ['  sneak: !!map {runs-on: ubuntu-latest, steps: [{run: pnpm publish --access public}]}\n',
         /tag, anchor or alias on a value/],
-      // The body skip trusts a run: | header; one inside an unclosed quote is
-      // not a header, and the flow job after it is structure, not payload.
       'flow job after a run: | header inside an unclosed quote': ['  a: "x\n run: |\n  "\n'
         + '  sneak: {runs-on: ubuntu-latest, steps: [{run: pnpm publish --access public}]}\n', /must close on its own line/],
     };
@@ -220,10 +174,6 @@ describe('workflow step shape allowlist (#61)', () => {
     }
   });
 
-  // The inverse: every shape the allowlist admits, in one synthetic workflow,
-  // reads clean -- including block bodies whose lines look like refused
-  // shapes, which must be skipped as payload. Without this, the reds above
-  // could be red because everything is.
   test('every admitted shape reads clean, and block-scalar payload is not read as structure', () => {
     const wf = [
       'jobs:',

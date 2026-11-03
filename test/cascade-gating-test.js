@@ -10,102 +10,35 @@ import { conditionSource, evaluate, interpolate, truthy } from './helpers/action
 import { dedent, runDispatch } from './helpers/cascade-dispatch.js';
 import { envOf, parseSteps, readWorkflow, runBodyOf, stepScalarOf } from './helpers/workflow-yaml.js';
 
-// Cascade gating, for abofs/stonyx-workflows#60.
-//
-// WHAT THIS SUITE EXECUTES, AND WHAT IT CANNOT.
-//
-// The questions #60 asks are about CONTROL FLOW across a whole job -- which
-// steps run, which do not, and what the job hands to the consumer's `cascade`
-// job -- and they live mostly in step `if:` conditions. Those are GitHub
-// Actions expressions, which have no offline engine. A regex over the `if:`
-// text would pin spellings, not behaviour. So test/helpers/actions-expression.js
-// carries a deliberately small evaluator for the expression subset the two
-// workflows actually use, and it THROWS on anything outside that subset rather
-// than guessing. Its truth table is pinned below, in absolute terms, because
-// every old-vs-new comparison in this file runs both sides through the same
-// evaluator and would cancel an evaluator bug out (#61, Test Coverage HIGH 2).
-//
-// With that, `simulateJob` walks the real `publish` job of a real
-// `npm-publish.yml` text step by step:
-//
-//   - every `if:` is evaluated against a scenario's `github`/`inputs` context
-//     and the outputs of the steps that ran before it;
-//   - every step that has an `id:` (it produces outputs a later `if:` or env
-//     reads), every `Bump version` step and the dependency-update step (both
-//     rewrite package.json) has its REAL `run:` body executed under bash with stub `npm`/`pnpm`/`git`;
-//   - every other step that would run -- install, tests, pack, publish,
-//     commit/tag/push, GitHub Release, PR comment -- is RECORDED as having run
-//     and not executed. Its side effect is exactly the thing being asserted on,
-//     so "it was selected to run" is the observable;
-//   - the job's `outputs:` are evaluated, and the consumer's `cascade` job is
-//     reproduced by running the real `cascade.yml` dispatch `script:` with a
-//     stub `github` client that records instead of dispatching -- the
-//     test/helpers/cascade-dispatch.js harness test/injection-test.js uses for
-//     #32 S5.
-//
-// What it does NOT model, stated rather than implied: a step failing for an
-// environmental reason (a real `pnpm publish` refusing), GitHub's
-// expression-level type coercions beyond string/boolean/null, and the
-// consumer's `cascade` job `if:` on `main` (`!contains(head_commit.message,
-// '[skip ci]')`), which is consumer-owned and unchanged by #60.
-//
-// "EXACTLY AS TODAY" IS MEASURED, NOT ASSERTED. The pre-#60 workflows are
-// committed as fixtures (main@7fb718b, the branch point), and AC2/AC3/stable
-// run the same scenario against old and new and require the same steps, the
-// same pnpm calls, the same job output and the same dispatches.
 
 const NEW_PUBLISH = readWorkflow('npm-publish.yml');
 const NEW_CASCADE = readWorkflow('cascade.yml');
 
-// The fixtures are pinned by their git object hash, recomputed offline, for the
-// reason test/lift-equivalence-test.js and test/sweep-bypass-test.js give:
-// `git show` is unusable on Self CI's depth-1 checkout, and an unpinned
-// fixture is a mutable file with a commit hash in its name. Editing the
-// baseline is otherwise the cheapest way to make a "behaves exactly as today"
-// red go away. Measured before this pin existed: changing the fixture's
-// `Publish to NPM (stable)` condition left this file 27/27 green
-// (abofs/stonyx-workflows#61, Convention HIGH).
 const FIXTURES = {
-  // `git rev-parse 7fb718b:.github/workflows/npm-publish.yml`
   'npm-publish-7fb718b.yml': '9101da428da52d98641e2b322614c2b6c7e22efb',
-  // `git rev-parse 7fb718b:.github/workflows/cascade.yml`
   'cascade-7fb718b.yml': 'cf4eadd9a6542d690f58ed78ad080050516fd705',
 };
 const fixtureBytes = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
 const OLD_PUBLISH = fixtureBytes('npm-publish-7fb718b.yml').toString('utf8');
 const OLD_CASCADE = fixtureBytes('cascade-7fb718b.yml').toString('utf8');
 
-// ---------------------------------------------------------------------------
-// Step metadata.
-// ---------------------------------------------------------------------------
 
 function hasRun(step) {
   try { runBodyOf(step); return true; } catch { return false; }
 }
 
-/**
- * The `outputs:` mapping of the `publish` job, raw. Keys may be quoted, as
- * workflow-yaml.js's KEY_PROBE allows; a line that is not `key: value` throws
- * rather than being dropped.
- */
 function jobOutputs(text) {
   const job = text.indexOf('\njobs:\n  publish:\n');
   if (job === -1) throw new Error('could not find jobs: > publish:');
   const m = text.slice(job).match(/^ {4}outputs:\n((?: {6}.*\n)+)/m);
   if (!m) throw new Error('could not find the publish job outputs: mapping');
   return Object.fromEntries(m[1].trimEnd().split('\n').map((l) => {
-    // Exactly six spaces: a deeper line is a continuation YAML folds into the
-    // previous value, and reading it as a value of its own (or not at all) is
-    // the half-read #61 Convention round 2 measured on `if:`. So is a comment.
     const kv = l.match(/^ {6}(['"]?)([\w-]+)\1\s*:\s*(\S(?:.*\S)?)\s*$/);
     if (!kv || /(^|\s)#/.test(kv[3])) throw new Error(`unreadable publish job output line: ${JSON.stringify(l)}`);
     return [kv[2], kv[3]];
   }));
 }
 
-// ---------------------------------------------------------------------------
-// The workspace and its stubs.
-// ---------------------------------------------------------------------------
 
 function npmStub(table, logPath) {
   return [
@@ -124,8 +57,6 @@ function npmStub(table, logPath) {
   ].join('\n');
 }
 
-// `pnpm version <x> --no-git-tag-version` really rewrites package.json, which
-// is what `Get package version` later reads. Everything else is logged only.
 function pnpmStub(logPath) {
   return [
     `#!${process.execPath}`,
@@ -147,9 +78,6 @@ function pnpmStub(logPath) {
   ].join('\n');
 }
 
-// The consumer under test: @stonyx/cron, whose one mapped dependent is
-// abofs/stonyx-orm. Both of its Stonyx ranges match the registry below, so a
-// cascade into it changes nothing unless a scenario moves a dist-tag.
 const CRON_PACKAGE = {
   name: '@stonyx/cron',
   version: '0.2.1-beta.173',
@@ -202,14 +130,8 @@ const SCENARIOS = {
   },
 };
 
-// Steps without an `id:` that are executed anyway, because they rewrite
-// package.json and a later executed step reads it.
 const EXECUTED_BY_NAME = /^(Bump version|Update all Stonyx dependencies to latest$)/;
 
-/**
- * Walk the `publish` job of `workflowText` under one scenario. See the header
- * for what is executed and what is only recorded.
- */
 function simulateJob(workflowText, scenario) {
   const workspace = mkdtempSync(join(tmpdir(), 'wf60-sim-'));
   try {
@@ -260,7 +182,6 @@ function simulateJob(workflowText, scenario) {
         writeFileSync(outFile, '');
         const script = join(workspace, 'step.sh');
         writeFileSync(script, dedent(runBodyOf(step)) + '\n');
-        // GitHub's default `run:` shell for a step with no `shell:` key.
         const result = spawnSync('bash', ['--noprofile', '--norc', '-e', script], {
           cwd: workspace,
           encoding: 'utf8',
@@ -297,11 +218,7 @@ function simulateJob(workflowText, scenario) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// The consumer's `cascade` job: the real dispatch script, stub github client.
-// ---------------------------------------------------------------------------
 
-/** The whole consumer `publish.yml`: the publish job, then `cascade: needs: publish`. */
 async function simulateRun({ publish, cascade }, scenarioName) {
   const job = simulateJob(publish, SCENARIOS[scenarioName]);
   const dispatch = job.failure
@@ -319,19 +236,11 @@ const STABLE_TRIO = ['Publish to NPM (stable)', 'Commit version bump and create 
 const BETA_TRIO = ['Publish to NPM (beta)', 'Commit version bump and create tag (beta)', 'Create GitHub Release (beta)'];
 const DERIVATION_STEPS = ['Resolve stonyx-workflows ref', 'Checkout stonyx-workflows (for version derivation script)'];
 
-/**
- * Absolute anchors: what must and must not run, independent of the main@7fb718b
- * baseline. The old-vs-new comparisons cannot see an evaluator bug -- it moves
- * both sides alike -- so each scenario also states its expected steps outright
- * (#61, Test Coverage HIGH 2). Asserted on BOTH sides, so a fixture or
- * evaluator that lost a step reds here, not only in the differential.
- */
 function assertRanAndSkipped(run, { ran, skipped }, label) {
   for (const name of ran) assert.ok(run.ran.includes(name), `${label}: ${name} must run`);
   for (const name of skipped) assert.ok(!run.ran.includes(name), `${label}: ${name} must not run`);
 }
 
-/** The fields "behaves exactly as today" is measured on. */
 function behaviour(run, onlySteps) {
   return {
     ran: onlySteps ? run.ran.filter((n) => onlySteps.includes(n)) : run.ran,
@@ -346,7 +255,6 @@ function behaviour(run, onlySteps) {
 
 const OLD_STEP_NAMES = parseSteps(OLD_PUBLISH).map((s) => s.name);
 
-// ---------------------------------------------------------------------------
 
 describe('#60 harness controls -- the simulation can see the defect it is used to rule out', () => {
   for (const [name, blobSha] of Object.entries(FIXTURES)) {
@@ -357,8 +265,6 @@ describe('#60 harness controls -- the simulation can see the defect it is used t
     });
   }
 
-  // Without these, every "dispatches nothing" assertion below could pass on a
-  // harness that never reaches createDispatchEvent at all.
   test('main@7fb718b: an alpha (pull_request) run publishes an alpha AND dispatches to stonyx-orm', async () => {
     const run = await simulateRun(OLD, 'alpha');
     assert.equal(run.failure, null, run.failure && run.failure.stderr);
@@ -383,10 +289,6 @@ describe('#60 harness controls -- the simulation can see the defect it is used t
     assert.equal(run.packageJson.devDependencies['@stonyx/utils'], '0.2.3-beta.38');
   });
 
-  // The readers that FEED the simulation refuse a value they would half-read
-  // (#61, Convention round 2): a continued plain value is folded by YAML, so
-  // returning its first line would simulate an env or an output GitHub never
-  // produces. The inverse rows read the one-line value as written.
   test('envOf and jobOutputs refuse a continued or commented value, and read a one-line value as written', () => {
     const stepWith = (envLines) => parseSteps(['jobs:', '  j:', '    steps:', '      - name: s', '        env:',
       ...envLines.map((l) => `          ${l}`), '        run: true', ''].join('\n'))[0];
@@ -413,12 +315,6 @@ describe('#60 harness controls -- the simulation can see the defect it is used t
   });
 });
 
-// The evaluator's answers, in absolute terms. Every old-vs-new comparison in
-// this file runs both workflows through the same evaluator, so an evaluator
-// bug changes both sides alike and cancels out; before this table, removing
-// `!` or making `||` always return its right side left the suite 500/500 green
-// (#61, Test Coverage S6/S8). Values are GitHub's documented semantics:
-// https://docs.github.com/en/actions/learn-github-actions/expressions
 describe('#60 harness controls -- the expression evaluator computes GitHub\'s answers', () => {
   const ctx = {
     github: { event_name: 'push', ref_name: 'Main' },
@@ -426,30 +322,22 @@ describe('#60 harness controls -- the expression evaluator computes GitHub\'s an
     inputs: {},
   };
   const TABLE = [
-    // `!` -- falsy is false, null, '', 0; the STRING 'false' is truthy.
     ["!''", true], ["!'x'", false], ['!null', true], ['!true', false], ['!false', true], ["!'false'", false],
     ['!steps.gate.outputs.missing', true], ["!!'x'", true],
-    // `&&` and `||` return an operand, not a boolean.
     ["'a' && 'b'", 'b'], ["'' && 'b'", ''], ["null && 'b'", null], ["'a' && ''", ''],
     ["'a' || 'b'", 'a'], ["'' || 'b'", 'b'], ["null || ''", ''], ["'' || null", null],
-    // Precedence: ! over == over && over ||.
     ["'' && 'x' || 'y'", 'y'], ["'a' || 'b' && ''", 'a'], ["!'' && 'z'", 'z'], ["!'a' == false", true],
     ["('' || 'a') && 'b'", 'b'], ["'' && ('x' || 'y')", ''],
-    // `==` / `!=` -- case-insensitive strings, null equals ''.
     ["'ABC' == 'abc'", true], ["'a' == 'b'", false], ["'a' != 'b'", true], ["'a' != 'A'", false],
     ["null == ''", true], ["null == 'x'", false], ['null == null', true], ['true == true', true], ['true != false', true],
     ["github.ref_name == 'main'", true], ["github.event_name != 'push'", false],
     ["steps.gate.outputs.release == 'true'", true], ["steps.gate.outputs.empty == 'true'", false],
     ["steps.nope.outputs.release == 'true'", false], ["steps.nope.outputs.release == ''", true],
-    // Dereferencing a string is null, not a JS property of it; a non-numeric
-    // string still compares to null without coercion.
     ['steps.gate.outputs.release.length', null], ["null == 'x0'", false], ["null == 'refs/heads/0'", false],
-    // contains() -- case-insensitive substring, null is ''.
     ["contains('Hello', 'ELL')", true], ["contains('abc', 'd')", false], ["contains(null, 'a')", false],
     ["contains('', '')", true], ["contains(github.ref_name, 'AI')", true],
     ["!contains('0.2.1', 'alpha') && !contains('0.2.1', 'beta')", true],
     ["!contains('0.2.1-beta.3', 'alpha') && !contains('0.2.1-beta.3', 'beta')", false],
-    // The real workflow's `(alpha || beta)` shape.
     ["'x' == 'y' || 'beta' == 'beta'", true], ["'x' == 'y' || 'a' == 'b'", false],
   ];
   for (const [src, expected] of TABLE) {
@@ -458,8 +346,6 @@ describe('#60 harness controls -- the expression evaluator computes GitHub\'s an
     });
   }
 
-  // Inputs GitHub rejects, or answers by a number coercion this evaluator does
-  // not implement. Each must THROW: an answer here would be a guess.
   for (const [src, pattern] of [
     ["contains('a' 'b')", /expected \)/],
     ["contains('abc', 'b', 'zzz')", /takes 2 argument/],
@@ -471,10 +357,8 @@ describe('#60 harness controls -- the expression evaluator computes GitHub\'s an
     ["'' == false", /number coercion/],
     ["'true' == true", /number coercion/],
     ["null == '0'", /number coercion/],
-    // The runner trims and uses Double.TryParse, so each of these is 0 there.
     ["null == ' '", /number coercion/], ["null == '00'", /number coercion/], ["null == '+0'", /number coercion/],
     ["null == '.0'", /number coercion/], ["null == '0.'", /number coercion/], ["null == '0o0'", /number coercion/],
-    // Context keys are case-insensitive in the runner; a case variant is refused.
     ["github.Event_Name == 'push'", /case-insensitively/], ["steps.GATE.outputs.release", /case-insensitively/],
     ['contains(true, \'t\')', /does not implement contains/],
   ]) {
@@ -562,7 +446,6 @@ describe('#60 AC3 -- a cascade that changes a Stonyx range behaves exactly as be
   });
 });
 
-/** One step's real `run:` body, alone, with the given env. */
 function runBody(stepName, env) {
   const step = parseSteps(NEW_PUBLISH).find((st) => st.name === stepName);
   assert.ok(step, `no step named ${stepName}`);
@@ -588,8 +471,6 @@ describe('#60 AC4 -- a cascade that changes no Stonyx range releases nothing and
     const run = await simulateRun(NEW, 'cascadeUnchanged');
 
     assert.equal(run.failure, null, `the publish job must conclude success: ${run.failure && run.failure.stderr}`);
-    // The EXACT list, so a step added later without the gate reds here rather
-    // than quietly running on a no-op cascade.
     assert.deepEqual(run.ran, [
       'Checkout code',
       'Setup pnpm',
@@ -611,16 +492,12 @@ describe('#60 AC4 -- a cascade that changes no Stonyx range releases nothing and
     assert.deepEqual(run.dispatch.dispatched, [], 'no dependent is dispatched');
   });
 
-  // Inverse of the above: a moved range still releases. AC3's differential is
-  // the full statement; this is the gate's own output, read directly.
   test('the release gate opens for a changed cascade and for every non-cascade run', () => {
     assert.deepEqual(runBody(RELEASE_GATE_STEP, { CASCADE_SOURCE: '@stonyx/utils', DEPS_CHANGED: 'true' }).outputKeys, ['release=true']);
     assert.deepEqual(runBody(RELEASE_GATE_STEP, { CASCADE_SOURCE: '@stonyx/utils', DEPS_CHANGED: 'false' }).outputKeys, ['release=false']);
     assert.deepEqual(runBody(RELEASE_GATE_STEP, { CASCADE_SOURCE: '', DEPS_CHANGED: '' }).outputKeys, ['release=true']);
   });
 
-  // A missing report is not "nothing changed". Treating it as such would make
-  // a broken update step a green run that never releases.
   for (const changed of ['', 'TRUE', 'yes', 'false\nrelease=true']) {
     test(`the release gate fails, rather than guessing, when the update step reported ${JSON.stringify(changed)}`, () => {
       const run = runBody(RELEASE_GATE_STEP, { CASCADE_SOURCE: '@stonyx/utils', DEPS_CHANGED: changed });
@@ -630,9 +507,6 @@ describe('#60 AC4 -- a cascade that changes no Stonyx range releases nothing and
     });
   }
 
-  // Every arm of the channel case, read off the gate's own output. The
-  // simulator reaches only alpha/beta/stable; custom/patch/minor/major are the
-  // `workflow_dispatch` channels and were untested (#61, Test Coverage S4).
   for (const channel of ['beta', 'stable', 'custom', 'patch', 'minor', 'major']) {
     test(`the cascade gate hands a ${channel} release's version to cascade.yml`, () => {
       const run = runBody(CASCADE_GATE_STEP, { RELEASE: 'true', CHANNEL: channel, PUBLISHED_VERSION: '0.2.2' });
@@ -645,9 +519,6 @@ describe('#60 AC4 -- a cascade that changes no Stonyx range releases nothing and
     assert.equal(run.status, 0, run.stderr);
     assert.deepEqual(run.outputKeys, ['version=no-cascade']);
   });
-  // No release means no channel was decided (`Determine version bump type` is
-  // skipped), so an empty CHANNEL is the real case; the others show the
-  // release decision wins over any channel.
   for (const channel of ['', 'beta', 'stable', 'patch']) {
     test(`the cascade gate hands the no-cascade token when nothing released (channel ${JSON.stringify(channel)})`, () => {
       const run = runBody(CASCADE_GATE_STEP, { RELEASE: 'false', CHANNEL: channel, PUBLISHED_VERSION: '' });
@@ -678,18 +549,12 @@ describe('#60 AC5 -- cascade.yml input validation is not weakened', () => {
     assert.ok(run.logged.some((l) => /Nothing to cascade for @stonyx\/cron/.test(l)), JSON.stringify(run.logged));
   });
 
-  // The name guard still runs first: the token does not carry an invalid name
-  // past it.
   test('an invalid package name is still refused when the version is the no-cascade token', async () => {
     const run = await runDispatch(NEW_CASCADE, { packageName: '@stonyx/x`id`', publishedVersion: 'no-cascade' });
     assert.notEqual(run.error, null);
     assert.match(run.error.message, /is not a valid npm package name/);
   });
 
-  // Strict equality, not a pattern. Empty is the important one: it is what an
-  // output nobody wrote looks like, and it stays an invalid version
-  // (test/injection-test.js "a published-version that is empty" pins the same
-  // for the guard in isolation).
   for (const near of ['', ' no-cascade', 'no-cascade ', 'NO-CASCADE', 'no-cascade\nmalicious=1', 'no_cascade']) {
     test(`${JSON.stringify(near)} is an invalid version, not the no-cascade token`, async () => {
       const run = await runDispatch(NEW_CASCADE, { packageName: '@stonyx/cron', publishedVersion: near });
