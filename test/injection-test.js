@@ -573,11 +573,6 @@ describe('AC5 -- S3/S5: no expression reaches either github-script body (#32)', 
 // here -- the real `script:` text, a stubbed `github` client that records
 // rather than dispatches, zero dependencies, no network, nothing published.
 describe('AC5 -- S5: cascade.yml refuses hostile input before it dispatches (#32, executed)', () => {
-  /**
-   * Run the real dispatch script the way `actions/github-script` runs it. The
-   * harness lives in test/helpers/cascade-dispatch.js, shared with #60's
-   * cascade-gating suite.
-   */
   const runDispatch = ({ packageName, publishedVersion = '0.1.1-beta.128' }) =>
     runCascadeDispatch(cascade, { packageName, publishedVersion });
 

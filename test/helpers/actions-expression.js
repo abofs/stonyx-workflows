@@ -1,16 +1,3 @@
-// An offline evaluator for the GitHub Actions expression subset this repo's
-// workflows use in `if:` conditions and `${{ }}` templates: `==`, `!=`, `!`,
-// `&&`, `||`, parentheses, string literals, `true`/`false`/`null`, context
-// paths, `contains()`, `always()`, `success()`.
-//
-// GitHub Actions expressions have no offline engine, and a regex over `if:`
-// text pins spellings, not behaviour. This evaluator THROWS on anything outside
-// the subset rather than guessing. Adding a construct to a workflow `if:` that
-// it does not know reds the suites that read it -- extend the evaluator (and
-// its truth table in test/cascade-gating-test.js), do not delete the case.
-//
-// Used by test/cascade-gating-test.js (the job simulator, #60) and
-// test/tarball-guard-test.js (the publish-implies-guard property, #60).
 
 export function tokenize(src) {
   const tokens = [];
@@ -43,9 +30,6 @@ export function tokenize(src) {
   return tokens;
 }
 
-// name -> [arity, implementation]. Arity is exact: GitHub rejects a wrong
-// argument count at parse time, and silently ignoring an extra argument would
-// make `contains(a, 'b', 'zzz')` mean something the workflow does not.
 const FUNCTIONS = {
   contains: [2, (haystack, needle) => {
     for (const v of [haystack, needle]) {
@@ -55,20 +39,12 @@ const FUNCTIONS = {
     }
     return String(haystack ?? '').toLowerCase().includes(String(needle ?? '').toLowerCase());
   }],
-  // The simulation only ever continues past a step that succeeded, so the
-  // status functions are constants here.
   always: [0, () => true],
   success: [0, () => true],
 };
 
 export const truthy = (v) => !(v === false || v === null || v === undefined || v === '' || v === 0);
 
-// A string GitHub MIGHT coerce to a number. The runner trims, then reads a
-// whitespace-only string as 0 and parses the rest with .NET's Double.TryParse
-// (leading sign, decimal point, exponent) plus 0x/0o prefixes -- so ' ', '00',
-// '+0', '.0', '0.' and '0o0' are all 0 there, which a JSON-number regex
-// answered as NaN (#61, Framework round 2). This over-approximates on purpose:
-// anything blank or opening like a number is refused, never answered.
 const MAYBE_NUMERIC = (str) => str.trim() === '' || /^[0-9+\-.]/.test(str.trim());
 
 function loosely(a, b, src) {
@@ -163,14 +139,8 @@ function lookup(path, ctx, src) {
   if (!ROOTS.has(root)) throw new Error(`unknown context root ${root} in: ${src}`);
   let value = ctx[root];
   for (const key of rest) {
-    // Dereferencing a non-object is null in the runner (Operators/Index.cs);
-    // reading a JS own property made `<string>.length` a number (#61,
-    // Framework round 2).
     if (value === null || value === undefined || typeof value !== 'object' || Array.isArray(value)) return null;
     if (!Object.prototype.hasOwnProperty.call(value, key)) {
-      // The runner's context keys are case-insensitive. Rather than guess which
-      // of several case variants it would pick, a key that matches only
-      // case-insensitively is refused.
       const variant = Object.keys(value).find((k) => k.toLowerCase() === key.toLowerCase());
       if (variant !== undefined) {
         throw new Error(`the test evaluator does not resolve ${key} to ${variant} case-insensitively (in: ${src})`);
@@ -182,19 +152,6 @@ function lookup(path, ctx, src) {
   return value ?? null;
 }
 
-/**
- * An `if:` value as written in YAML, with the optional `${{ }}` and the
- * double quotes removed.
- *
- * It takes the one shape `stepScalarOf` returns for an `if:` -- a single-line
- * plain or double-quoted scalar -- and throws on anything else. It used to
- * strip single quotes too, and applied that to block-scalar bodies, where
- * quotes are not YAML syntax but expression text: GitHub read one string
- * literal (always truthy) where this read the gated condition (#61, Framework
- * round 3). A double-quoted value with a backslash in it also throws, because
- * YAML's escape set is not implemented and a half-decoded condition is a
- * different condition from the one GitHub evaluates.
- */
 export function conditionSource(raw) {
   if (raw.includes('\n')) throw new Error(`the test evaluator reads a one-line if: only: ${JSON.stringify(raw)}`);
   let s = raw.trim();
@@ -208,7 +165,6 @@ export function conditionSource(raw) {
   return (wrapped ? wrapped[1] : s).trim();
 }
 
-/** A scalar with `${{ }}` templates in it, as the runner substitutes it. */
 export function interpolate(raw, ctx) {
   let s = raw.trim();
   if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) s = s.slice(1, -1);
