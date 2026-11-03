@@ -1,244 +1,301 @@
 # Release
 
-This document is the canonical release reference for all `@stonyx/*` packages. Individual repos link here rather than duplicating the process.
+Canonical release reference for all `@stonyx/*` packages published through
+this repo's workflows. This revision was re-verified line-by-line against
+the actual files in `.github/workflows/` and `scripts/` as committed on
+`dev` at the time of writing, rather than carried forward from the previous
+copy of this document. Where a claim below could not be checked against
+code in *this* repo — because it concerns GitHub/npm infrastructure
+settings, another repo's files, or historical registry contents — it is
+marked **(unverifiable from this repo's code)** rather than restated as
+fact.
 
-## Release pipeline
+## The release pipeline, step by step
 
-All Stonyx packages follow a 3-stage pipeline. PRs target `dev`; `dev` merges to `main`.
+1. **A PR opens or is pushed into `dev` or `main`.** `npm-publish.yml`'s
+   `Determine version bump type` step sees a `pull_request` event and
+   outputs `type=alpha`. Verified against the step body in
+   `.github/workflows/npm-publish.yml` (the `if`/`elif` chain, lines
+   218–256): a non-empty `cascade-source` is checked first (→ `beta`), then
+   `pull_request` (→ `alpha`), then `push` to `refs/heads/main` (→
+   `stable`), then any other `push` (→ `beta`), then the `version-type`
+   dispatch input, which must be exactly `patch`, `minor`, or `major` or the
+   job fails.
+2. **`Calculate next alpha version`** runs, checks this repo out at
+   `${{ job.workflow_sha }}` into `.stonyx-workflows/`, and calls
+   `scripts/derive-version.mjs`'s `deriveVersion({ channel: 'alpha', ... })`
+   with registry data it fetched via `npm view`. A registry lookup that
+   fails for any reason other than a genuine `404` fails the job rather than
+   silently falling back to a stale local version — verified directly in
+   the inlined `npmView` helper.
+3. **The release artifact is packed and guarded.** `Pack and guard the
+   release artifact` runs `pnpm run prepublishOnly` if declared, `pnpm pack`
+   to `$RUNNER_TEMP/stonyx-pack`, moves the single resulting `.tgz` to
+   `$RUNNER_TEMP/stonyx-release.tgz`, lists its entries with `tar -tzf`, and
+   hard-fails if any entry matches `^package/(.*/)?\.git(/|$)` — verified
+   directly against the step body; no bypass input or per-repo opt-out
+   exists in the file.
+4. **`Publish to NPM (alpha)`** runs `pnpm publish
+   "$RUNNER_TEMP/stonyx-release.tgz" --tag alpha --access public
+   --no-git-checks` when the computed version contains `alpha`. No commit or
+   tag step runs on this channel — alpha publishes and never writes back to
+   the branch (confirmed: no commit/tag step's `if:` condition matches the
+   alpha case).
+5. **`Comment on PR with alpha version`** posts the published version and a
+   `pnpm add` install command to the PR, reading both values from
+   `process.env` rather than interpolating them into the script body —
+   verified.
+6. **Merge to `dev`** (a `push` to a non-`main` branch) runs the same
+   pipeline with `type=beta`: `Calculate next beta version`, the same
+   pack/guard/publish sequence tagged `beta`, then `Commit version bump and
+   create tag (beta)` (commits `package.json`/`pnpm-lock.yaml`, tags
+   `v<version>`, pushes using a token passed through `GIT_CONFIG_*` on the
+   remote-touching commands), then `Create GitHub Release (beta)`.
+7. **Merge `dev` to `main`** runs with `type=stable`: `Bump version
+   (stable)` runs `pnpm version patch --no-git-tag-version` (dropping the
+   prerelease suffix), then the same pack/guard/publish/commit/tag/release
+   sequence, publishing untagged (`latest`).
+8. **A cascade dispatch** (`repository_dispatch` with `client_payload.
+   source_package`) arrives at a dependent repo's own `publish.yml`, which
+   passes `cascade-source` into `npm-publish.yml`. `cascade-source` non-empty
+   forces `type=beta` regardless of the triggering event, and `Update all
+   Stonyx dependencies to latest` runs first to bump every `@stonyx/*`
+   dependency to its latest npm version before `pnpm install
+   --no-frozen-lockfile` and the rest of the beta path. Verified against the
+   step bodies directly.
+9. **On a successful beta or stable publish**, the child repo's own
+   `cascade` job (per the README's child-repo template) is gated on
+   `needs.publish.outputs.version-channel == 'beta' || ... == 'stable'` and
+   calls `cascade.yml`, which validates `package-name` and
+   `published-version` against the npm-name and semver grammars, reads
+   `dependency-map.json`, deduplicates dependents by repo, and sends one
+   `repository_dispatch` per unique dependent repo. Verified against
+   `.github/workflows/cascade.yml` directly, including the validation order
+   (both inputs are checked before `dependency-map.json` is even read).
 
-| Stage | Trigger | npm tag | Example version |
-|---|---|---|---|
-| Alpha | PR push (PRs into `dev` or `main`) | `alpha` | `0.x.y-alpha.N` |
-| Beta | Push to `dev` (a PR merge), or a cascade dispatch | `beta` | `0.x.y-beta.N` |
-| Stable | Push to `main` (a `dev` → `main` merge) | `latest` | `0.x.y` |
+### Known gap: issue #60
 
-The channel is chosen by the `Determine version bump type` step in `.github/workflows/npm-publish.yml`, whose `if`/`elif` chain tests, in this order: a non-empty `cascade-source` gives beta, a `pull_request` event gives alpha, a push to `refs/heads/main` gives stable, any other push gives beta. A stable run bumps with `pnpm version patch` in the `Bump version (stable)` step, which turns `0.x.y-beta.N` into `0.x.y`. A manual `workflow_dispatch` (`patch`/`minor`/`major` or `custom-version`) is a second, non-prerelease path; it is **currently frozen** (see [No rehearsal path](#no-rehearsal-path)).
+Open issue
+[abofs/stonyx-workflows#60](https://github.com/abofs/stonyx-workflows/issues/60)
+(refined, priority-high; not addressed by this documentation change) covers
+two gaps in step 9 above, stated as fact:
 
-Beta and stable releases also create a GitHub release.
+- **An alpha publish never triggers a cascade dispatch**, because the
+  child-repo template's `cascade` job gate only matches `beta`/`stable`
+  channels — confirmed structurally from the template in the README, which
+  this document does not reproduce in full (see
+  [docs/areas/cascade.md](areas/cascade.md)).
+- **No release fires when a cascade run changes no dependency** — logged as
+  a known gap by the issue; this document does not attempt to characterize
+  the underlying mechanism, consistent with this pass being documentation
+  only.
 
-## How it works
+### Where `ci.yml`, `security-audit.yml` and `self-ci.yml` fit
 
-- **Versioning is automatic** -- managed by CI workflows defined in this repo (`stonyx-workflows`). No manual version bumps needed.
-- **PR-based workflow** -- open a PR into `dev`, push commits, and alpha builds publish automatically. Merge to `dev` for beta.
-- **Stable releases** -- publish on every push to `main` (the `refs/heads/main` arm of `Determine version bump type`), that is, when `dev` is merged to `main`. The branch-based channels of [stonyx-workflows#5](https://github.com/abofs/stonyx-workflows/issues/5) (closed) are what the workflow implements today. The manual `workflow_dispatch` path still exists, but `workflow_dispatch` on `abofs/stonyx*` is **frozen at present**, so it cannot currently be executed. This matters beyond release planning, but it does **not** mean the input validators are unreachable. Dispatch is the only trigger that reaches `custom-version`, so that input's validator genuinely cannot be exercised in production today. `version-type` is different: dispatch is its only *intended* trigger, but a malformed `repository_dispatch` carrying no `source_package` reaches it too. Measured against the real `Determine version bump type` body -- `cascade-source` empty, event neither `push` nor `pull_request`, `custom-version` empty -- every branch falls through to the final `else` and the job exits 1 with `::error::version-type must be one of patch, minor, major (got: )`. That validator is live in production today, on the one path that matters, and it is where a malformed cascade dispatch now stops instead of publishing an unbumped version. See the README's *Eight observable behaviour changes*, item 6.
+Neither `ci.yml` nor `security-audit.yml` publishes anything — `ci.yml`
+gates a consumer's PR (tests, build, docs-import check) and
+`security-audit.yml` runs an advisory `pnpm audit` with
+`continue-on-error: true`. `self-ci.yml` is not `workflow_call:` at all; it
+runs this repo's own `pnpm test` on every PR and every push to `main`
+against this repo's own tree, and — because there is no rehearsal
+environment for the reusable workflows themselves (see "No rehearsal path"
+below) — it is the only automated check a change to this repo's workflow
+YAML or `scripts/` passes through before it is live for every consumer at
+`@main`.
 
-## Cascade publishing
+## Registry failures during any publish
 
-When a dependency publishes a beta or stable release, `stonyx-workflows` automatically dispatches rebuilds to downstream dependents. The dependency graph is defined in [`dependency-map.json`](../dependency-map.json) in this repo.
-
-For example, publishing `@stonyx/utils` cascades to all packages that depend on it (`stonyx`, `@stonyx/events`, `@stonyx/cron`, etc.), which in turn cascade to their own dependents.
-
-### A registry lookup that fails now fails the job
-
-A cascade run updates every `@stonyx/*` dependency to its latest published version before it publishes, which means it queries the npm registry once per dependency. **A lookup that fails for any reason other than a genuine `404` now fails the job**, at `Update all Stonyx dependencies to latest`.
-
-This is intended, and it is a change ([stonyx-workflows#32](https://github.com/abofs/stonyx-workflows/issues/32)). The previous behaviour swallowed the failure and carried on, so an npm outage was indistinguishable from "this dependency is not published yet": the cascade skipped the update and published a package pinned to stale dependency ranges, green.
-
-If a cascade goes red here during an npm incident, **there is nothing to fix in the consumer repo** -- re-run the job once the registry is reachable. A genuine `404` still means "not published yet" and is still skipped, so the first publish of a brand-new package is unaffected.
-
-The same `catch`-removal landed in the alpha and beta version derivations, which are not cascade-specific and run far more often. See [Registry failures during any publish](#registry-failures-during-any-publish).
-
-### Registry failures during any publish
-
-`Calculate next alpha version` runs on **every pull request**, and `Calculate next beta version` on **every push to a non-`main` branch**, in all ten consumer repos. Both query npm for the current published versions, and both used to fall back to the local `package.json` version when that query failed for any reason.
-
-That fallback is gone. Measured old versus new against a registry stub returning `ENETUNREACH`: the old body exited 0 with `version=0.1.1-alpha.0`; the new body exits 1. The old behaviour silently restarted the prerelease counter from a stale local version and published over it.
-
-The practical consequence: **a transient npm registry failure now reds publish jobs across every Stonyx repo at once**, rather than publishing a wrong version quietly. Re-run once the registry is reachable. A genuine `404` -- the first publish of a package -- still falls back to the local version, unchanged.
+`Calculate next alpha version` (every PR) and `Calculate next beta version`
+(every push to a non-`main` branch) both query npm for current published
+versions, and both fail the job outright on any registry error other than a
+genuine `404` — verified directly in each step's inlined `npmView` helper
+(the `catch` block checks `/E404|404 Not Found/` against stderr and returns
+`null` only for that case; everything else prints `::error::` and
+`process.exit(1)`). A `404` still means "not published yet" and falls back
+to the local `package.json` version, which is also confirmed in code
+(`latestStable = require("./package.json").version` when `latestRaw ===
+null`).
 
 ## What gets published, and what stops it
 
-`npm-publish.yml` packs the release artifact once, to `$RUNNER_TEMP/stonyx-release.tgz`, inspects that file, and hands that same path to `pnpm publish`. The guarded bytes and the uploaded bytes are one object rather than two packs of the same tree ([stonyx-workflows#39](https://github.com/abofs/stonyx-workflows/issues/39)).
+Verified directly against the `Pack and guard the release artifact` step in
+`npm-publish.yml`:
 
-The step **hard-fails** if the tarball contains anything under `package/.git/`. There is no bypass input and no warn mode, for two reasons. A `skip-` flag reachable through `workflow_call` from ten repos is the guard deleting itself. And warn was already tried by accident: `pnpm publish` printed the file list to the job log on all **21** of the affected runs this pipeline actually made, nobody read it for two months, and the leak was found by a consumer five months later. (23 published tarballs carried `package/.git/config`; two of them -- `@stonyx/cron@0.2.0` and `@stonyx/events@0.1.0` -- were published by `mstonepc` from a workstation, produced no job log, and are the [#42](https://github.com/abofs/stonyx-workflows/issues/42) case this workflow cannot reach at all. They are also the only two whose `.git/config` carries no credential.) npm cannot unpublish past 72 hours, so a wrong tarball is permanent and public.
+- It packs to `$RUNNER_TEMP/stonyx-release.tgz` once; the three `Publish to
+  NPM (alpha|beta|stable)` steps all publish that same file by path, so the
+  guarded bytes and the uploaded bytes are the same object.
+- `pnpm run prepublishOnly` is invoked explicitly before packing, because
+  `pnpm pack` runs `prepack`/`prepare` but not `prepublishOnly`, and a
+  tarball publish runs no lifecycle scripts at all.
+- The denylist regex is `^package/(.*/)?\.git(/|$)`, matched against `tar
+  -tzf`'s entry list; a match at any depth (not just the package root)
+  hard-fails the step with no bypass input and no per-repo opt-out.
+- The step has internal anti-vacuity checks: it refuses to pass if the
+  entry count is below 2, if `package/package.json` is absent from the
+  listing, or if `tar`'s own exit status is non-zero (a truncated archive
+  still lists the entries it reached, so a non-zero exit is treated as
+  "the input to this guard was incomplete," not ignored).
 
-### If your publish reds here
-
-The failure names every offending path and their count. It is telling you that your package would have shipped a `.git` directory to the public registry.
-
-- Narrow the `files` array in `package.json`. Measured on pnpm 9.15.9 (the version this workflow pins by default) and on 10.23.0, both identical:
-
-  | `files` | ships from `.git/` |
-  |---|---|
-  | `["**"]` | **the whole `.git` directory** |
-  | `[".git/**"]` | the whole `.git` directory |
-  | `["*"]` **plus a top-level directory whose name matches a file inside `.git`** | that one file |
-  | `["*"]` on its own | nothing |
-
-  `["*"]` on its own is **not** the cause, so do not stop looking when you find it. What ships a single `.git` file is a **basename collision in pnpm's packlist**: a top-level entry in `files` whose basename matches a file inside `.git` drags that file in. `["*"]` plus a `config/` directory ships `package/.git/config`; a `description/` directory ships `package/.git/description`. That is the original incident exactly -- `@stonyx/cron@0.2.0` declared `config/environment.js` and leaked precisely one `.git` entry, `config`, with no `HEAD`, `refs` or `objects` beside it. npm's own packer does not do this; it is pnpm-specific.
-
-- Add `.git` to `.npmignore` if you do not declare a `files` allowlist. Note the timing: the guard reds on a tarball that **already contains** the path, so `.npmignore` fixes the next run rather than the one in front of you. Re-run the job after the change lands.
-
-**There is no per-repo opt-out**, so a false positive halts publishing across all ten consumers at once. If you believe the guard is wrong, that is a bug in this repo and the fix is a PR here, not a workaround in yours.
-
-Concretely, because the person reading this has a red publish and is choosing between waiting and doing something worse: open a revert PR against `main` in `abofs/stonyx-workflows`, get it merged by anyone with write access there (this repo has no branch protection, and self-merge via PR is the convention), and every consumer picks it up on its next publish run. All ten pin `abofs/stonyx-workflows/.github/workflows/npm-publish.yml@main` unpinned, so there is **no consumer-side change, no re-tag and no version bump** -- re-run the failed job once the revert is on `main`. Do not publish by hand from a workstation to get around it: that is [#42](https://github.com/abofs/stonyx-workflows/issues/42), it is how two of the leaked versions were produced, and nothing in this pipeline can see it.
-
-### The build now runs in the workflow, not in `pnpm publish`
-
-`pnpm pack` runs `prepack` and `prepare` but **not** `prepublishOnly`, and publishing a tarball runs **no** lifecycle scripts at all. So the guard step invokes `pnpm run prepublishOnly` explicitly before it packs. Four consumers build there -- `stonyx`, `stonyx-discord`, `stonyx-events`, `stonyx-logs` -- and without the explicit invocation their `dist/` would be absent from both the inspected tarball and the published one.
-
-Net effect on your package: the same scripts run, once. `publish` and `postpublish` would no longer run, and no consumer declares either.
-
-### This is a regression bar, not a live hole
-
-All ten published `@stonyx/*` packages currently declare a narrow `files` allowlist -- measured against each repo's default branch, every one of them a `dist`-rooted list with no `*` and no `.git` -- so the configuration that produced the original leak exists in zero repos today. The guard exists so it cannot come back, and so that a mechanism nobody has characterised yet is caught by looking at the artifact rather than by predicting the mechanism.
-
-It is **not** an anti-exfiltration control. Deliberate exfiltration needs push access to a `stonyx*` repo, and from there `postinstall` reads `.git/config` directly with no publish involved. That is [#35](https://github.com/abofs/stonyx-workflows/issues/35). Denylist breadth beyond `.git/` is [#41](https://github.com/abofs/stonyx-workflows/issues/41); a maintainer running `npm publish` from a workstation bypasses this workflow entirely and is [#42](https://github.com/abofs/stonyx-workflows/issues/42).
+**Not verifiable from this repo's code:** the historical incident narrative
+in the previous version of this document — specific counts of published
+tarballs that leaked `.git/config` (23 total, 21 credential-bearing), the
+named versions (`@stonyx/cron@0.2.0`, `@stonyx/events@0.1.0`,
+`@stonyx/cron@0.2.1-alpha.0` through `beta.19`), the claim that two of them
+were published by hand from a workstation outside CI, and "four distinct
+tokens, all since revoked" — is forensic history about the actual contents
+of the public npm registry and past publishes. None of that is visible from
+the workflow YAML or scripts in this checkout; confirming it would require
+querying npm's registry metadata and is out of scope for this documentation
+pass (which stays inside this repo's files). Likewise unverifiable from here:
+the claim that "all ten published `@stonyx/*` packages currently declare a
+narrow `files` allowlist" and the specific pnpm packlist basename-collision
+mechanism's measured results (`pnpm 9.15.9` and `10.23.0` behavior table) —
+those describe other repos' `package.json` contents and pnpm's packing
+behavior under conditions not re-run in this session.
 
 ## OIDC trusted publishing
 
-All npm publishes use GitHub OIDC provenance. No npm token is stored in repo secrets -- the publish workflow authenticates directly with npm via GitHub's identity provider.
+Verified from this repo's code: `npm-publish.yml` declares `permissions:
+id-token: write` at the workflow level, `actions/setup-node@v4` is given
+`registry-url: 'https://registry.npmjs.org'`, and no `NPM_TOKEN` or any npm
+auth token is referenced anywhere in the file — the only secret the
+workflow declares is `CASCADE_PAT`, used only for cascade-mode checkout and
+push. This is consistent with the document's claim that no npm token is
+stored in repo secrets and publishing relies on GitHub OIDC.
 
-Publishing a pre-packed tarball rather than a directory does not affect this. `pnpm publish` **never** publishes from a directory: both of its branches hand `npm publish <a .tgz>` to the npm CLI, in 9.15.9 as well as 10.x, and `libnpmpublish` reconstructs the package spec from the manifest rather than from the CLI argument, so the provenance path never sees which form was used. Every `@stonyx/*` package has always been a tarball publish, so this PR changes which tarball, not the mode.
+**Not verifiable from this repo's code:** whether npm Trusted Publishing is
+actually configured correctly on npmjs.com for each package (the
+README itself lists it as a prerequisite, i.e. an action taken outside this
+repo); the specific attestation claims from the previous document (nine of
+ten packages attest their newest version, `@stonyx/discord` has "never
+produced an attestation in 109 versions," `@stonyx/cron`'s `_npmUser` having
+a `trustedPublisher` block) — these are facts about npm registry metadata
+for other repos' published packages, not about code in this repo, and were
+not re-queried in this session. The general claim that "the npm OIDC
+identity is repo-bound and package-bound" is a property of npm's trusted
+publishing design and GitHub's OIDC token claims, not something this repo's
+YAML asserts or enforces itself — it is asserted by the doc, plausible given
+how OIDC trusted publishing is documented to work, but not verifiable by
+reading this repo's code.
 
-Attestation is a separate question and the answer is **not** "all of them". Measured against the registry per-version across all ten packages: nine attest their newest version, and **`@stonyx/discord` has never produced an attestation in 109 versions**, including its newest on every dist-tag -- `dist.signatures` present, `dist.attestations` absent -- while `@stonyx/cron` from the same workflow has both. Its `_npmUser` is `GitHub Actions` with a `trustedPublisher` block and its job was green. That is a live instance of [#43](https://github.com/abofs/stonyx-workflows/issues/43), *"Provenance auto-enable fails silently -- a publish can ship unattested with the job green"*, and it means **a green publish job is not evidence that provenance was produced**. Check the version, not the job.
+## The OIDC / `CASCADE_PAT` threat model
 
-### What the OIDC identity is bound to, and what it is not
+Verified from this repo's code: the npm-publishing identity (OIDC, scoped by
+`id-token: write` and npm's trusted-publishing configuration) is a different,
+narrower credential from `CASCADE_PAT`. `CASCADE_PAT` is the only secret
+`cascade.yml` declares (`required: true`) and the only secret
+`npm-publish.yml` declares (`required: false`, used only when
+`cascade-source` is non-empty, for the main checkout's `token:` and for
+`GIT_REMOTE_TOKEN` in the two push steps). `cascade.yml`'s dispatch step
+passes it explicitly as `github-token:` to `actions/github-script@v7` rather
+than relying on a persisted credential. This matches the previous document's
+claim that `CASCADE_PAT` is "the credential with org-wide reach" as far as
+this repo's own code goes.
 
-This is the part that gets re-derived wrongly, so it is written down here rather than left in a PR body.
+**Not verifiable from this repo's code:** the actual grant/scope of
+`CASCADE_PAT` as configured in GitHub's org secrets settings, whether it is
+in fact granted to "all Stonyx repos" as the README's "CASCADE_PAT Setup"
+section instructs, and the actual OIDC trust relationship configured on
+npmjs.com for each package. All three are infrastructure/settings, not code
+in this checkout, and operating or inspecting them is out of scope for this
+documentation pass.
 
-**The npm OIDC identity is repo-bound and package-bound.** Confirmed from the npm provenance attestations on `@stonyx/orm`, `@stonyx/cron` and `@stonyx/oauth`, each of which names one repo and one workflow. A compromised publish job in repo A can publish package A and nothing else. It **cannot** publish as an arbitrary `@stonyx/*` package; anyone who can land a commit in repo A could already publish package A by committing malicious source, so the npm capability is not widened by anything reachable from a job in that repo.
+## Checkout credential handling
 
-**`CASCADE_PAT` is the credential with org-wide reach.** It is an org-level PAT with `repo` scope granted to every Stonyx repo, and `cascade.yml` runs `repos.createDispatchEvent()` under it. That is why `cascade.yml` validates both of its inputs and refuses to dispatch on a value that fails, and why its guards are held to a higher bar than the publish path's. It is also the credential that reaches the publish job's checkout in cascade mode -- see [Git credentials in the publish job](#git-credentials-in-the-publish-job).
+Verified directly against every `actions/checkout` call in all five workflow
+files: `ci.yml` (two checkouts), `npm-publish.yml` (two checkouts),
+`cascade.yml` (one checkout), `security-audit.yml` (one checkout), and
+`self-ci.yml` (one checkout) **all** set `persist-credentials: false`. In
+`npm-publish.yml`, the two steps that genuinely need to reach a git remote
+(`Commit version bump and create tag (beta|stable)`) are instead handed a
+token through a step-level `env: GIT_REMOTE_TOKEN`, using the same
+expression the checkout would have used (`(inputs.cascade-source != '' &&
+secrets.CASCADE_PAT) || github.token`), and apply it to the `pull`/`push`
+git invocations via `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/
+`GIT_CONFIG_VALUE_0` set per command.
 
-The npm identity is bound. The GitHub identity is not. Do not reason about one from the other.
+This matches the previous document's residual-exposure claim exactly: because
+`GIT_REMOTE_TOKEN` is a step-level `env:`, the raw token is in the process
+environment of **all five** `git` invocations in each of those two steps
+(`add`, `commit`, `tag`, `pull`, `push`), not only the two that use the
+encoded `GIT_CONFIG_VALUE_0` form. Confirmed by reading the step bodies
+directly — this is not a subtle inference, the `env:` block is scoped to the
+whole step in the YAML.
 
-## Git credentials in the publish job
+**Not verifiable from this repo's code:** the historical claim that this
+exact gap already happened and leaked 21 real credential-bearing tarballs —
+see "What gets published" above; that is the same forensic-history caveat.
 
-**No `actions/checkout` in this repo persists its credential.** Every checkout sets `persist-credentials: false`, and the only two steps that reach a git remote are handed a token explicitly at their point of use.
+## No rehearsal path
 
-### What was wrong
+Verified from this repo's code: `npm-publish.yml` has no `on:
+workflow_dispatch` of its own (it is `workflow_call`-only, so dispatch, if
+any, lives in a *consumer's* `publish.yml`, not here), and no workflow file
+in this repo references a canary or staging npm org. `self-ci.yml` running
+`pnpm test` against this repo's own tree (confirmed: `pnpm install
+--frozen-lockfile` then `pnpm test`, no other step) is, as far as this
+repo's own CI configuration goes, the only automated gate before a merge to
+`main` takes effect for every consumer pinned at `@main`.
 
-`actions/checkout@v4` defaults `persist-credentials: true`, which writes an `http.<host>/.extraheader` Authorization entry into `.git/config`. In cascade mode `npm-publish.yml` checked out with `CASCADE_PAT` -- the org-wide `repo`-scoped PAT -- and then ran **your** code in the same job, with the credential still on disk. Four kinds of step do that, at ten call sites in the current `npm-publish.yml`:
+**Not verifiable from this repo's code:** whether `workflow_dispatch` is
+actually "frozen" at the organization or repo-settings level on
+`abofs/stonyx*` repos, and whether an `stonyx-canary` npm org does or does
+not exist. Both are external state (GitHub/npm account configuration), not
+something expressed in this repo's YAML or scripts, and checking either is
+out of scope for a documentation-only pass confined to this repo's working
+directory.
 
-| step | your hooks it runs | sites |
-| --- | --- | --- |
-| `pnpm install` | `preinstall`, `install`, `postinstall` | 1 |
-| `pnpm test` | your test code itself | 1 |
-| `pnpm version` | `preversion`, `version`, `postversion` | 5 |
-| `pnpm publish` | `prepublishOnly`, `prepack`, `prepare` | 3 |
+## The publish workflow fetches a script into your workspace
 
-Any of them could read `.git/config`. The issue was originally filed naming only the first two; it was later widened to the rest, and that is what rules out the "just split the job" fix -- `pnpm publish` **is** consumer code, so a split still stands the PAT next to lifecycle scripts. Push access to any one of the **twelve** `abofs/stonyx*` repos therefore yielded a credential reaching all of them, including repos the actor could not push to. Twelve, not eleven: the count that gets re-derived here is the ten published packages plus this repo, which omits the private `abofs/stonyx-dashboard`. It publishes nothing, so it is easy to miss, but it consumes `ci.yml@main` and `security-audit.yml@main` and so is inside the blast radius like everything else. (It declares no git-protocol dependencies either, so the consumer-impact assessment below holds for it unchanged.) No injection was required; that was the workflow operating exactly as designed ([stonyx-workflows#35](https://github.com/abofs/stonyx-workflows/issues/35)).
+Verified directly: the `Checkout stonyx-workflows (for version derivation
+script)` step's `if:` condition is `steps.version-type.outputs.type ==
+'alpha' || steps.version-type.outputs.type == 'beta'` — alpha and beta paths
+only, as claimed. It checks this repo out to `.stonyx-workflows/` at
+`${{ steps.workflows-ref.outputs.sha }}`, itself read from `${{
+job.workflow_sha }}` with a hard failure (`::error::job.workflow_sha is
+empty...`) if that is ever empty. `Remove stonyx-workflows checkout` runs
+with `if: always()` immediately after the alpha/beta version-calculation
+steps and well before `Pack and guard the release artifact` or any `Publish
+to NPM` step — confirmed by step order in the file — so the checked-out
+tree cannot reach the packed tarball via this mechanism regardless of a
+consumer's own `files` allowlist.
 
-**It had already happened.** 21 published `@stonyx/cron` versions (`0.2.1-alpha.0`, `0.2.1-beta.0` through `beta.19`) shipped `package/.git/config` containing a real credential to the **public npm registry** -- four distinct tokens, all since revoked.
+## Summary of discrepancies / unverifiable claims found while re-checking
 
-Two sets get conflated here, so they are separated once and for all. From a sweep of all 1,389 published tarballs across the ten published Stonyx packages -- nine `@stonyx/*` plus the unscoped core package `stonyx`:
+None of the previous document's claims about this repo's own workflow logic
+were found to be *incorrect* against the current code — every mechanism
+claim above was confirmed by reading the actual step bodies. What changed in
+this rewrite is explicitness about **what kind of claim each statement is**.
+Flagged as asserted-but-unverifiable-from-this-repo's-code (all are
+infrastructure, other-repos'-files, or historical-registry-state claims,
+never contradictions of the code):
 
-| set | count | which |
-| --- | --- | --- |
-| ships `package/.git/config` at all | 23 | the 21 in the next row, plus `@stonyx/cron@0.2.0` and `@stonyx/events@0.1.0` |
-| **credential-bearing** | **21** | all `@stonyx/cron`: `0.2.1-alpha.0`, `0.2.1-beta.0` through `beta.19` |
-| metadata-only, no credential in any form | 2 | `@stonyx/cron@0.2.0`, `@stonyx/events@0.1.0` |
+1. The specific leaked-credential incident history (tarball counts, named
+   versions, "four distinct tokens, all since revoked," workstation-publish
+   claims) — npm registry/git history forensics.
+2. "All ten published `@stonyx/*` packages currently declare a narrow
+   `files` allowlist" and the pnpm-packlist basename-collision measurement
+   table — other repos' `package.json` contents and a pnpm-version-specific
+   behavior not re-run in this session.
+3. npm provenance/attestation specifics (`@stonyx/discord`'s 109 versions,
+   the `@stonyx/cron` `trustedPublisher` block, "nine of ten attest") — npm
+   registry metadata for packages this repo does not contain.
+4. Whether `workflow_dispatch` is actually frozen at the org/repo-settings
+   level on `abofs/stonyx*`, and whether an `stonyx-canary` npm org exists —
+   external GitHub/npm account configuration.
+5. The actual grant/scope of `CASCADE_PAT` as an org secret, and the actual
+   OIDC trust configuration for npm Trusted Publishing on npmjs.com — both
+   are settings in GitHub's and npm's own UI, not expressed in this repo's
+   YAML.
+6. The general npm-OIDC-identity-is-repo-and-package-bound claim — a
+   property of npm's trusted-publishing design, not something this repo's
+   workflow code itself enforces or could be used to verify.
 
-The two metadata-only artifacts were packed from a **workstation**, not from CI: `git@github.com:` SSH remotes, local branch names, and GitKraken/VS Code keys (`gk-last-accessed`, `vscode-merge-base`). Both were opened and dumped in full -- zero `http.extraheader`, zero `AUTHORIZATION`, no credential of any kind. **21 is the security number**, and the "four distinct tokens, all since revoked" accounting covers every credential-bearing artifact that exists. There are no unchecked artifacts.
-
-**What spared the other packages was not a `files` allowlist.** The published tarballs falsify that in both directions: the leaking `@stonyx/cron` versions declared `files: ["*"]`, which excludes nothing, while `@stonyx/discord@0.1.0` and `@stonyx/sockets@0.1.0` declared the identical `["*"]` and stayed clean. The real mechanism, established on [stonyx-workflows#47](https://github.com/abofs/stonyx-workflows/pull/47), is a **basename collision in pnpm's packlist**: a top-level path in `files` whose basename matches a file inside `.git` drags that file in.
-
-```
-files: ["*"]                  -> 0 .git entries
-files: ["*"] + config/        -> package/.git/config
-files: ["*"] + description/   -> package/.git/description
-files: ["**"] or [".git/**"]  -> the whole .git
-```
-
-Identical on pnpm 9.15.9 and 10.23.0; npm's own packer does not do this. `@stonyx/cron` declares `config/environment.js`, so it shipped exactly the one `.git` entry named `config`; `discord` and `sockets` had no colliding top-level directory. So the margin was narrower than "an allowlist" and stranger -- it turned on whether a repo happened to have a directory sharing a name with a file in `.git`.
-
-**A narrow allowlist *would* have prevented it, and is the one thing protecting these packages today.** `@stonyx/cron@0.2.1-beta.96`, the current beta, declares `files: ["dist", "config", "README.md"]` -- `config` is precisely the colliding basename -- and packing that exact list against a real `.git` on pnpm 10.23.0, with no `.npmignore` present, ships **zero** `.git` entries: the collision needs the `*` glob to expand, so an explicit top-level path does not drag its namesake in. That is one layer, not two. The `.npmignore` those repos carry spells the rule `.git` (nine of the ten) or `.git/` (one), and under `files: ["**"]` neither excludes anything -- only `.git/**` does, and no repo uses it ([stonyx-workflows#49](https://github.com/abofs/stonyx-workflows/issues/49)). **A `files` list narrow enough to hold is still a per-consumer setting that can change without anything here noticing**, so the durable control is the one this change makes: never write a credential into `.git/config` in the first place.
-
-### What happens now
-
-- **The cascade checkout** (`npm-publish.yml`) and **the dependency-map checkout** (`cascade.yml`) both set `persist-credentials: false`. `cascade.yml`'s dispatch step already passed the PAT explicitly as `github-token:`, so nothing there read it from disk in the first place.
-- **The ambient-token checkouts** in `ci.yml` (the consumer tree and the docs-import tooling tree), `self-ci.yml` and `security-audit.yml` set it too. None of them reads git credentials, and each job runs `pnpm install` lifecycle scripts, so a persisted `GITHUB_TOKEN` was a live credential sitting next to consumer code for no benefit.
-- **The two steps that push** -- `Commit version bump and create tag (beta)` and `(stable)` -- receive the token through a step `env:` as `GIT_REMOTE_TOKEN`, using the **same expression the checkout uses**, so the identity that pushes is unchanged. They hand it to git through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0`, set **per command** rather than exported. Nothing is written to disk, the encoded credential outlives no process but the one it is prefixed to, and the credential never appears in a process argv. Read the next paragraph before concluding anything stronger than that.
-
-**`git add`, `git commit` and `git tag` in those same steps do get the raw token too.** `GIT_REMOTE_TOKEN` is a step-level `env:`, so it is in the environment of every process in both steps -- all five `git` invocations, not the two remote ones. What the per-command form withholds from the local three is `GIT_CONFIG_VALUE_0`, which is a base64 *encoding* of a token they already hold in plaintext. Withholding the encoding is not containment, and an earlier draft of this section said it was.
-
-This is asserted behaviourally -- `test/checkout-credentials-test.js` executes both real `run:` bodies against a `git` stub that records each invocation's argv *and* environment, and pins `GIT_REMOTE_TOKEN === 'SENTINEL-PAT'` on `add`, `commit` and `tag` explicitly. The per-command `GIT_CONFIG_*` form is still worth keeping: it is what stops the credential landing in a config file or a process argv. It just does not scope the secret to two of the five processes.
-
-### What this means for a consumer
-
-Nothing changes in your `publish.yml`, and nothing changes about which identity pushes your release commit or tag.
-
-If your repo has a build step that expects to run authenticated git commands out of the checked-out workspace -- a `postinstall` that fetches a private git dependency, say -- it will now fail, and it should: that step was reading a credential it was never meant to have. Declare the dependency through the registry instead.
-
-### Residual exposure, stated plainly
-
-**The raw PAT is in the environment of both push steps in full, for the whole step.** A consumer-supplied git hook fired by *any* of `commit`, `tag`, `pull` or `push` can read it -- `pre-commit`, `prepare-commit-msg`, `commit-msg` and `post-commit` included, not only the pre-push ones. Two same-class paths are open and worth naming rather than leaving implicit: a `$GITHUB_PATH` append from an earlier lifecycle script shimming `git`, and `/proc/<pid>/environ` on the runner.
-
-This does **not** enlarge what an attacker can reach. Anyone able to repoint `core.hooksPath` already gets the token from the `pull`/`push` hooks, so the reachable credential set is unchanged; the window is five processes across two steps rather than two. And it remains far smaller than what it replaces -- a file on disk readable by every step for the whole job, across all ten consumer-code execution sites.
-
-Closing it means not holding a long-lived org-wide PAT in the job at all, which is the only thing that closes all three paths at once. That is [stonyx-workflows#36](https://github.com/abofs/stonyx-workflows/issues/36) -- a GitHub App installation token scoped to the specific dependent repos, minted per run -- which is on hold pending an owner decision and is **not** implemented here.
-
-### Runbook: the cascade push fails
-
-This change moves where a git credential failure surfaces, so it gets a runbook like the registry failures above. It applies to every release path except **alpha**, which publishes and never commits, so it has no push step to fail. Both commit steps gate on the computed version string rather than the release type, so `custom`, `patch`, `minor` and `major` all land on the stable one.
-
-**How to recognise it.** The job reds at `Commit version bump and create tag (beta)` or `Commit version bump and create tag (stable)`, on the `authed_git pull` or `authed_git push` line, typically with a `403`/`401` or `could not read Username`. Two things make this different from before:
-
-- **It surfaces at the end of the job rather than the start.** Previously the credential was written into `.git/config` at `Checkout code` (step 1 of 26), so a bad push credential could fail there, before anything was published. Now the checkout succeeds on a token it discards, and the first thing that exercises the push credential is the push step itself (step 22 or 24 of 26) -- after the package is already on the registry.
-- **`Checkout code` being green tells you nothing about the push credential.** They are the same expression, but the checkout only needs read access to one repo.
-
-Distinguish it from the failure that looks identical but is not credential-related: `authed_git pull --rebase --autostash` can also red on a genuine rebase conflict or a non-fast-forward, which is a branch-state problem and needs no credential work at all. Read the message before assuming the credential.
-
-**What state the repo and the registry are in when it fails.** This is the part to get right before touching anything:
-
-| | state |
-| --- | --- |
-| **npm** | **Already published.** `Publish to NPM (beta)` / `(stable)` run *before* the commit step. The version is on the registry under its dist-tag. |
-| the version-bump commit | Created **locally on the runner only**. Never pushed; discarded when the runner is torn down. |
-| the tag | Same -- created locally, never pushed. |
-| the GitHub Release | Not created. That step runs after the commit step and is skipped. |
-| downstream cascade | **Not dispatched.** A consumer's `cascade` job declares `needs: publish`, so a failed publish job skips it and no dependent repo is rebuilt. |
-
-So the failure mode is: **the registry moved and the repo did not.** `main` still carries the pre-bump version in `package.json` and has no tag for what was published.
-
-**What to check, in order.**
-
-1. Read the actual git error. A `403` on push to a repo the identity can read is a permissions/expiry problem; a rebase conflict is not.
-2. Confirm whether the run was in cascade mode (`cascade-source` non-empty). Cascade runs push as `CASCADE_PAT`; ordinary runs push as the ambient `github.token`. Those have different failure causes, and only the first is org-wide.
-3. If cascade mode: the org PAT is the usual suspect -- expiry, a revoked grant, or a repo removed from its scope. That is an owner action; do not attempt to read or rotate the secret from a job.
-4. If not cascade mode: check branch protection on the target branch. `github.token` cannot push to a branch whose protection excludes it, and that is a repo setting change, not a workflow bug.
-5. Confirm the identity was not silently changed. `GIT_REMOTE_TOKEN` must bind the same expression as the checkout's `token:`; `test/checkout-credentials-test.js` reds if it drifts, so a green `self-ci.yml` on `main` already rules this out for the shipped workflow.
-
-**How to recover.**
-
-**Fix the credential or the branch state first.** Nothing below works until the push does. Then the two paths recover differently, because they derive their versions differently:
-
-- **Beta.** Do not re-run expecting the same version. `Calculate next beta version` derives off the registry -- `deriveVersion` takes the highest published prerelease and adds one -- so a re-run publishes `beta.N+1` and pushes the commit and tag for **that**. `beta.N` stays on the registry as a version with no tag. That is the normal close: one re-run, and the repo and registry are consistent going forward.
-- **Stable.** A re-run reds at `Publish to NPM (stable)` instead. `Bump version (stable)` runs `pnpm version patch --no-git-tag-version` against the **local** `package.json`, which never moved because the push failed, so it recomputes the version that is already on the registry and npm refuses to publish it twice. Recover by landing the bump in the repo by hand: set `package.json` to the published version in a normal PR and tag it `v<version>`, matching the spelling the workflow uses. Do not create a tag the workflow will later try to create for itself.
-
-**Re-dispatch the cascade if the release mattered downstream.** Nothing dispatched, so dependents are still pinned to the previous version. They pick it up on their next cascade or publish; if that is too slow, the owner can dispatch `cascade-publish` to the dependents directly.
-**Nothing needs to change in a consumer's `publish.yml`** in any of these cases.
-
-### The guard
-
-`test/checkout-credentials-test.js` fails if any `actions/checkout` taking a token other than the ambient `github.token` omits `persist-credentials: false`. It reads raw text rather than the diagnostics YAML reader, fails closed on any shape it does not understand, and treats an unrecognised token spelling as privileged. Note that the real cascade expression *contains* the literal `github.token`; a substring test for "just the ambient token" would exempt precisely the checkout this is about.
-
-## Workflow consumption
-
-All Stonyx repos reference workflows from this repo via:
-
-```
-uses: abofs/stonyx-workflows/.github/workflows/<workflow>.yml@main
-```
-
-Changes to workflows take effect immediately when merged to `main`. Coordinate breaking changes with downstream repos before merging.
-
-### No rehearsal path
-
-There is **no staging path for these workflows**. Every consumer references `@main` with no pin and no opt-in, so a merge here is a deploy to all of them at once.
-
-Nor can a change be rehearsed before it lands: `workflow_dispatch` on `abofs/stonyx*` is frozen, and the `stonyx-canary` npm org does not exist, so there is no way to drive a real publish against a candidate revision.
-
-**`self-ci.yml`'s `node:test` suite is therefore the only gate.** A change that is not covered by an executed test in `test/` is not covered at all, and three surfaces need a real runner and a consumer repo, so the suite cannot reach them: OIDC publishing, `repository_dispatch` delivery, and a cascade end to end -- and the rollback for a bad merge is a revert PR, after the fact, with whatever published in between already on the registry. Weigh new workflow behaviour accordingly.
-
-### The publish workflow fetches a script into your workspace
-
-`npm-publish.yml` does not carry all of its logic inline. On the **alpha and beta paths only**, it checks `abofs/stonyx-workflows` out into `.stonyx-workflows/` inside your repo's workspace, imports `scripts/derive-version.mjs` from it to compute the next prerelease version, and removes the directory again before any `pnpm publish` step runs.
-
-Two consequences worth knowing:
-
-- **The ref you pin governs the script too.** The checkout is pinned to `${{ job.workflow_sha }}` -- the exact commit your `uses:` line resolved to. Pin the workflow to `@main` and you get `main`'s derivation logic; pin it to a tag or a SHA and you get that commit's. The workflow and the script are always one artifact, never two independently-resolved ones.
-- **`.stonyx-workflows/` exists transiently in your workspace** between the version bump and the cleanup step. It is removed before publishing, so it cannot reach your tarball, and every current Stonyx package also declares a `files` allowlist that does not list it. Treat the cleanup as the control anyway, not the allowlist: it is asserted to run before the first `pnpm publish` step in `test/workflows-test.js`, whereas an allowlist is a per-consumer setting that can change without anything here noticing. If you drop yours, the cleanup step is all that is left.
-
-This requires no change to any consumer's `publish.yml`.
+Everything else in this document — the version-channel selection logic, the
+release-artifact `.git` denylist, the `CASCADE_PAT` usage sites, the
+checkout `persist-credentials: false` pattern, the step-level `env:` token
+exposure, the alpha/beta script-fetch-and-cleanup mechanism, and the
+cascade-dispatch validation order — was checked directly against the
+current `.github/workflows/*.yml` and `scripts/*.mjs` files in this
+checkout and against the `pnpm test` run described in
+[docs/index.md](index.md#build-run-test) (472 passing, 0 failing).
